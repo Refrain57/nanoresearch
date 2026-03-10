@@ -18,9 +18,45 @@ from nanobot.research.types import (
     SubQuestion,
 )
 
-# High-credibility TLDs and domains
-_HIGH_CREDIBILITY = {".gov", ".edu", ".org", "arxiv.org", "nature.com", "sciencedirect.com", "pubmed.gov", "scholar.google.com"}
-_MEDIUM_CREDIBILITY = {"medium.com", "substack.com", "dev.to", "stackoverflow.com", "github.com", "zhihu.com"}
+# Lazy import reranker to avoid dependency issues
+_reranker_factory = None
+
+
+def _get_reranker_factory():
+    """Lazy import reranker factory."""
+    global _reranker_factory
+    if _reranker_factory is None:
+        from nanobot.rag.libs.reranker.reranker_factory import RerankerFactory
+        _reranker_factory = RerankerFactory
+    return _reranker_factory
+
+# High-credibility TLDs and domains (open access / no paywall)
+_HIGH_CREDIBILITY = {
+    ".gov", ".edu", ".org",
+    "arxiv.org", "arxiv.org/abs", "arxiv.org/pdf",
+    "nature.com", "pubmed.gov", "scholar.google.com",
+    "github.com", "github.com/",  # open source repos
+    "stackoverflow.com", "stackexchange.com",
+    "dev.to", "medium.com", "blog",
+}
+# Medium credibility (mostly accessible)
+_MEDIUM_CREDIBILITY = {
+    "medium.com", "substack.com", "dev.to",
+    "stackoverflow.com", "stackexchange.com",
+    "npmjs.com", "pypi.org", "crates.io",
+    "huggingface.co", "paperswithcode.com",
+}
+# Known paywall/login required sites - lower base score
+_RESTRICTED_SITES = {
+    "zhihu.com",  # requires login
+    "reddit.com",  # requires login
+    "dl.acm.org",  # paywall
+    "ieeexplore.ieee.org",  # paywall
+    "sciencedirect.com",  # paywall
+    "springer.com",  # paywall
+    "wiley.com",  # paywall
+    "linkedin.com",  # requires login
+}
 
 # Blacklisted domains that are never relevant for research
 _BLACKLIST_DOMAINS = {
@@ -150,14 +186,43 @@ class SearchOrchestrator:
         self._subq_sem = asyncio.Semaphore(self._MAX_CONCURRENT_SUBQ)
         self._fetch_sem = asyncio.Semaphore(self._MAX_CONCURRENT_FETCH)
 
-    async def search(self, plan: ResearchPlan) -> list[SearchResult]:
+        # Initialize reranker if enabled
+        self._reranker = None
+        if config.rerank_enabled and config.rerank_provider != "none":
+            self._init_reranker()
+
+    def _init_reranker(self) -> None:
+        """Initialize reranker based on config."""
+        try:
+            RerankerFactory = _get_reranker_factory()
+
+            # Create a minimal settings object for the reranker
+            class MinimalSettings:
+                def __init__(self, config):
+                    self.rerank = type('RerankSettings', (), {
+                        'enabled': config.rerank_enabled,
+                        'provider': config.rerank_provider,
+                        'model': config.rerank_model,
+                        'top_k': config.rerank_top_k,
+                    })()
+
+            settings = MinimalSettings(self.config)
+            self._reranker = RerankerFactory.create(settings)
+            logger.info("SearchOrchestrator: initialized reranker with provider={}, model={}",
+                       self.config.rerank_provider, self.config.rerank_model)
+        except Exception as e:
+            logger.warning("SearchOrchestrator: failed to initialize reranker: {}, falling back to scoring only", e)
+            self._reranker = None
+
+    async def search(self, plan: ResearchPlan) -> tuple[list[SearchResult], list[dict]]:
         """Run parallel searches for all sub-questions.
 
         Args:
             plan: ResearchPlan with sub-questions.
 
         Returns:
-            Deduplicated, scored list of SearchResults.
+            Tuple of (deduplicated results, rerank details).
+            rerank_details is a list of {"url": ..., "original_score": ..., "rerank_score": ...}
         """
         logger.info("SearchOrchestrator: searching {} sub-questions", len(plan.sub_questions))
 
@@ -174,7 +239,66 @@ class SearchOrchestrator:
         # Deduplicate by URL
         deduped = self._dedupe(all_results)
         logger.info("SearchOrchestrator: {} raw results, {} after dedup", len(all_results), len(deduped))
-        return deduped
+
+        rerank_details: list[dict] = []
+
+        # Apply reranking if enabled
+        if self._reranker and deduped:
+            deduped, rerank_details = self._rerank_results(plan.topic, deduped)
+
+        return deduped, rerank_details
+
+    def _rerank_results(self, query: str, results: list[SearchResult]) -> tuple[list[SearchResult], list[dict]]:
+        """Apply reranker to search results.
+
+        Args:
+            query: The original research topic (used as rerank query).
+            results: List of SearchResult to rerank.
+
+        Returns:
+            Tuple of (reranked results, rerank details).
+            rerank_details is a list of {"url": ..., "original_score": ..., "rerank_score": ...}
+        """
+        rerank_details: list[dict] = []
+
+        try:
+            # Convert SearchResult to dict format expected by reranker
+            candidates = [
+                {"id": r.url, "text": r.content, "title": r.title, "url": r.url, "original_score": r.final_score}
+                for r in results
+            ]
+
+            # Run reranker (synchronous call)
+            reranked = self._reranker.rerank(query, candidates, top_k=self.config.rerank_top_k)
+
+            # Map back to SearchResult with updated scores
+            url_to_result = {r.url: r for r in results}
+            final_results: list[SearchResult] = []
+
+            for item in reranked:
+                url = item.get("url") or item.get("id")
+                if url in url_to_result:
+                    sr = url_to_result[url]
+                    original_score = sr.final_score
+                    rerank_score = item.get("rerank_score", 0.0)
+                    # Update final_score with rerank_score
+                    sr.final_score = rerank_score
+                    final_results.append(sr)
+
+                    # Record rerank detail
+                    rerank_details.append({
+                        "url": url,
+                        "title": sr.title[:50] if sr.title else "",
+                        "original_score": round(original_score, 3),
+                        "rerank_score": round(rerank_score, 3),
+                    })
+
+            logger.info("SearchOrchestrator: reranked {} results", len(final_results))
+            return final_results, rerank_details
+
+        except Exception as e:
+            logger.warning("SearchOrchestrator: reranking failed: {}, using original order", e)
+            return results, rerank_details
 
     async def _search_sub_question(self, sq: SubQuestion) -> list[SearchResult]:
         """Search a single sub-question across all keywords."""
