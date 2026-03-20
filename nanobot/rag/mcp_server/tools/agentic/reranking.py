@@ -40,7 +40,7 @@ class RerankResultsTool:
             from nanobot.rag.core.settings import get_settings
 
             settings = get_settings()
-            self._reranker = CoreReranker(settings.reranker.model_dump())
+            self._reranker = CoreReranker(settings)
             self._initialized = True
             logger.info("Reranker initialized for agentic tool")
         except Exception as e:

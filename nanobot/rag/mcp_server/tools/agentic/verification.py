@@ -39,7 +39,7 @@ class VerifyResultsTool:
 ## 分析要求
 1. 判断这些结果是否能完整回答用户的问题
 2. 评估每个结果的相关性
-3. 如果不能完全回答，建议改进的查询方向
+3. 如果不能完全回答，必须给出具体的补充检索建议
 
 ## 输出格式 (JSON)
 请输出一个JSON对象，格式如下：
@@ -52,15 +52,23 @@ class VerifyResultsTool:
     {{"index": 0, "relevant": true, "reason": "相关原因"}},
     ...
   ],
-  "suggestions": {{
-    "refined_queries": ["改进查询建议1", "改进查询建议2"],
-    "missing_aspects": ["缺失的方面1"],
-    "additional_searches": ["建议的额外搜索"]
-  }}
+  "missing_aspects": ["缺失的方面1", "缺失的方面2"],
+  "next_actions": [
+    {{
+      "action": "search",
+      "query": "具体补充查询词",
+      "strategy": "sparse/dense/hybrid",
+      "priority": "high/medium/low",
+      "reason": "为什么需要这个查询"
+    }}
+  ]
 }}
 ```
 
-请只输出JSON，不要有其他内容。"""
+请只输出JSON，不要有其他内容。
+
+**重要**：如果 confidence < 0.7，必须提供 next_actions。
+"""
 
     def __init__(self):
         self._llm_client = None
@@ -73,14 +81,15 @@ class VerifyResultsTool:
 
         try:
             from nanobot.rag.core.settings import get_settings
+            from dataclasses import asdict
 
             settings = get_settings()
             # Try to get LLM configuration
             if hasattr(settings, "llm") and settings.llm:
-                self._init_llm_client(settings.llm.model_dump())
+                self._init_llm_client(asdict(settings.llm))
             elif hasattr(settings, "embedding") and settings.embedding:
                 # Fallback to embedding provider config
-                self._init_llm_client(settings.embedding.model_dump())
+                self._init_llm_client(asdict(settings.embedding))
 
             self._initialized = True
             logger.info("LLM client initialized for verification tool")
@@ -104,7 +113,7 @@ class VerifyResultsTool:
             if api_key:
                 dashscope.api_key = api_key
                 self._llm_client = Generation
-                self._llm_model = config.get("model", "qwen-turbo")
+                self._llm_model = config.get("model", "qwen3.5-plus-2026-04-20")
             else:
                 logger.warning("No API key for DashScope")
 
@@ -126,36 +135,31 @@ class VerifyResultsTool:
 
     @property
     def description(self) -> str:
-        return """Evaluate if retrieval results actually answer the user's query.
-
-This is the CRITICAL step after retrieval - always call this to check quality.
-
-When to use:
-- After ANY retrieval operation (retrieve_dense, retrieve_sparse, retrieve_hybrid)
-- When you're not sure if results are sufficient
-- Before returning final answer to user
-
-Why:
-- Low confidence means you need to refine query or try different retrieval strategy
-- Suggestions tell you exactly what's missing and how to improve
-
-Args:
-    results: JSON string of retrieval results (from retrieve_* tools)
-    query: The original user question
-    max_results_to_analyze: How many results to analyze (default: 5)
-
-Returns:
-    JSON with:
-    - answered: Whether results cover the query (boolean)
-    - confidence: 0.0-1.0 score for answer quality
-    - summary: Brief assessment
-    - suggestions.refined_queries: Better search terms if confidence is low
-    - suggestions.missing_aspects: Topics not covered in results
-
-IMPORTANT: If confidence < 0.7, you MUST:
-1. Use suggestions.refined_queries to retry retrieval
-2. Or try a different retrieval strategy (dense vs sparse)
-3. Never ignore low confidence and assume results are good"""
+        return (
+            "Evaluate if retrieval results actually answer the user's query.\n\n"
+            "This is the CRITICAL step after retrieval - always call this to check quality.\n\n"
+            "When to use:\n"
+            "- After ANY retrieval operation (retrieve_dense, retrieve_sparse, retrieve_hybrid)\n"
+            "- When you're not sure if results are sufficient\n"
+            "- Before returning final answer to user\n\n"
+            "Why:\n"
+            "- Low confidence means you need to refine query or try different retrieval strategy\n"
+            "- Suggestions tell you exactly what's missing and how to improve\n\n"
+            "Args:\n"
+            "    results: JSON string of retrieval results (from retrieve_* tools)\n"
+            "    query: The original user question\n"
+            "    max_results_to_analyze: How many results to analyze (default: 5)\n\n"
+            "Returns: JSON with:\n"
+            "    - answered: Whether results cover the query (boolean)\n"
+            "    - confidence: 0.0-1.0 score for answer quality\n"
+            "    - summary: Brief assessment\n"
+            "    - missing_aspects: List of topics not covered\n"
+            "    - next_actions: List of objects with keys: action, query, strategy, priority, reason\n\n"
+            "IMPORTANT: If confidence < 0.7, you MUST:\n"
+            "1. Provide next_actions with specific search queries\n"
+            "2. Each next_action must include: query, strategy (sparse/dense/hybrid), and reason\n"
+            "3. Never ignore low confidence and assume results are good"
+        )
 
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -339,6 +343,23 @@ IMPORTANT: If confidence < 0.7, you MUST:
 
         try:
             data = json.loads(json_str)
+            # Extract suggestions for backward compatibility
+            suggestions = data.get("suggestions", {})
+            if isinstance(suggestions, dict):
+                missing_aspects = data.get("missing_aspects", suggestions.get("missing_aspects", []))
+                next_actions = data.get("next_actions", suggestions.get("refined_queries", []))
+                # Convert refined_queries to next_actions format if needed
+                if isinstance(next_actions, list) and next_actions:
+                    first = next_actions[0]
+                    if isinstance(first, str):
+                        next_actions = [
+                            {"action": "search", "query": q, "strategy": "hybrid", "priority": "medium", "reason": ""}
+                            for q in next_actions
+                        ]
+            else:
+                missing_aspects = data.get("missing_aspects", [])
+                next_actions = data.get("next_actions", [])
+
             return {
                 "query": query,
                 "total_results": total_results,
@@ -346,7 +367,8 @@ IMPORTANT: If confidence < 0.7, you MUST:
                 "confidence": float(data.get("confidence", 0.5)),
                 "summary": data.get("summary", ""),
                 "per_result": data.get("per_result", []),
-                "suggestions": data.get("suggestions", {}),
+                "missing_aspects": missing_aspects,
+                "next_actions": next_actions,
             }
         except json.JSONDecodeError:
             # Fallback parsing
@@ -395,10 +417,16 @@ IMPORTANT: If confidence < 0.7, you MUST:
             "confidence": confidence,
             "summary": f"Average relevance score: {avg_score:.2%}",
             "per_result": [],
-            "suggestions": {
-                "refined_queries": [query],
-                "note": "LLM verification unavailable, using heuristic",
-            },
+            "missing_aspects": ["LLM verification unavailable"] if not answered else [],
+            "next_actions": [
+                {
+                    "action": "search",
+                    "query": query,
+                    "strategy": "hybrid",
+                    "priority": "high",
+                    "reason": "LLM verification unavailable, retry with hybrid search"
+                }
+            ] if not answered else [],
         }
 
 
