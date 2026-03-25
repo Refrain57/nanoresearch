@@ -54,12 +54,63 @@ _RESEARCH_PLAN_TOOL: list[dict[str, Any]] = [
     }
 ]
 
-_SYSTEM_PROMPT = """你是一个专业的研究规划专家。用户的任务是深入研究某个主题。
+_SYSTEM_PROMPT = """你是一个专业的研究规划专家，采用 DeerFlow 四阶段深度研究方法论。
+
+## 研究方法论
+
+### 四阶段流程
+
+**Phase 1: Broad Exploration (广度探索)**
+- 初始调研：理解主题全貌
+- 识别维度：找出关键子主题、角度、视角
+- 绘制版图：记录不同观点、利益相关方
+
+**Phase 2: Deep Dive (深度挖掘)**
+- 针对每个重要维度进行定向研究
+- 多种措辞尝试不同关键词组合
+- 获取完整内容而非仅搜索摘要
+- 跟进引用来源
+
+**Phase 3: Diversity & Validation (多样性验证)**
+确保覆盖以下信息类型：
+| 类型 | 目的 | 关键词提示 |
+|------|------|-----------|
+| 事实数据 | 具体证据 | statistics, data, numbers |
+| 案例示例 | 实际应用 | case study, example, implementation |
+| 专家观点 | 权威视角 | expert analysis, interview |
+| 趋势预测 | 未来方向 | trends, forecast, future |
+| 对比分析 | 上下文 | vs, comparison, alternatives |
+| 挑战批评 | 平衡视角 | challenges, limitations, criticism |
+
+**Phase 4: Synthesis Check (综合检查)**
+- 是否从 3-5 个不同角度搜索？
+- 是否获取了最重要来源的完整内容？
+- 是否有具体数据、案例、专家观点？
+- 是否探索了正面和挑战/限制两方面？
+
+### Source 优先级
+
+1. 官方文档/仓库 (最高权重)
+2. 技术博客 (Medium, Dev.to)
+3. 新闻文章 (验证过的媒体)
+4. 社区讨论 (Reddit, HN)
+5. 社交媒体 (最低权重，仅作舆情参考)
+
+### 置信度评分
+
+| 置信度 | 标准 |
+|--------|------|
+| High (90%+) | 官方文档、多个独立来源佐证 |
+| Medium (70-89%) | 单一可靠来源、近期文章 |
+| Low (50-69%) | 社交媒体、未验证声明、过时信息 |
+
+## 任务
 
 请将研究方向拆解为 3-6 个具体的子问题，每个子问题：
 1. 有独立的研究价值
 2. 可以通过搜索引擎找到答案
 3. 避免重复或重叠
+4. 覆盖不同信息类型（事实、案例、观点、趋势、挑战）
 
 为每个子问题提供：
 - question: 具体的问题描述（中文）
@@ -78,7 +129,19 @@ _USER_TEMPLATE = """## 研究方向
 ## 研究深度
 {depth}
 
+{existing_context_section}
+
 请调用 research_plan 工具返回规划结果。"""
+
+_EXISTING_CONTEXT_TEMPLATE = """## 已有知识
+{existing_context}
+
+## 任务
+请生成增量子问题：
+- 不要重复已有事实已经回答的问题
+- 利用已有规律指导研究方向
+- 深入未覆盖的领域
+"""
 
 
 class ResearchPlanner:
@@ -88,19 +151,34 @@ class ResearchPlanner:
         self.provider = provider
         self.model = model
 
-    async def plan(self, topic: str, depth: str = "normal") -> ResearchPlan:
+    async def plan(self, topic: str, depth: str = "normal", existing_context: str = "") -> ResearchPlan:
         """Generate a research plan from a topic.
 
         Args:
             topic: The research topic or question.
             depth: One of "quick", "normal", "deep".
+            existing_context: Pre-existing knowledge context to avoid duplication.
 
         Returns:
             ResearchPlan with sub-questions and keywords.
         """
+        # Build existing context section if provided
+        if existing_context:
+            existing_context_section = _EXISTING_CONTEXT_TEMPLATE.format(
+                existing_context=existing_context
+            )
+        else:
+            existing_context_section = ""
+
+        user_content = _USER_TEMPLATE.format(
+            topic=topic,
+            depth=depth,
+            existing_context_section=existing_context_section,
+        )
+
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": _USER_TEMPLATE.format(topic=topic, depth=depth)},
+            {"role": "user", "content": user_content},
         ]
 
         logger.info("ResearchPlanner: planning topic={}", topic)
