@@ -19,9 +19,11 @@ class ResearchTool(Tool):
 
     name = "research"
     description = (
-        "启动自主网络研究任务。当用户需要深入了解某个话题、对比多个观点、生成研究报告时使用。"
-        "此工具会主动搜索网络、抓取网页、分析信息、生成完整报告。"
-        "注意：这是网络研究工具，不需要先查询本地知识库。"
+        "启动自主网络研究任务（耗时 10-30min）。"
+        "适用于需要大量新信息支撑的深度研究场景。"
+        "调用前请先判断：如果知识库（research_claims/research_insights）已有相关结论，"
+        "直接使用 RAG 检索即可，无需启动完整研究流程。"
+        "重要：这是耗时任务，必须通过 spawn 工具后台执行。"
         "支持 action: start/status/list。"
     )
     parameters = {
@@ -39,6 +41,7 @@ class ResearchTool(Tool):
             "depth": {
                 "type": "string",
                 "enum": ["quick", "normal", "deep"],
+                "default": "normal",
                 "description": "研究深度（默认 normal）",
             },
             "research_id": {
@@ -56,13 +59,32 @@ class ResearchTool(Tool):
         web_search_tool: Any,
         web_fetch_tool: Any,
         config: ResearchConfig | None = None,
+        knowledge_search: Any = None,
+        rag_store: Any = None,
     ) -> None:
+        # Create knowledge processor if knowledge_search is available
+        knowledge_processor = None
+        if knowledge_search:
+            from nanobot.research.knowledge_processor import KnowledgeProcessor
+            from nanobot.research.insight_tracker import InsightTracker
+            tracker = InsightTracker()
+            knowledge_processor = KnowledgeProcessor(
+                provider=provider,
+                model=model,
+                knowledge_search=knowledge_search,
+                tracker=tracker,
+                rag_store=rag_store,
+            )
+
         self._runner = ResearchRunner(
             provider=provider,
             model=model,
             web_search_tool=web_search_tool,
             web_fetch_tool=web_fetch_tool,
             config=config,
+            knowledge_search=knowledge_search,
+            knowledge_processor=knowledge_processor,
+            rag_store=rag_store,
         )
         self._results: dict[str, ResearchResult] = {}
 
@@ -92,9 +114,23 @@ class ResearchTool(Tool):
                 f"**信息来源**: {result.total_sources} 篇",
                 f"**质量自评**: {quality_str}",
                 f"",
-                f"---",
-                f"",
             ]
+
+            # Include knowledge write result if available
+            if result.knowledge_result:
+                kr = result.knowledge_result
+                summary.append(f"**知识写入**: {kr.claims_written} claims, {kr.insights_written} insights")
+                if kr.duplicates_skipped > 0:
+                    summary.append(f"**去重跳过**: {kr.duplicates_skipped} 条")
+                if kr.conflicts_detected > 0:
+                    summary.append(f"**冲突检测**: {kr.conflicts_detected} 条")
+            else:
+                summary.append(f"**知识写入**: 未配置知识处理器")
+
+            summary.append("")
+            summary.append("---")
+            summary.append("")
+
             if result.report:
                 summary.append(result.report)
             else:
