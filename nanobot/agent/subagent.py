@@ -34,6 +34,8 @@ class SubagentManager:
         web_proxy: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
+        knowledge_search: Any = None,
+        rag_store: Any = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -45,6 +47,8 @@ class SubagentManager:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.knowledge_search = knowledge_search
+        self.rag_store = rag_store
         self.runner = AgentRunner(provider)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -118,6 +122,8 @@ class SubagentManager:
                 web_search_tool=tools.get("web_search"),
                 web_fetch_tool=tools.get("web_fetch"),
                 config=ResearchConfig(),
+                knowledge_search=self.knowledge_search,
+                rag_store=self.rag_store,
             ))
 
             system_prompt = self._build_subagent_prompt()
