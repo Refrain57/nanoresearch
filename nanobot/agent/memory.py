@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import weakref
 from datetime import datetime
@@ -16,6 +17,91 @@ from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
+
+
+_CONSOLIDATION_SYSTEM_PROMPT = r"""You are a memory consolidation agent. Analyze the conversation and update the memory following the exact format below.
+
+## 内容分类规则（关键）
+
+### 写入 MEMORY.md（稳定事实，6个月后仍成立）
+- 用户偏好：语言偏好、工具偏好、工作习惯
+- 环境约定：工作目录、API 配置、模型选择
+- 长期决策：架构决策、技术选型
+- 用户画像：角色、背景、专业领域
+
+### 不写入 MEMORY.md（临时内容）
+- 任务进度：当前任务状态、待办事项
+- 讨论结论：本次讨论的结论、发现
+- 临时焦点：当前调试目标、短期关注点
+- 工具调用细节：具体的搜索结果、代码片段
+
+判断标准：这条信息 6 个月后还成立吗？
+→ 成立 → 写入 MEMORY.md
+→ 不成立/不确定 → 只写入 history_entry，不进 MEMORY.md
+
+## Output Format for save_memory
+
+### memory_update（MEMORY.md）
+只包含稳定事实，格式：
+
+```markdown
+# User Memory
+
+## FACTS
+- 用户偏好 Python
+- 工作目录: D:\Code\nanobot
+- 使用 Claude 模型
+
+## USER_PROFILE
+资深工程师，专注 AI Agent 开发。
+
+## FOCUS_AREAS
+- AI Agent 架构设计
+- RAG 系统优化
+```
+
+### history_entry（HISTORY.md）
+结构化摘要，格式：
+
+```markdown
+## Session Summary [YYYY-MM-DD HH:MM]
+- Active Task: 当前正在进行的任务（如有）
+- Completed Actions: 已完成的操作（简要）
+- Key Decisions: 做出的关键决策
+- Tools Used: 使用的工具列表
+- Blocked/Issues: 遇到的阻碍或问题
+- Stable Facts: 可进入 MEMORY.md 的事实（如有新发现）
+```
+
+注意：
+- 临时任务结论不要写入 memory_update 的 FACTS 或 FOCUS_AREAS
+- history_entry 使用结构化字段，便于后续解析
+- 如果某字段无内容，写 "无" 或跳过该字段
+
+## Memory Update Rules
+
+### FACTS Section
+- 只添加稳定事实（用户偏好、环境约定、长期决策）
+- 移除被否定/过时的事实
+- 每条一行，grep 可搜索
+- 不重复已有事实
+
+### USER_PROFILE Section
+- 用户透露的新信息时更新
+- 移除过时信息
+- 最多 3 句
+
+### FOCUS_AREAS Section
+- 只保留长期关注点（非临时任务）
+- 最多 5 个
+- 如果本次对话没有新的长期焦点，保持原有不变
+
+### history_entry
+- 以 ## Session Summary [YYYY-MM-DD HH:MM] 开头
+- 使用固定字段格式
+- 关键词 grep 可搜索
+
+Call the save_memory tool with your consolidation."""
 
 
 _SAVE_MEMORY_TOOL = [
@@ -34,8 +120,9 @@ _SAVE_MEMORY_TOOL = [
                     },
                     "memory_update": {
                         "type": "string",
-                        "description": "Full updated long-term memory as markdown. Include all existing "
-                        "facts plus new ones. Return unchanged if nothing new.",
+                        "description": "Full updated long-term memory as markdown with fixed sections: "
+                        "FACTS (bullet list), USER_PROFILE (max 3 sentences), FOCUS_AREAS (bullet list, max 5). "
+                        "Include all existing content plus new information. Return unchanged if nothing new.",
                     },
                 },
                 "required": ["history_entry", "memory_update"],
@@ -73,15 +160,40 @@ def _is_tool_choice_unsupported(content: str | None) -> bool:
 
 
 class MemoryStore:
-    """Two-layer memory: MEMORY.md (long-term facts) + HISTORY.md (grep-searchable log)."""
+    """Long-term memory stored in MEMORY.md."""
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, knowledge_search: Any = None):
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
-        self.history_file = self.memory_dir / "HISTORY.md"
         self._consecutive_failures = 0
+        self._cached_hash: str | None = None
+        self._knowledge_search = knowledge_search
+
+    def get_content_hash(self) -> str:
+        """Calculate stable SHA-256 hash of memory content.
+
+        Used to detect whether memory has changed between requests,
+        enabling efficient cache invalidation.
+        """
+        content = self.read_long_term()
+        if not content:
+            return "empty"
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+    def has_changed(self, last_hash: str | None) -> bool:
+        """Check if memory has changed since last known hash.
+
+        Args:
+            last_hash: Previously recorded hash, or None if no prior record.
+
+        Returns:
+            True if memory content differs from last_hash.
+        """
+        if last_hash is None:
+            return True
+        return self.get_content_hash() != last_hash
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -91,24 +203,50 @@ class MemoryStore:
     def write_long_term(self, content: str) -> None:
         self.memory_file.write_text(content, encoding="utf-8")
 
-    def append_history(self, entry: str) -> None:
-        with open(self.history_file, "a", encoding="utf-8") as f:
-            f.write(entry.rstrip() + "\n\n")
-
     def get_memory_context(self) -> str:
-        long_term = self.read_long_term()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        """Return raw MEMORY.md content for XML wrapping in context builder."""
+        return self.read_long_term()
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
+        """Format messages for consolidation with full tool context."""
         lines = []
         for message in messages:
-            if not message.get("content"):
-                continue
-            tools = f" [tools: {', '.join(message['tools_used'])}]" if message.get("tools_used") else ""
-            lines.append(
-                f"[{message.get('timestamp', '?')[:16]}] {message['role'].upper()}{tools}: {message['content']}"
-            )
+            timestamp = message.get('timestamp', '?')[:16]
+            role = message.get('role', 'unknown')
+            content = message.get('content', '')
+
+            if role == "tool":
+                # 工具返回：显示工具名和调用ID
+                tool_name = message.get("name", "unknown_tool")
+                tool_call_id = message.get("tool_call_id", "")[:8]
+                # 裁剪长输出
+                if len(content) > 500:
+                    content = content[:200] + "\n...[truncated]...\n" + content[-200:]
+                lines.append(f"[{timestamp}] TOOL({tool_name})[{tool_call_id}]: {content}")
+
+            elif role == "assistant":
+                # 助手消息：显示 tool_calls 详情
+                tool_calls = message.get("tool_calls", [])
+                if tool_calls:
+                    for tc in tool_calls:
+                        tc_func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                        tc_name = tc_func.get("name", "unknown")
+                        tc_args = tc_func.get("arguments", "{}")
+                        if isinstance(tc_args, dict):
+                            tc_args = json.dumps(tc_args, ensure_ascii=False)
+                        # 截断参数避免过长
+                        args_preview = tc_args[:100] + "..." if len(tc_args) > 100 else tc_args
+                        lines.append(f"[{timestamp}] CALL {tc_name}({args_preview})")
+                if content:
+                    lines.append(f"[{timestamp}] ASSISTANT: {content}")
+
+            elif role == "user":
+                lines.append(f"[{timestamp}] USER: {content}")
+
+            else:
+                lines.append(f"[{timestamp}] {role.upper()}: {content}")
+
         return "\n".join(lines)
 
     async def consolidate(
@@ -117,21 +255,21 @@ class MemoryStore:
         provider: LLMProvider,
         model: str,
     ) -> bool:
-        """Consolidate the provided message chunk into MEMORY.md + HISTORY.md."""
+        """Consolidate the provided message chunk into MEMORY.md."""
         if not messages:
             return True
 
         current_memory = self.read_long_term()
-        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
-
-## Current Long-term Memory
+        prompt = f"""## Current Memory
 {current_memory or "(empty)"}
 
-## Conversation to Process
-{self._format_messages(messages)}"""
+## New Conversation to Process
+{self._format_messages(messages)}
+
+Call save_memory with your updated memory following the exact format specified."""
 
         chat_messages = [
-            {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+            {"role": "system", "content": _CONSOLIDATION_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
 
@@ -186,7 +324,17 @@ class MemoryStore:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
                 return self._fail_or_raw_archive(messages)
 
-            self.append_history(entry)
+            # Write to user_memory (only if knowledge_search is available)
+            if self._knowledge_search:
+                from datetime import datetime
+                self._knowledge_search.write_user_memory_sync([{
+                    "text": entry,
+                    "type": "consolidation_summary",
+                    "confidence": 0.6,
+                    "is_evergreen": False,
+                    "created_at": datetime.now().isoformat(),
+                }])
+
             update = _ensure_text(update)
             if update != current_memory:
                 self.write_long_term(update)
@@ -208,12 +356,23 @@ class MemoryStore:
         return True
 
     def _raw_archive(self, messages: list[dict]) -> None:
-        """Fallback: dump raw messages to HISTORY.md without LLM summarization."""
+        """Fallback: dump raw messages to user_memory without LLM summarization."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self.append_history(
-            f"[{ts}] [RAW] {len(messages)} messages\n"
-            f"{self._format_messages(messages)}"
-        )
+
+        # Format messages as searchable text
+        formatted = self._format_messages(messages)
+        text = f"[{ts}] [RAW] {len(messages)} messages\n{formatted}"
+
+        # Write to user_memory (sync version)
+        if self._knowledge_search:
+            self._knowledge_search.write_user_memory_sync([{
+                "text": text,
+                "type": "raw_archive",
+                "confidence": 0.5,
+                "is_evergreen": False,
+                "created_at": datetime.now().isoformat(),
+            }])
+
         logger.warning(
             "Memory consolidation degraded: raw-archived {} messages", len(messages)
         )
@@ -236,8 +395,9 @@ class MemoryConsolidator:
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         max_completion_tokens: int = 4096,
+        knowledge_search: Any = None,
     ):
-        self.store = MemoryStore(workspace)
+        self.store = MemoryStore(workspace, knowledge_search=knowledge_search)
         self.provider = provider
         self.model = model
         self.sessions = sessions
@@ -247,27 +407,84 @@ class MemoryConsolidator:
         self._get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
+        # Conversation knowledge extractor (lazy init)
+        self._knowledge_extractor = None
+        self._knowledge_search = knowledge_search
+
+        # Anti-shake: track last token count to avoid repeated small consolidations
+        self._last_session_tokens: dict[str, int] = {}
+
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
     async def consolidate_messages(self, messages: list[dict[str, object]]) -> bool:
         """Archive a selected message chunk into persistent memory."""
-        return await self.store.consolidate(messages, self.provider, self.model)
+        success = await self.store.consolidate(messages, self.provider, self.model)
+
+        # After successful consolidation, extract knowledge from conversation
+        if success and self._knowledge_search:
+            await self._extract_conversation_knowledge(messages)
+
+            # Run structural lint (report only, no auto-fix)
+            try:
+                from nanobot.research.knowledge_lint import KnowledgeLint
+                lint = KnowledgeLint(self._knowledge_search, provider=None, model=None)
+                structural_issues = await lint.lint_structural(fix=False)
+                if structural_issues:
+                    logger.info(
+                        f"MemoryConsolidator: lint found {len(structural_issues)} structural issues (report only)"
+                    )
+            except Exception as e:
+                logger.warning(f"Structural lint failed: {e}")
+
+        return success
+
+    async def _extract_conversation_knowledge(self, messages: list[dict[str, object]]) -> None:
+        """Extract knowledge claims from conversation messages.
+
+        This is called after consolidation to extract claims from agent statements.
+        """
+        try:
+            # Lazy init the extractor
+            if self._knowledge_extractor is None:
+                from nanobot.agent.conversation_knowledge_extractor import ConversationKnowledgeExtractor
+                self._knowledge_extractor = ConversationKnowledgeExtractor(
+                    provider=self.provider,
+                    model=self.model,
+                    knowledge_search=self._knowledge_search,
+                )
+
+            await self._knowledge_extractor.extract_from_messages(messages)
+        except Exception as e:
+            logger.warning(f"Conversation knowledge extraction failed: {e}")
 
     def pick_consolidation_boundary(
         self,
         session: Session,
         tokens_to_remove: int,
+        tail_protect: int = 5,  # 保护最近 5 条消息
     ) -> tuple[int, int] | None:
-        """Pick a user-turn boundary that removes enough old prompt tokens."""
+        """Pick a user-turn boundary that removes enough old prompt tokens.
+
+        Head/Tail Protection:
+        - Head: 系统提示 + 首轮交互（通过 last_consolidated 起点保护）
+        - Tail: 最近 N 条消息（tail_protect）不会被压缩
+
+        Args:
+            session: The session to analyze.
+            tokens_to_remove: Minimum tokens to remove.
+            tail_protect: Number of recent messages to protect (default 5).
+        """
         start = session.last_consolidated
-        if start >= len(session.messages) or tokens_to_remove <= 0:
+        # Tail protection: don't consolidate beyond this index
+        max_end = len(session.messages) - tail_protect
+        if start >= max_end or tokens_to_remove <= 0:
             return None
 
         removed_tokens = 0
         last_boundary: tuple[int, int] | None = None
-        for idx in range(start, len(session.messages)):
+        for idx in range(start, max_end):
             message = session.messages[idx]
             if idx > start and message.get("role") == "user":
                 last_boundary = (idx, removed_tokens)
@@ -275,6 +492,7 @@ class MemoryConsolidator:
                     return last_boundary
             removed_tokens += estimate_message_tokens(message)
 
+        # Return last valid boundary within protected range
         return last_boundary
 
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
@@ -308,6 +526,8 @@ class MemoryConsolidator:
 
         The budget reserves space for completion tokens and a safety buffer
         so the LLM request never exceeds the context window.
+
+        Anti-shake: Skip consolidation if savings < 10% of last check.
         """
         if not session.messages or self.context_window_tokens <= 0:
             return
@@ -320,6 +540,16 @@ class MemoryConsolidator:
             if estimated <= 0:
                 return
             if estimated < budget:
+                # Anti-shake: check if savings too small
+                last_tokens = self._last_session_tokens.get(session.key, estimated)
+                self._last_session_tokens[session.key] = estimated
+                if last_tokens > 0:
+                    savings_ratio = (last_tokens - estimated) / last_tokens
+                    if savings_ratio < 0.1:  # Savings < 10%
+                        logger.debug(
+                            "Token consolidation skipped (anti-shake): savings={:.1%}",
+                            savings_ratio,
+                        )
                 logger.debug(
                     "Token consolidation idle {}: {}/{} via {}",
                     session.key,
