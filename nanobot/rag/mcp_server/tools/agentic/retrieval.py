@@ -140,8 +140,13 @@ RETRIEVE_HYBRID_SCHEMA = {
         },
         "collection": {
             "type": "string",
-            "description": "Collection name (default: default)",
+            "description": "Collection name (default: default). Use with collections for single collection.",
             "default": "default",
+        },
+        "collections": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Multiple collections to search (e.g., ['default', 'research_claims', 'research_insights']). If provided, collection is ignored.",
         },
         "domain": {
             "type": "string",
@@ -409,7 +414,7 @@ class RetrieveSparseTool:
             collection_name=collection,
         )
         self._bm25_indexer = BM25Indexer(
-            index_dir=str(resolve_path(f"~/.nanobot/rag/bm25/{collection}"))
+            index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{collection}"))
         )
         self._retriever = create_sparse_retriever(
             settings=self.settings,
@@ -575,7 +580,7 @@ class RetrieveHybridTool:
         )
 
         bm25_indexer = BM25Indexer(
-            index_dir=str(resolve_path(f"~/.nanobot/rag/bm25/{collection}"))
+            index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{collection}"))
         )
         sparse_retriever = create_sparse_retriever(
             settings=self.settings,
@@ -605,6 +610,7 @@ class RetrieveHybridTool:
         dense_top_k: int = 20,
         sparse_top_k: int = 20,
         collection: Optional[str] = None,
+        collections: Optional[List[str]] = None,
         enable_dense: bool = True,
         enable_sparse: bool = True,
         filters: Optional[Dict[str, Any]] = None,
@@ -618,7 +624,8 @@ class RetrieveHybridTool:
             top_k: Final number of results
             dense_top_k: Number of dense results to retrieve
             sparse_top_k: Number of sparse results to retrieve
-            collection: Collection name
+            collection: Single collection name (ignored if collections provided)
+            collections: Multiple collections to search
             enable_dense: Enable dense retrieval
             enable_sparse: Enable sparse retrieval
             filters: Metadata filters
@@ -628,52 +635,101 @@ class RetrieveHybridTool:
         Returns:
             MCPToolResponse with full retrieval details
         """
-        effective_collection = collection or self._config.default_collection
+        # Determine collections to search
+        if collections:
+            search_collections = collections
+        else:
+            search_collections = [collection or self._config.default_collection]
+
         effective_top_k = min(top_k, self._config.max_top_k)
 
         logger.info(
-            f"retrieve_hybrid: query='{query}', collection={effective_collection}, "
+            f"retrieve_hybrid: query='{query}', collections={search_collections}, "
             f"top_k={effective_top_k}, dense={enable_dense}, sparse={enable_sparse}"
         )
 
         try:
-            # Initialize components in thread
-            await asyncio.to_thread(
-                self._ensure_initialized, effective_collection
-            )
+            # Search each collection and merge results
+            all_results = []
+            all_dense_results = []
+            all_sparse_results = []
+            errors = {"dense": None, "sparse": None}
+            used_fallback = False
 
-            # Perform search in thread
-            def _search():
-                return self._hybrid_search.search(
-                    query=query,
-                    top_k=effective_top_k,
-                    filters=filters,
-                    return_details=True,
+            for coll in search_collections:
+                # Initialize components in thread
+                await asyncio.to_thread(
+                    self._ensure_initialized, coll
                 )
 
-            result = await asyncio.to_thread(_search)
+                # Perform search in thread
+                def _search():
+                    return self._hybrid_search.search(
+                        query=query,
+                        top_k=effective_top_k,
+                        filters=filters,
+                        return_details=True,
+                    )
+
+                result = await asyncio.to_thread(_search)
+
+                # Collect results with collection tag in metadata
+                for r in result.results:
+                    r.metadata["collection"] = coll
+                all_results.extend(result.results)
+
+                if result.dense_results:
+                    for r in result.dense_results:
+                        r.metadata["collection"] = coll
+                    all_dense_results.extend(result.dense_results)
+
+                if result.sparse_results:
+                    for r in result.sparse_results:
+                        r.metadata["collection"] = coll
+                    all_sparse_results.extend(result.sparse_results)
+
+                if result.dense_error:
+                    errors["dense"] = result.dense_error
+                if result.sparse_error:
+                    errors["sparse"] = result.sparse_error
+                used_fallback = used_fallback or result.used_fallback
+
+            # Deduplicate and re-rank if multiple collections
+            if len(search_collections) > 1:
+                # Simple dedup by id, keep highest score
+                seen_ids = {}
+                for r in all_results:
+                    coll = r.metadata.get("collection", "default")
+                    key = f"{coll}:{r.chunk_id}"
+                    if key not in seen_ids or r.score > seen_ids[key].score:
+                        seen_ids[key] = r
+                all_results = list(seen_ids.values())
+
+                # Sort by score and take top_k
+                all_results.sort(key=lambda x: x.score, reverse=True)
+                all_results = all_results[:effective_top_k]
 
             # Convert results
-            final_results = results_to_dict_list(result.results)
+            final_results = results_to_dict_list(all_results)
 
             # Build response data
             response_data: Dict[str, Any] = {
                 "method": "hybrid",
                 "query": query,
-                "collection": effective_collection,
+                "collections": search_collections,
                 "final_results": final_results,
                 "final_results_count": len(final_results),
-                "used_fallback": result.used_fallback,
+                "used_fallback": used_fallback,
             }
 
             # Add intermediate results if requested
             if return_intermediate:
-                if result.dense_results is not None:
+                if all_dense_results:
                     response_data["dense_retrieval"] = {
                         "enabled": enable_dense,
-                        "results_count": len(result.dense_results),
-                        "results": results_to_dict_list(result.dense_results),
-                        "error": result.dense_error,
+                        "results_count": len(all_dense_results),
+                        "results": results_to_dict_list(all_dense_results),
+                        "error": errors.get("dense"),
                     }
                 else:
                     response_data["dense_retrieval"] = {
@@ -682,12 +738,12 @@ class RetrieveHybridTool:
                         "results": [],
                     }
 
-                if result.sparse_results is not None:
+                if all_sparse_results:
                     response_data["sparse_retrieval"] = {
                         "enabled": enable_sparse,
-                        "results_count": len(result.sparse_results),
-                        "results": results_to_dict_list(result.sparse_results),
-                        "error": result.sparse_error,
+                        "results_count": len(all_sparse_results),
+                        "results": results_to_dict_list(all_sparse_results),
+                        "error": errors.get("sparse"),
                     }
                 else:
                     response_data["sparse_retrieval"] = {
@@ -700,31 +756,20 @@ class RetrieveHybridTool:
                     "method": "rrf",
                     "k": rrf_k or 60,
                     "input_counts": {
-                        "dense": len(result.dense_results) if result.dense_results else 0,
-                        "sparse": len(result.sparse_results) if result.sparse_results else 0,
+                        "dense": len(all_dense_results),
+                        "sparse": len(all_sparse_results),
                     },
                 }
 
-            # Add processed query info
-            if result.processed_query is not None:
-                response_data["processed_query"] = {
-                    "original_query": result.processed_query.original_query,
-                    "keywords": result.processed_query.keywords,
-                    "filters": result.processed_query.filters,
-                }
-
             # Add errors if any
-            if result.dense_error or result.sparse_error:
-                response_data["errors"] = {
-                    "dense": result.dense_error,
-                    "sparse": result.sparse_error,
-                }
+            if errors.get("dense") or errors.get("sparse"):
+                response_data["errors"] = errors
 
             # Markdown summary
             markdown = format_markdown_results(
-                result.results,
+                all_results,
                 query,
-                max_results=min(5, len(result.results)),
+                max_results=min(5, len(all_results)),
             )
 
             return MCPToolResponse(
@@ -733,7 +778,7 @@ class RetrieveHybridTool:
                 + markdown,
                 metadata={
                     "query": query,
-                    "collection": effective_collection,
+                    "collections": search_collections,
                     "result_count": len(final_results),
                 },
                 is_empty=len(final_results) == 0,
@@ -856,6 +901,7 @@ async def retrieve_hybrid_handler(
     dense_top_k: int = 20,
     sparse_top_k: int = 20,
     collection: str = "default",
+    collections: Optional[List[str]] = None,
     domain: Optional[str] = None,
     enable_dense: bool = True,
     enable_sparse: bool = True,
@@ -865,7 +911,7 @@ async def retrieve_hybrid_handler(
 ) -> types.CallToolResult:
     """MCP handler for retrieve_hybrid with query rewriting support."""
     # Query rewriting for multi-turn context
-    logger.info(f"retrieve_hybrid_handler called: query='{query}', session_key='{session_key}', domain='{domain}'")
+    logger.info(f"retrieve_hybrid_handler called: query='{query}', session_key='{session_key}', domain='{domain}', collections={collections}")
 
     # Convert domain to filters
     if domain and not filters:
@@ -907,6 +953,7 @@ async def retrieve_hybrid_handler(
             dense_top_k=dense_top_k,
             sparse_top_k=sparse_top_k,
             collection=collection,
+            collections=collections,
             enable_dense=enable_dense,
             enable_sparse=enable_sparse,
             filters=filters,
@@ -941,36 +988,9 @@ async def retrieve_hybrid_handler(
 
 def register_tools(protocol_handler) -> None:
     """Register all retrieval tools with the protocol handler."""
-    protocol_handler.register_tool(
-        name="retrieve_dense",
-        description="Semantic search using vector embeddings - finds documents by MEANING.\n\n"
-                   "When to use:\n"
-                   "- Concepts, ideas, paraphrased queries\n"
-                   "- User asks about 'how to do X' or 'best practices for Y'\n"
-                   "- Query uses different words than documents\n\n"
-                   "When NOT to use:\n"
-                   "- Exact technical terms, code names, specific IDs\n"
-                   "- Very short queries (1-2 words) - may be too broad\n\n"
-                   "ALWAYS call verify_results after this to check quality.",
-        input_schema=RETRIEVE_DENSE_SCHEMA,
-        handler=retrieve_dense_handler,
-    )
-    logger.info("Registered MCP tool: retrieve_dense")
-
-    protocol_handler.register_tool(
-        name="retrieve_sparse",
-        description="Keyword search (BM25) - finds documents by EXACT TERMS.\n\n"
-                   "When to use:\n"
-                   "- Technical terms, product names, code identifiers\n"
-                   "- User asks about specific thing by name\n"
-                   "- Query contains exact words from documents\n\n"
-                   "When NOT to use:\n"
-                   "- Conceptual questions, synonyms, paraphrasing\n\n"
-                   "ALWAYS call verify_results after this to check quality.",
-        input_schema=RETRIEVE_SPARSE_SCHEMA,
-        handler=retrieve_sparse_handler,
-    )
-    logger.info("Registered MCP tool: retrieve_sparse")
+    # Note: retrieve_dense and retrieve_sparse are kept as internal implementations.
+    # Agents should always use retrieve_hybrid for best results.
+    # The individual handlers are preserved for internal use by retrieve_hybrid.
 
     protocol_handler.register_tool(
         name="retrieve_hybrid",
