@@ -1,256 +1,270 @@
 ---
 name: rag
-description: RAG knowledge base search with advanced retrieval capabilities.
+description: RAG knowledge base search with unified entry point.
 always: false
 ---
 
 # RAG Search
 
-## When to Use What
+## 概述
 
-- **Simple query** → `retrieve_hybrid(query="...")`
-- **Results incomplete** → `verify_results` to check, then refine
-- **Complex/multi-part query** → `plan_query` to decompose first
-- **Need custom fusion** → `fuse_results` with dense/sparse separately
-- **Need citations** → `build_citations`
-- **Multiple queries to compare/summarize** → Session tools (see below)
+RAG 工具用于检索知识库内容。支持多个 collection：
 
-## Basic Usage
+| Collection | 内容 | 使用场景 |
+|------------|------|----------|
+| `default` | 用户上传的文档 | 查询用户文档中的信息 |
+| `research_claims` | Deep Search 研究结论 | 查询已有的研究事实 |
+| `research_insights` | Deep Search 研究洞察 | 查询跨域规律 |
 
-For simple queries:
+## 工具列表
+
+| 工具 | 用途 |
+|------|------|
+| `mcp_rag_rag_search` | 统一检索入口（推荐） |
+| `mcp_rag_retrieve_hybrid` | 混合检索（dense + sparse） |
+| `mcp_rag_ingest_document` | 添加文档到知识库 |
+
+## 使用示例
+
+### 查询用户上传的文档
 ```
-retrieve_hybrid(query="your query")
-```
-
-## Document Management
-
-### ingest_document
-**When to use**: User wants to add a document to the knowledge base.
-
-```
-ingest_document(file_path="path/to/document.pdf", collection="default")
-```
-
-- Only PDF files are supported
-- File path can be absolute or relative to workspace
-- Large files may take time (chunking + embedding)
-
-**Example workflow**:
-```
-1. ingest_document(file_path="papers/PGSR.pdf")
-2. Wait for success confirmation
-3. retrieve_hybrid(query="PGSR method")
+mcp_rag_rag_search(query="RAG 的实现原理", collection="default")
 ```
 
-### list_collections / list_documents
-**When to use**: Explore what's in the knowledge base.
-
+### 查询已有的研究结论
 ```
-list_collections()  → see all collections
-list_documents(collection="default")  → see documents in a collection
+mcp_rag_rag_search(query="3DGS 的局限性", collection="research_claims")
 ```
 
-## Advanced Tools
-
-### verify_results
-**When to use**: Results don't fully answer the question, or you need to check if more searching is needed.
-
+### 查询跨域洞察
 ```
-verify_results(results=json_result, query="original query")
+mcp_rag_rag_search(query="性能优化的一般方法", collection="research_insights")
 ```
 
-Returns: `answered` (true/false), `confidence`, `suggestions.refined_queries`
-
-**Workflow**:
+### 直接使用 retrieve_hybrid
 ```
-1. retrieve_hybrid(query="X")
-2. If results seem incomplete → verify_results(results=result, query="X")
-3. If verify.answered=false → try verify.suggestions.refined_queries
-```
-
-### fuse_results
-**When to use**: You want to control how dense and sparse results are combined.
-
-```
-fuse_results(dense_results=..., sparse_results=..., method="rrf", rrf_k=60)
+mcp_rag_retrieve_hybrid(
+    query="项目技术选型",
+    collection="default",
+    top_k=10
+)
 ```
 
-Methods: "rrf" (default), "weighted", "interleave"
+## 参数说明
 
-### plan_query
-**When to use**: Complex multi-part questions that might benefit from decomposition.
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `query` | 用户查询（必填） | - |
+| `collection` | 检索集合名称 | "default" |
+| `top_k` | 返回结果数量 | 10 |
 
-```
-plan_query(query="complex question")
-```
+## 工作原理
 
-Returns: `suggested_strategy`, `suggested_queries`, `keywords`, `structure_hints`, `retrieval_steps`
+`rag_search` / `retrieve_hybrid` 内部实现：
+1. **Dense 检索**：向量相似度搜索
+2. **Sparse 检索**：BM25 关键词匹配
+3. **RRF 融合**：合并两种检索结果，按相关性排序
+4. **可选重排序**：使用 reranker 进一步优化
 
-## Structure-Aware Tools
+## 何时使用
 
-These tools leverage document structure metadata (section levels, headings, content types) for intelligent navigation.
+| 场景 | 推荐工具 |
+|------|----------|
+| 用户问"我的文档里说..." | `retrieve_hybrid(collection="default")` |
+| 用户问"我们之前研究过..." | `retrieve_hybrid(collection="research_claims")` |
+| 用户问"有什么跨领域规律..." | `retrieve_hybrid(collection="research_insights")` |
+| 需要深入了解某个话题 | **先查知识库，再决定是否 deep_search** |
 
-### fetch_section
-**When to use**: You know the document structure and need content from a specific section.
+---
 
-```
-fetch_section(section_path="/Chapter 1/Section 1.1", collection="default")
-```
+## 决策流程：遇到知识类问题怎么办？
 
-Parameters:
-- `section_path`: The section path in the document (e.g., `/RAG/检索策略`)
-- `include_neighbors`: Also fetch adjacent chunks for context (default: true)
-- `max_chunks`: Maximum chunks to return (default: 10)
+**重要原则**：遇到需要查询知识的问题时，**先轻量查一次，再决定是否深度研究**。
 
-**When to use**:
-- Agent knows the exact section path from document structure
-- Need comprehensive content from a specific topic
-- Building detailed answer about a known section
-
-**Example**:
-```
-1. retrieve_hybrid(query="RAG retrieval strategy") → found chunk from section "/RAG/检索策略"
-2. fetch_section(section_path="/RAG/检索策略") → get full section content
-```
-
-### fetch_neighbors
-**When to use**: Found a relevant chunk but need more context around it.
+### 决策树
 
 ```
-fetch_neighbors(chunk_id="doc_abc123_0005", window=1)
+用户提问
+    │
+    ▼
+这是知识类问题吗？
+（需要事实、原理、案例、对比等）
+    │
+    ├─► 否 → 直接回答 或 使用 web_search/web_fetch
+    │
+    └─► 是 → 先查知识库
+              │
+              ▼
+         查询 research_claims + research_insights
+              │
+              ▼
+         现有知识足够吗？
+         （有相关结论，且置信度 >= 70%）
+              │
+              ├─► 是 → 直接基于现有知识回答
+              │         （可引用来源，说明来自之前的研究）
+              │
+              └─► 否 → 调用 deep_search 进行完整研究
 ```
 
-Parameters:
-- `chunk_id`: The chunk ID to get neighbors for
-- `window`: How many chunks before/after to fetch (default: 1)
-- `collection`: Collection name (default: "default")
+### 为什么先查知识库？
 
-**When to use**:
-- User asks "what else is around this content?"
-- Building narrative flow from partial match
-- Need context before/after a specific section
+| 方式 | 耗时 | 成本 | 适用场景 |
+|------|------|------|----------|
+| 先查知识库 | ~1-2s | 低 | 已有结论，直接回答 |
+| 直接 deep_search | 10-30min | 高 | 需要新研究 |
 
-**Example**:
-```
-1. retrieve_hybrid(query="embedding model") → got chunk_id "doc_xyz_0010"
-2. fetch_neighbors(chunk_id="doc_xyz_0010", window=2) → get 2 chunks before/after
-```
+**示例**：
+- 用户问："3DGS 相比 NeRF 有什么优势？"
+  - 先查 `research_claims`：已有 "3DGS 训练速度比 NeRF 快 10 倍" → 直接回答
+- 用户问："最新的大模型架构发展趋势？"
+  - 先查 `research_claims`：无相关信息 → 调用 deep_search
 
-### Structure Hints (from plan_query)
+### 操作步骤
 
-When you use `plan_query`, it returns `structure_hints` that guide which tools to use:
+**步骤 1：先查知识库**
 
-| Hint | Suggested Tool | Why |
-|------|----------------|-----|
-| `prefer_high_level` | `fetch_section` with overview sections | Overview queries benefit from high-level sections |
-| `prefer_code` | Filter by `content_type=code` | Code queries need code blocks |
-| `need_context` | `fetch_neighbors` | Need surrounding context |
-
-**Example with structure hints**:
-```
-1. plan_query(query="Explain RAG architecture overview")
-2. If structure_hints.shows prefer_high_level:
-   → fetch_section(section_path="/RAG/Architecture")
-3. Else if need_context:
-   → fetch_neighbors(chunk_id=found_chunk_id)
+```python
+# 并行查询 claims 和 insights
+claims = retrieve_hybrid(query="用户问题关键词", collection="research_claims", top_k=5)
+insights = retrieve_hybrid(query="用户问题关键词", collection="research_insights", top_k=3)
 ```
 
-## Query Planning with Structure
+**步骤 2：判断是否足够**
 
-`plan_query` returns enhanced information for complex queries:
+判断标准：
+- claims 数量 >= 3 条，且平均置信度 >= 0.7
+- 或 insights 有相关内容
+- 内容与用户问题直接相关
 
-```
-plan_query(query="Compare different RAG retrieval strategies")
-```
+**步骤 3：决定下一步**
 
-Returns:
-- `suggested_strategy`: "multi_hop", "direct", "comparison"
-- `suggested_queries`: Array of sub-queries to execute
-- `structure_hints`: Hints for structure-aware retrieval
-- `retrieval_steps`: Suggested sequence of retrieval operations
-- `stop_conditions`: When to stop multi-hop retrieval
-  - `max_hops`: Maximum number of hops (default: 5)
-  - `overlap_threshold`: Stop if overlap > 80%
-  - `confidence_threshold`: Stop if confidence > 90%
+| 判断结果 | 行动 |
+|----------|------|
+| 知识足够 | 直接回答，引用相关 claim/insight |
+| 知识不足 | 调用 deep_search（它会自动补充新知识） |
 
-### build_citations
-**When to use**: User needs formatted references/citations.
+### 示例
+
+**场景 1：知识库已有答案**
 
 ```
-build_citations(results=..., format="markdown")
+用户："3DGS 在实时渲染方面有什么优势？"
+
+Agent 执行：
+1. 查询 research_claims("3DGS 实时渲染")
+   → 找到 3 条相关 claims，置信度 0.8+
+2. 现有知识足够 → 直接回答：
+   "根据之前的研究，3DGS 在实时渲染方面的主要优势包括：
+   - 训练速度比 NeRF 快 10 倍
+   - 可以达到 60fps 的实时渲染速度
+   - ...（引用来源）"
 ```
 
-## Iterative Search Pattern
-
-When initial results are unsatisfactory:
+**场景 2：知识库没有答案**
 
 ```
-1. retrieve_hybrid(query="X")
-2. verify_results(results=result, query="X")
-3. If not answered:
-   - Check verify.suggestions.refined_queries
-   - retrieve_hybrid(query=refined_query)
-   - Or try retrieve_dense / retrieve_sparse separately
+用户："2025 年大模型 Agent 有什么最新进展？"
+
+Agent 执行：
+1. 查询 research_claims("大模型 Agent 2025")
+   → 找到 0 条相关 claims
+2. 查询 research_insights("Agent 架构")
+   → 只有 2024 年的过时信息
+3. 知识不足 → 调用 deep_search(topic="大模型 Agent 2025 最新进展", depth="normal")
 ```
 
-## Examples
+---
 
-**Simple search**:
-- User: "What is PGSR?"
-- Action: `retrieve_hybrid(query="PGSR")`
+## 与 Deep Search 的协作
 
-**Unsatisfied with results**:
-- User: "Tell me more about PGSR's technical details"
-- Action: `retrieve_hybrid(query="PGSR technical details")` → results seem incomplete
-- Then: `verify_results(results=..., query="PGSR technical details")`
-- If needed: Try refined query from suggestions
+### 重要：Deep Search 是耗时任务，必须后台执行
 
-**Complex question**:
-- User: "Compare PGSR with other 3D reconstruction methods"
-- Action: `plan_query(query="compare PGSR with other methods")`
-- Then: Multiple `retrieve_hybrid` calls based on suggested_queries
+`research` 工具执行时间 10-30min，**必须通过 `spawn` 后台执行**，不能前台阻塞用户。
 
-**Need citations**:
-- User: "Give me references for this"
-- Action: `build_citations(results=..., format="markdown")`
+### 知识不足时的正确操作流程
 
-**Compare multiple queries**:
-- User: "Compare PGSR and SuGaR training time"
-- Action:
-  ```
-  1. create_session(initial_query="compare PGSR and SuGaR")
-  2. retrieve_hybrid(query="PGSR training time")
-  3. update_session(results=..., results_key="PGSR")
-  4. retrieve_hybrid(query="SuGaR training time")
-  5. update_session(results=..., results_key="SuGaR")
-  6. get_session() → returns both results for comparison
-  ```
+当知识库查询结果不足时，按以下步骤操作：
 
-## Session Tools
-
-**Purpose**: Save and compare results from multiple queries.
-
-When you need to:
-- Compare results across different queries
-- Summarize findings from multiple searches
-- Keep history of all queries in a research task
-
-### Tools
-
-| Tool | Purpose |
-|------|---------|
-| `create_session` | Start a new session for tracking multiple queries |
-| `update_session` | Save query results with a key for later reference |
-| `get_session` | Retrieve all saved results for comparison/summary |
-| `close_session` | End the session |
-| `list_sessions` | See all active sessions |
-
-### Workflow
+**步骤 1：告知用户**
 
 ```
-1. create_session(initial_query="research topic")
-2. retrieve_hybrid(query="aspect A") → update_session(results=..., results_key="A")
-3. retrieve_hybrid(query="aspect B") → update_session(results=..., results_key="B")
-4. get_session() → get all saved results
-5. Compare/summarize the results
+message("正在深度研究「{topic}」，预计 10-30 分钟，完成后通知您...")
+```
+
+**步骤 2：后台启动研究**
+
+```
+spawn(
+    task="用 research 工具研究以下问题，完成后把完整报告发给用户：{用户的问题}",
+    label="{简短标签}"
+)
+```
+
+**步骤 3：主 Agent 直接返回**
+
+告诉用户已启动后台研究，然后结束当前回复，不要等待。
+
+### 完整示例
+
+```
+用户："2025 年大模型 Agent 有什么最新进展？"
+
+Agent 执行：
+1. 查询 research_claims("大模型 Agent 2025")
+   → 找到 0 条相关 claims
+2. 知识不足 → 准备启动后台研究
+3. 调用 message 告知用户："正在深度研究「大模型 Agent 最新进展」，预计 10-30 分钟..."
+4. 调用 spawn 后台执行：
+   spawn(
+       task="用 research 工具研究「2025 年大模型 Agent 最新进展」，完成后把完整报告发给用户",
+       label="Agent 研究"
+   )
+5. 回复用户："已启动后台研究，完成后会通知您。"
+6. 主 Agent 结束本轮对话，不等待研究完成
+
+--- 后台 subagent 执行 ---
+subagent 收到任务后：
+1. 调用 research(action="start", topic="...", depth="normal")
+2. 等待研究完成（10-30min）
+3. 把完整报告发给用户（自动通知）
+```
+
+### 错误做法
+
+❌ **前台直接调用 research**：
+```
+research(action="start", topic="...")
+# 这会阻塞用户 10-30min，体验很差
+```
+
+✅ **通过 spawn 后台执行**：
+```
+message("正在研究...")
+spawn(task="用 research 工具研究...")
+"已启动后台研究，完成后通知您。"
+```
+
+### 工具职责分工
+
+| 工具 | 职责 |
+|------|------|
+| `mcp_rag_rag_search` | 轻量查询（~1s），先查这个 |
+| `message` | 告知用户状态 |
+| `spawn` | 后台执行耗时任务 |
+| `research` | 深度研究（由 subagent 调用） |
+
+### 流程总结
+
+```
+知识类问题
+    │
+    ▼
+RAG 查询（~1s）
+    │
+    ├─► 有答案 → 直接回答
+    │
+    └─► 无答案 → message 告知 + spawn 后台研究
+                   │
+                   └─► 主 Agent 返回，subagent 执行 research
 ```
