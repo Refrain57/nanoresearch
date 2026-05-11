@@ -43,12 +43,13 @@ class SessionManager:
         """Initialize session store."""
         try:
             from nanobot.rag.core.settings import get_settings, resolve_path
+            from dataclasses import asdict
 
             settings = get_settings()
 
             # Check for configured session store
             if hasattr(settings, "session_store"):
-                store_config = settings.session_store.model_dump()
+                store_config = asdict(settings.session_store)
                 store_type = store_config.get("type", "file")
 
                 if store_type == "file":

@@ -48,31 +48,41 @@ class PlanQueryTool:
 ## 用户查询
 {query}
 
-## 分析要求
-1. 判断查询的复杂度（简单/中等/复杂）
-2. 如果是复杂查询，分解为多个子查询
-3. 建议最优的检索策略
+## 外部上下文
+{context}
 
-## 可用检索策略
-- dense: 纯向量检索，适合语义理解类查询
-- sparse: 纯BM25检索，适合精确关键词匹配
-- hybrid: 混合检索（推荐），结合语义和关键词
+## 分析要求
+1. 判断查询的复杂度（simple/complex）
+2. 如果是复杂查询，分解为多个子查询
+3. **为每个子查询标注检索策略**（重要！）
+
+## 检索策略选择规则
+
+| 关键词类型 | 策略 | 示例 |
+|-----------|------|------|
+| 方法名、指标名、专有名词 | sparse | "PGSR", "PSNR", "SuGaR" |
+| 概念描述、通用术语 | dense | "核心思想", "渲染质量" |
+| 复杂查询、对比分析 | hybrid | "PGSR 和 SuGaR 对比" |
+
+### 策略说明
+- **sparse**: 精确匹配专有名词、技术术语、数字
+- **dense**: 语义相似但表述不同的概念
+- **hybrid**: 需要精确和语义双重匹配（推荐用于复杂查询）
 
 ## 输出格式 (JSON)
 请输出一个JSON对象，格式如下：
 ```json
 {{
-  "complexity": "simple/medium/complex",
-  "suggested_strategy": "dense/sparse/hybrid",
-  "reason": "策略选择原因",
-  "decomposition": {{
-    "sub_queries": ["子查询1", "子查询2"],
-    "search_order": ["建议的搜索顺序"]
-  }},
-  "keywords": ["关键术语1", "关键术语2"],
-  "filters": {{
-    "可能的过滤器": "值"
-  }}
+  "complexity": "simple/complex",
+  "context_aware": true/false,
+  "sub_queries": [
+    {{
+      "query": "具体子查询",
+      "strategy": "sparse/dense/hybrid",
+      "reason": "为什么选择这个策略"
+    }}
+  ],
+  "keywords": ["关键术语1", "关键术语2"]
 }}
 ```
 
@@ -89,12 +99,13 @@ class PlanQueryTool:
 
         try:
             from nanobot.rag.core.settings import get_settings
+            from dataclasses import asdict
 
             settings = get_settings()
             if hasattr(settings, "llm") and settings.llm:
-                self._init_llm_client(settings.llm.model_dump())
+                self._init_llm_client(asdict(settings.llm))
             elif hasattr(settings, "embedding") and settings.embedding:
-                self._init_llm_client(settings.embedding.model_dump())
+                self._init_llm_client(asdict(settings.embedding))
 
             self._initialized = True
             logger.info("LLM client initialized for query planning")
@@ -114,7 +125,7 @@ class PlanQueryTool:
             if api_key:
                 dashscope.api_key = api_key
                 self._llm_client = Generation
-                self._llm_model = config.get("model", "qwen-turbo")
+                self._llm_model = config.get("model", "qwen3.5-plus-2026-04-20")
 
         elif provider == "openai":
             import openai
@@ -166,6 +177,10 @@ Returns:
                     "type": "string",
                     "description": "The user query to analyze",
                 },
+                "context": {
+                    "type": "string",
+                    "description": "External context from main agent (e.g., conversation summary)",
+                },
                 "session_key": {
                     "type": "string",
                     "description": "Main agent session key (channel:chat_id) for multi-turn context",
@@ -174,11 +189,17 @@ Returns:
             "required": ["query"],
         }
 
-    async def execute(self, query: str, session_key: str = None) -> "MCPToolResponse":
+    async def execute(
+        self,
+        query: str,
+        context: Optional[str] = None,
+        session_key: Optional[str] = None,
+    ) -> "MCPToolResponse":
         """Execute the query planning tool.
 
         Args:
             query: The user query
+            context: External context from main agent
             session_key: Optional session key for multi-turn context
 
         Returns:
@@ -201,6 +222,9 @@ Returns:
         # Use rewritten query for subsequent analysis
         analysis_query = rewritten_query
 
+        # Build context string
+        context_str = context if context else ""
+
         # Initialize LLM
         await asyncio.to_thread(self._ensure_initialized)
 
@@ -209,12 +233,16 @@ Returns:
             plan = self._heuristic_planning(analysis_query)
             plan["original_query"] = query
             plan["rewritten_query"] = rewritten_query
-            plan["history_used"] = len(history) > 0
+            plan["context_used"] = context is not None or len(history) > 0
+            plan["context_aware"] = False
             return build_json_response(plan)
 
         try:
-            # Build prompt with rewritten query
-            prompt = self.PLANNING_PROMPT.format(query=analysis_query)
+            # Build prompt with rewritten query and context
+            prompt = self.PLANNING_PROMPT.format(
+                query=analysis_query,
+                context=context_str if context_str else "无外部上下文",
+            )
 
             # Call LLM
             llm_response = await asyncio.to_thread(
@@ -228,7 +256,8 @@ Returns:
             # Add rewrite metadata to result
             plan["original_query"] = query
             plan["rewritten_query"] = rewritten_query
-            plan["history_used"] = len(history) > 0
+            plan["context_used"] = context is not None or len(history) > 0
+            plan["context_aware"] = context is not None
 
             return build_json_response(plan)
 
@@ -237,7 +266,8 @@ Returns:
             plan = self._heuristic_planning(analysis_query)
             plan["original_query"] = query
             plan["rewritten_query"] = rewritten_query
-            plan["history_used"] = len(history) > 0
+            plan["context_used"] = context is not None or len(history) > 0
+            plan["context_aware"] = False
             return build_json_response(plan)
 
     def _call_llm(self, prompt: str) -> str:
@@ -378,15 +408,40 @@ Returns:
 
         try:
             data = json.loads(json_str)
+
+            # Extract sub_queries with strategy annotations
+            sub_queries_data = data.get("sub_queries", [])
+            sub_queries = []
+            for sq in sub_queries_data:
+                if isinstance(sq, str):
+                    # Legacy format: plain string sub-query
+                    sub_queries.append({
+                        "query": sq,
+                        "strategy": "hybrid",
+                        "reason": "default",
+                    })
+                elif isinstance(sq, dict):
+                    # New format: object with strategy annotation
+                    sub_queries.append({
+                        "query": sq.get("query", ""),
+                        "strategy": sq.get("strategy", "hybrid"),
+                        "reason": sq.get("reason", ""),
+                    })
+
+            # Fallback if no sub_queries
+            if not sub_queries:
+                sub_queries.append({
+                    "query": query,
+                    "strategy": "hybrid",
+                    "reason": "fallback",
+                })
+
             return {
                 "original_query": query,
-                "complexity": data.get("complexity", "simple"),
-                "suggested_strategy": data.get("suggested_strategy", "hybrid"),
-                "suggested_queries": data.get("decomposition", {}).get("sub_queries", [query]),
-                "reason": data.get("reason", ""),
+                "complexity": data.get("complexity", "complex"),
+                "context_aware": data.get("context_aware", False),
+                "sub_queries": sub_queries,
                 "keywords": data.get("keywords", []),
-                "filters": data.get("filters", {}),
-                "decomposition": data.get("decomposition", {}),
             }
         except json.JSONDecodeError:
             return self._heuristic_planning(query)
@@ -403,30 +458,25 @@ Returns:
         if "和" in query or "与" in query or "以及" in query or " vs " in query.lower():
             complexity = "complex"
 
+        # Determine strategy based on query characteristics
         strategy = "hybrid"
-        if len(words) < 5 and not has_questions:
+        if any(kw in query for kw in ["PGSR", "SuGaR", "NeRF", "3DGS", "Gaussian"]):
+            strategy = "sparse"  # Technical terms benefit from keyword matching
+        elif len(words) < 5 and not has_questions:
             strategy = "dense"  # Short queries benefit from semantic search
-
-        # Structure-aware planning
-        structure_hints = self._extract_structure_hints(query)
-        retrieval_steps = self._plan_retrieval_steps(query, complexity, structure_hints)
 
         return {
             "original_query": query,
             "complexity": complexity,
-            "suggested_strategy": strategy,
-            "suggested_queries": [query],
-            "reason": f"Heuristic: {complexity} query, recommending {strategy}",
+            "context_aware": False,
+            "sub_queries": [
+                {
+                    "query": query,
+                    "strategy": strategy,
+                    "reason": f"Heuristic: recommending {strategy} for this query",
+                }
+            ],
             "keywords": words[:5],
-            "filters": structure_hints.get("filters", {}),
-            "decomposition": {"sub_queries": [], "search_order": [query]},
-            "structure_hints": structure_hints,
-            "retrieval_steps": retrieval_steps,
-            "stop_conditions": {
-                "max_hops": 5,
-                "overlap_threshold": 0.8,
-                "confidence_threshold": 0.9,
-            },
         }
 
     def _extract_structure_hints(self, query: str) -> Dict[str, Any]:
@@ -838,10 +888,18 @@ class RetrievalController:
 
 
 # MCP Tool Handlers
-async def plan_query_handler(query: str) -> "MCPToolResponse":
+async def plan_query_handler(
+    query: str,
+    context: Optional[str] = None,
+    session_key: Optional[str] = None,
+) -> "MCPToolResponse":
     """Handler for plan_query MCP tool."""
     tool = PlanQueryTool()
-    return await tool.execute(query=query)
+    return await tool.execute(
+        query=query,
+        context=context,
+        session_key=session_key,
+    )
 
 
 async def process_query_handler(query: str) -> "MCPToolResponse":

@@ -251,6 +251,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://open.bigmodel.cn/api/paas/v4",
     ),
     # DashScope (通义): Qwen models, OpenAI-compatible endpoint
+    # Supports prompt caching via prompt_tokens_details.cached_tokens
     ProviderSpec(
         name="dashscope",
         keywords=("qwen", "dashscope"),
@@ -258,6 +259,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         display_name="DashScope",
         backend="openai_compat",
         default_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        supports_prompt_caching=True,
     ),
     # Moonshot (月之暗面): Kimi models. K2.5 enforces temperature >= 1.0.
     ProviderSpec(

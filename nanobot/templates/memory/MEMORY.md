@@ -1,23 +1,15 @@
-# Long-term Memory
+# User Memory
 
-This file stores important information that should persist across sessions.
+## FACTS
+(Important facts about the user: preferences, settings, decisions)
 
-## User Information
+## USER_PROFILE
+(One paragraph about the user, max 3 sentences)
 
-(Important facts about the user)
-
-## Preferences
-
-(User preferences learned over time)
-
-## Project Context
-
-(Information about ongoing projects)
-
-## Important Notes
-
-(Things to remember)
+## FOCUS_AREAS
+(Current focus areas, max 5 items)
 
 ---
 
-*This file is automatically updated by nanobot when important information should be remembered.*
+*This file is automatically updated by nanobot during memory consolidation.*
+*You can manually edit this file to add or correct information.*

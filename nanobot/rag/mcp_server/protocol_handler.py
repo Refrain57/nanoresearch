@@ -192,12 +192,26 @@ class ProtocolHandler:
 def _register_default_tools(protocol_handler: ProtocolHandler) -> None:
     """Register all default MCP tools with the protocol handler.
 
+    This function registers the RAG tools in the new unified entry point style:
+    - rag_search: Single entry point for all retrieval operations
+    - list_collections: View collections
+    - list_documents: View documents in collection
+    - ingest_document: Add documents to collection
+
     Args:
         protocol_handler: ProtocolHandler instance to register tools with.
     """
-    # Only register Agentic RAG tools (forced mode)
-    from nanobot.rag.mcp_server.tools.agentic import register_all_agentic_tools
-    register_all_agentic_tools(protocol_handler)
+    logger = get_logger()
+
+    # Register rag_search - unified entry point
+    from nanobot.rag.mcp_server.tools.rag_search import register_tools as register_rag_search_tools
+    register_rag_search_tools(protocol_handler)
+
+    # Register collection management tools
+    from nanobot.rag.mcp_server.tools.agentic.collections import register_tools as register_collection_tools
+    register_collection_tools(protocol_handler)
+
+    logger.info("Registered RAG tools: rag_search, list_collections, list_documents, ingest_document")
 
 
 def create_mcp_server(

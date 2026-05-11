@@ -58,7 +58,7 @@ class PdfLoader(BaseLoader):
     def __init__(
         self,
         extract_images: bool = True,
-        image_storage_dir: str | Path = "~/.nanobot/rag/images"
+        image_storage_dir: str | Path = "~/.nanoresearch/rag/images"
     ):
         """Initialize PDF Loader.
         

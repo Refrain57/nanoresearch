@@ -48,7 +48,7 @@ class MockVectorStoreSettings:
 @dataclass
 class MockRerankSettings:
     """Mock rerank settings."""
-    enabled: bool = False
+    enabled: bool = True
     top_k: int = 5
 
 

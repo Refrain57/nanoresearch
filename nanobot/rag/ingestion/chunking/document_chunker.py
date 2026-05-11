@@ -22,13 +22,77 @@ Design Principles:
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import TYPE_CHECKING, List, Optional
+
+from loguru import logger
 
 from nanobot.rag.core.types import Chunk, Document
 from nanobot.rag.libs.splitter.splitter_factory import SplitterFactory
 
 if TYPE_CHECKING:
     from nanobot.rag.core.settings import Settings
+
+
+def detect_chunk_strategy(document: Document) -> str:
+    """Automatically detect the best chunking strategy based on document structure.
+
+    Detection order (most reliable first):
+    1. PDF bookmarks/TOC (from PyMuPDF extraction)
+    2. Markdown headings with hierarchical levels
+    3. Numbered section patterns (1.1, 1.2, etc.)
+
+    Args:
+        document: Document to analyze
+
+    Returns:
+        "document_based" if structure detected, "fixed" otherwise
+    """
+    text = document.text or ""
+
+    # 1. Check PDF bookmarks (most reliable)
+    if document.metadata.get("bookmarks"):
+        bookmark_count = len(document.metadata["bookmarks"])
+        if bookmark_count >= 3:
+            logger.debug(f"Detected {bookmark_count} PDF bookmarks, using document_based")
+            return "document_based"
+
+    # 2. Check Markdown headings with hierarchical structure
+    if document.metadata.get("headings"):
+        headings = document.metadata["headings"]
+        if len(headings) >= 3:
+            # Check for hierarchical levels (more than one level = structured)
+            levels = set()
+            for h in headings:
+                level = h.get("level", 1)
+                levels.add(level)
+            if len(levels) >= 2:
+                logger.debug(f"Detected {len(headings)} hierarchical headings, using document_based")
+                return "document_based"
+
+    # 3. Check Markdown headings directly in text
+    heading_pattern = re.compile(r'^#{1,6}\s+.+$', re.MULTILINE)
+    headings_in_text = heading_pattern.findall(text)
+    if len(headings_in_text) >= 3:
+        # Check for hierarchical levels
+        levels = set()
+        for h in headings_in_text:
+            level = len(h) - len(h.lstrip('#'))
+            levels.add(level)
+        if len(levels) >= 2:
+            logger.debug(f"Detected {len(headings_in_text)} hierarchical headings in text, using document_based")
+            return "document_based"
+
+    # 4. Check numbered section patterns (1.1, 1.2, 2.3.1, etc.)
+    section_pattern = re.compile(r'^\d+(\.\d+)+\s+\S+', re.MULTILINE)
+    numbered_sections = section_pattern.findall(text)
+    if len(numbered_sections) >= 5:
+        logger.debug(f"Detected {len(numbered_sections)} numbered sections, using document_based")
+        return "document_based"
+
+    # Default: fixed-size chunking
+    logger.debug("No clear structure detected, using fixed")
+    return "fixed"
 
 
 class DocumentChunker:
@@ -64,35 +128,36 @@ class DocumentChunker:
         >>> print(f"First chunk index: {chunks[0].metadata['chunk_index']}")
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, auto_detect: bool = True):
         """Initialize DocumentChunker with configuration.
 
         Args:
             settings: Configuration settings containing splitter configuration.
                      The splitter config is expected at settings.splitter.*
+            auto_detect: If True, automatically detect best chunking strategy
+                        based on document structure (default: True)
 
         Raises:
             ValueError: If splitter configuration is invalid or provider unknown
         """
         self._settings = settings
+        self._auto_detect = auto_detect
         self._structure_chunker: Optional[DocumentStructureChunker] = None
+        self._splitter = None
 
-        # Check chunk_strategy to determine which chunker to use
-        chunk_strategy = self._get_chunk_strategy()
-
-        if chunk_strategy == "document_based":
-            # Use structure-aware chunker directly
-            ingestion = settings.ingestion
-            min_chunk = ingestion.min_chunk_length if ingestion else 100
-            max_chunk = ingestion.max_chunk_length if ingestion else 2000
-            self._structure_chunker = DocumentStructureChunker(
-                min_chunk_length=min_chunk,
-                max_chunk_length=max_chunk,
-            )
-            self._splitter = None  # Not used for document_based strategy
-        else:
-            # Use traditional splitter via factory
-            self._splitter = SplitterFactory.create(settings)
+        # If auto_detect is disabled, use the configured strategy
+        if not auto_detect:
+            chunk_strategy = self._get_chunk_strategy()
+            if chunk_strategy == "document_based":
+                ingestion = settings.ingestion
+                min_chunk = ingestion.min_chunk_length if ingestion else 100
+                max_chunk = ingestion.max_chunk_length if ingestion else 2000
+                self._structure_chunker = DocumentStructureChunker(
+                    min_chunk_length=min_chunk,
+                    max_chunk_length=max_chunk,
+                )
+            else:
+                self._splitter = SplitterFactory.create(settings)
 
     def _get_chunk_strategy(self) -> str:
         """Get chunk_strategy from settings."""
@@ -100,10 +165,29 @@ class DocumentChunker:
             return self._settings.ingestion.chunk_strategy or "fixed"
         return "fixed"
 
+    def _get_structure_chunker(self) -> DocumentStructureChunker:
+        """Get or create DocumentStructureChunker (lazy initialization)."""
+        if self._structure_chunker is None:
+            ingestion = self._settings.ingestion
+            min_chunk = ingestion.min_chunk_length if ingestion else 100
+            max_chunk = ingestion.max_chunk_length if ingestion else 2000
+            self._structure_chunker = DocumentStructureChunker(
+                min_chunk_length=min_chunk,
+                max_chunk_length=max_chunk,
+            )
+        return self._structure_chunker
+
+    def _get_splitter(self):
+        """Get or create text splitter (lazy initialization)."""
+        if self._splitter is None:
+            self._splitter = SplitterFactory.create(self._settings)
+        return self._splitter
+
     def split_document(self, document: Document) -> List[Chunk]:
         """Split a Document into Chunks with full business enrichment.
 
         This is the main entry point that orchestrates the transformation:
+        - If auto_detect: Detects best strategy based on document structure
         - If chunk_strategy == "document_based": Uses structure-aware chunking
         - Otherwise: Uses traditional splitter + business enrichment
 
@@ -122,9 +206,17 @@ class DocumentChunker:
         if not document.text or not document.text.strip():
             raise ValueError(f"Document {document.id} has no text content to split")
 
-        # Use structure-aware chunker if configured
-        if self._structure_chunker is not None:
-            chunks = self._structure_chunker.split_document(document)
+        # Determine chunking strategy
+        detected_strategy = None
+        if self._auto_detect:
+            detected_strategy = detect_chunk_strategy(document)
+            logger.info(f"Auto-detected chunk strategy: {detected_strategy} for document {document.id}")
+        else:
+            detected_strategy = self._get_chunk_strategy()
+
+        # Use structure-aware chunker if detected/configured
+        if detected_strategy == "document_based":
+            chunks = self._get_structure_chunker().split_document(document)
             # Ensure inherited metadata from document
             for chunk in chunks:
                 # Merge document metadata (excluding 'images' which is chunk-specific)
@@ -133,10 +225,11 @@ class DocumentChunker:
                 # Merge with structure metadata (structure metadata takes precedence)
                 chunk.metadata = {**doc_meta, **chunk.metadata}
                 chunk.metadata["source_ref"] = document.id
+                chunk.metadata["chunk_strategy_used"] = "document_based"
             return chunks
 
         # Traditional flow: Use underlying splitter to get text fragments
-        text_fragments = self._splitter.split_text(document.text)
+        text_fragments = self._get_splitter().split_text(document.text)
 
         if not text_fragments:
             raise ValueError(
@@ -149,6 +242,7 @@ class DocumentChunker:
         for index, text in enumerate(text_fragments):
             chunk_id = self._generate_chunk_id(document.id, index, text)
             chunk_metadata = self._inherit_metadata(document, index, text)
+            chunk_metadata["chunk_strategy_used"] = detected_strategy
 
             chunk = Chunk(
                 id=chunk_id,

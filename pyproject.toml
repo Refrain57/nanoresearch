@@ -1,14 +1,14 @@
 [project]
-name = "nanobot-ai"
+name = "nanoresearch-ai"
 version = "0.1.4.post6"
-description = "A lightweight personal AI assistant framework"
+description = "A lightweight personal AI research assistant with Deep Research and Agentic RAG"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
-    {name = "nanobot contributors"}
+    {name = "NanoResearch contributors"}
 ]
-keywords = ["ai", "agent", "chatbot"]
+keywords = ["ai", "agent", "research", "rag", "deep-research"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -48,6 +48,9 @@ dependencies = [
     "chardet>=3.0.2,<6.0.0",
     "openai>=2.8.0",
     "tiktoken>=0.12.0,<1.0.0",
+    "ragas>=0.4.3",
+    "pypdf>=6.10.2",
+    "langchain-community>=0.4.1",
 ]
 
 [project.optional-dependencies]
@@ -67,6 +70,9 @@ matrix = [
 langsmith = [
     "langsmith>=0.1.0",
 ]
+rag-marker = [
+    "marker-pdf>=1.0.0",
+]
 dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
@@ -75,7 +81,8 @@ dev = [
 ]
 
 [project.scripts]
-nanobot = "nanobot.cli.commands:app"
+nr = "nanobot.cli.commands:app"
+nanoresearch = "nanobot.cli.commands:app"
 
 [build-system]
 requires = ["hatchling"]

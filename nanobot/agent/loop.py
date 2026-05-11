@@ -21,6 +21,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -31,11 +32,11 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+from nanobot.utils.cache_metrics import record_cache_stats
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ResearchConfig, WebSearchConfig
     from nanobot.cron.service import CronService
-    from nanobot.research.types import ResearchConfig
 
 
 class AgentLoop:
@@ -70,9 +71,10 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         research_config: ResearchConfig | None = None,
+        knowledge_search: Any = None,
+        rag_store: Any = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
-        from nanobot.research.types import ResearchConfig
+        from nanobot.config.schema import ExecToolConfig, ResearchConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -87,13 +89,21 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.research_config = research_config or ResearchConfig()
+        self.knowledge_search = knowledge_search
+        self.rag_store = rag_store
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
 
-        self.context = ContextBuilder(workspace, timezone=timezone)
+        self.context = ContextBuilder(workspace, timezone=timezone, knowledge_search=knowledge_search)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
+
+        # Determine if provider supports explicit cache_control (Anthropic/OpenRouter)
+        # DashScope uses implicit cache, prefers string format for stable prefix
+        self._use_cache_blocks = False
+        if hasattr(provider, "_spec") and provider._spec:
+            self._use_cache_blocks = getattr(provider._spec, "supports_prompt_caching", False) and provider._spec.name != "dashscope"
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -103,6 +113,8 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            knowledge_search=knowledge_search,
+            rag_store=rag_store,
         )
 
         self._running = False
@@ -164,6 +176,8 @@ class AgentLoop:
                     web_search_tool=self.tools.get("web_search"),
                     web_fetch_tool=self.tools.get("web_fetch"),
                     config=self.research_config,
+                    knowledge_search=self.knowledge_search,
+                    rag_store=self.rag_store,
                 )
             )
 
@@ -294,6 +308,7 @@ class AgentLoop:
             concurrent_tools=True,
         ))
         self._last_usage = result.usage
+        record_cache_stats(result.usage)
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
@@ -408,6 +423,32 @@ class AgentLoop:
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
 
+    async def _check_pending_consolidation(self, session: Session) -> None:
+        """Check if there are unconsolidated messages from last session and consolidate them.
+
+        This runs once per session when the first message arrives after startup.
+        It ensures that important conversations from previous sessions are preserved
+        in MEMORY.md even if the previous session ended normally without token pressure.
+        """
+        pending_count = len(session.messages) - session.last_consolidated
+        if pending_count < 5:
+            return  # Not enough messages to bother consolidating
+
+        logger.info(
+            "Found {} unconsolidated messages from previous session, consolidating...",
+            pending_count
+        )
+
+        pending = session.messages[session.last_consolidated:]
+        success = await self.memory_consolidator.consolidate_messages(pending)
+
+        if success:
+            session.last_consolidated = len(session.messages)
+            self.sessions.save(session)
+            logger.info("Startup consolidation complete for {} messages", pending_count)
+        else:
+            logger.warning("Startup consolidation failed, will retry on token pressure")
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
@@ -437,6 +478,9 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
+                topic=msg.content,
+                tool_names=self.tools.tool_names,
+                use_cache_blocks=self._use_cache_blocks,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
@@ -453,6 +497,9 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+
+        # Startup consolidation: check if there are unconsolidated messages from last session
+        await self._check_pending_consolidation(session)
 
         # Slash commands
         raw = msg.content.strip()
@@ -473,6 +520,9 @@ class AgentLoop:
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            topic=msg.content,
+            tool_names=self.tools.tool_names,
+            use_cache_blocks=self._use_cache_blocks,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:

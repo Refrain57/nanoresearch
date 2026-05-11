@@ -13,6 +13,7 @@ Design Principles:
 
 import hashlib
 import sqlite3
+import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
@@ -150,12 +151,13 @@ class SQLiteIntegrityChecker(FileIntegrityChecker):
     
     def __init__(self, db_path: str):
         """Initialize checker and create database if needed.
-        
+
         Args:
             db_path: Path to SQLite database file.
         """
         self.db_path = db_path
         self._conn = None
+        self._lock = threading.Lock()  # Lock for concurrent write protection
         self._ensure_database()
     
     def close(self) -> None:
@@ -281,45 +283,46 @@ class SQLiteIntegrityChecker(FileIntegrityChecker):
             file_hash: SHA256 hash of the file.
             file_path: Original file path (for tracking).
             collection: Optional collection/namespace identifier.
-            
+
         Raises:
             RuntimeError: If database operation fails.
         """
         now = datetime.now(timezone.utc).isoformat()
-        
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Check if record exists to preserve processed_at
-            cursor = conn.execute(
-                "SELECT processed_at FROM ingestion_history WHERE file_hash = ?",
-                (file_hash,)
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                # Update existing record
-                conn.execute("""
-                    UPDATE ingestion_history 
-                    SET file_path = ?,
-                        status = 'success',
-                        collection = ?,
-                        error_msg = NULL,
-                        updated_at = ?
-                    WHERE file_hash = ?
-                """, (file_path, collection, now, file_hash))
-            else:
-                # Insert new record
-                conn.execute("""
-                    INSERT INTO ingestion_history 
-                    (file_hash, file_path, status, collection, error_msg, processed_at, updated_at)
-                    VALUES (?, ?, 'success', ?, NULL, ?, ?)
-                """, (file_hash, file_path, collection, now, now))
-            
-            conn.commit()
-        except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to mark success for {file_path}: {e}")
-        finally:
-            conn.close()
+
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                # Check if record exists to preserve processed_at
+                cursor = conn.execute(
+                    "SELECT processed_at FROM ingestion_history WHERE file_hash = ?",
+                    (file_hash,)
+                )
+                result = cursor.fetchone()
+
+                if result:
+                    # Update existing record
+                    conn.execute("""
+                        UPDATE ingestion_history
+                        SET file_path = ?,
+                            status = 'success',
+                            collection = ?,
+                            error_msg = NULL,
+                            updated_at = ?
+                        WHERE file_hash = ?
+                    """, (file_path, collection, now, file_hash))
+                else:
+                    # Insert new record
+                    conn.execute("""
+                        INSERT INTO ingestion_history
+                        (file_hash, file_path, status, collection, error_msg, processed_at, updated_at)
+                        VALUES (?, ?, 'success', ?, NULL, ?, ?)
+                    """, (file_hash, file_path, collection, now, now))
+
+                conn.commit()
+            except sqlite3.Error as e:
+                raise RuntimeError(f"Failed to mark success for {file_path}: {e}")
+            finally:
+                conn.close()
     
     def mark_failed(
         self, 
@@ -335,44 +338,45 @@ class SQLiteIntegrityChecker(FileIntegrityChecker):
             file_hash: SHA256 hash of the file.
             file_path: Original file path (for tracking).
             error_msg: Error message describing the failure.
-            
+
         Raises:
             RuntimeError: If database operation fails.
         """
         now = datetime.now(timezone.utc).isoformat()
-        
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Check if record exists to preserve processed_at
-            cursor = conn.execute(
-                "SELECT processed_at FROM ingestion_history WHERE file_hash = ?",
-                (file_hash,)
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                # Update existing record
-                conn.execute("""
-                    UPDATE ingestion_history 
-                    SET file_path = ?,
-                        status = 'failed',
-                        error_msg = ?,
-                        updated_at = ?
-                    WHERE file_hash = ?
-                """, (file_path, error_msg, now, file_hash))
-            else:
-                # Insert new record
-                conn.execute("""
-                    INSERT INTO ingestion_history 
-                    (file_hash, file_path, status, collection, error_msg, processed_at, updated_at)
-                    VALUES (?, ?, 'failed', NULL, ?, ?, ?)
-                """, (file_hash, file_path, error_msg, now, now))
-            
-            conn.commit()
-        except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to mark failure for {file_path}: {e}")
-        finally:
-            conn.close()
+
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                # Check if record exists to preserve processed_at
+                cursor = conn.execute(
+                    "SELECT processed_at FROM ingestion_history WHERE file_hash = ?",
+                    (file_hash,)
+                )
+                result = cursor.fetchone()
+
+                if result:
+                    # Update existing record
+                    conn.execute("""
+                        UPDATE ingestion_history
+                        SET file_path = ?,
+                            status = 'failed',
+                            error_msg = ?,
+                            updated_at = ?
+                        WHERE file_hash = ?
+                    """, (file_path, error_msg, now, file_hash))
+                else:
+                    # Insert new record
+                    conn.execute("""
+                        INSERT INTO ingestion_history
+                        (file_hash, file_path, status, collection, error_msg, processed_at, updated_at)
+                        VALUES (?, ?, 'failed', NULL, ?, ?, ?)
+                    """, (file_hash, file_path, error_msg, now, now))
+
+                conn.commit()
+            except sqlite3.Error as e:
+                raise RuntimeError(f"Failed to mark failure for {file_path}: {e}")
+            finally:
+                conn.close()
 
     def remove_record(self, file_hash: str) -> bool:
         """Remove an ingestion record by its file hash.

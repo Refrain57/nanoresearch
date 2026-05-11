@@ -36,3 +36,23 @@ research_outputs/
 
 # MCP server configs with API keys
 .nanobot/config.json
+
+# RAG data and images (user-specific, large files)
+~/
+*.jpeg
+*.png
+*.db
+*.sqlite3
+*.bin
+
+# Eval and test outputs
+eval_*.json
+eval_*.txt
+eval_*.log
+extract_*.py
+extract_*.json
+test_*.txt
+results/
+
+# Scripts (development only)
+scripts/

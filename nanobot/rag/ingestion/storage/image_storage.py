@@ -12,6 +12,7 @@ Design Principles:
 
 import sqlite3
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Union
@@ -69,11 +70,11 @@ class ImageStorage:
     
     def __init__(
         self,
-        db_path: str = "~/.nanobot/rag/image_index.db",
-        images_root: str = "~/.nanobot/rag/images"
+        db_path: str = "~/.nanoresearch/rag/image_index.db",
+        images_root: str = "~/.nanoresearch/rag/images"
     ):
         """Initialize image storage and create database if needed.
-        
+
         Args:
             db_path: Path to SQLite database file.
             images_root: Root directory for storing image files.
@@ -81,6 +82,7 @@ class ImageStorage:
         self.db_path = db_path
         self.images_root = Path(images_root)
         self._conn = None
+        self._lock = threading.Lock()  # Lock for concurrent write protection
         self._ensure_database()
     
     def close(self) -> None:
@@ -269,33 +271,34 @@ class ImageStorage:
         """
         if not image_id or not image_id.strip():
             raise ValueError("image_id cannot be empty")
-        
+
         # Verify file exists
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"Image file not found: {file_path}")
-        
+
         # Store absolute path for reliable retrieval
         stored_path = str(path.resolve())
-        
-        # Register in database
+
+        # Register in database with lock for concurrent write protection
         now = datetime.now(timezone.utc).isoformat()
-        
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Use INSERT OR REPLACE for idempotent operation
-            conn.execute("""
-                INSERT OR REPLACE INTO image_index 
-                (image_id, file_path, collection, doc_hash, page_num, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (image_id, stored_path, collection, doc_hash, page_num, now))
-            
-            conn.commit()
-        except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to register image {image_id}: {e}")
-        finally:
-            conn.close()
-        
+
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                # Use INSERT OR REPLACE for idempotent operation
+                conn.execute("""
+                    INSERT OR REPLACE INTO image_index
+                    (image_id, file_path, collection, doc_hash, page_num, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (image_id, stored_path, collection, doc_hash, page_num, now))
+
+                conn.commit()
+            except sqlite3.Error as e:
+                raise RuntimeError(f"Failed to register image {image_id}: {e}")
+            finally:
+                conn.close()
+
         return stored_path
     
     def get_image_path(self, image_id: str) -> Optional[str]:

@@ -11,11 +11,11 @@ import yaml
 # ---------------------------------------------------------------------------
 # Repo root & path resolution
 # ---------------------------------------------------------------------------
-# Anchored to this file's location: <repo>/src/core/settings.py → parents[2]
-REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+# Anchored to this file's location: <repo>/nanobot/rag/core/settings.py → parents[3]
+REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
-# Default absolute path to settings.yaml
-DEFAULT_SETTINGS_PATH: Path = REPO_ROOT / "config" / "settings.yaml"
+# Default settings path - user-level config
+DEFAULT_SETTINGS_PATH: Path = Path.home() / ".nanoresearch" / "settings.yaml"
 
 
 def resolve_path(relative: Union[str, Path]) -> Path:
@@ -27,8 +27,8 @@ def resolve_path(relative: Union[str, Path]) -> Path:
 
     >>> resolve_path("config/settings.yaml")  # doctest: +SKIP
     PosixPath('/home/user/Modular-RAG-MCP-Server/config/settings.yaml')
-    >>> resolve_path("~/.nanobot/rag/chroma")  # doctest: +SKIP
-    PosixPath('/home/user/.nanobot/rag/chroma')
+    >>> resolve_path("~/.nanoresearch/rag/chroma")  # doctest: +SKIP
+    PosixPath('/home/user/.nanoresearch/rag/chroma')
     """
     p = Path(relative)
     if p.is_absolute():
@@ -321,9 +321,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
     """Load settings from a YAML file and validate required fields.
 
     Args:
-        path: Path to settings YAML.  Defaults to
-            ``<repo>/config/settings.yaml`` (absolute, CWD-independent).
-            Can also be overridden by the RAG_SETTINGS_PATH environment variable.
+        path: Path to settings YAML. Defaults to ``~/.nanoresearch/settings.yaml``.
+            Can be overridden by the RAG_SETTINGS_PATH environment variable.
     """
     import os as _os
 
@@ -353,3 +352,22 @@ def load_settings(path: str | Path | None = None) -> Settings:
     settings = Settings.from_dict(data or {})
     validate_settings(settings)
     return settings
+
+
+# Singleton cache for settings
+_settings_cache: Optional[Settings] = None
+
+
+def get_settings() -> Settings:
+    """Get cached settings instance.
+
+    Loads settings once and caches the result for subsequent calls.
+    Use this for components that need settings access without reloading.
+
+    Returns:
+        Cached Settings instance.
+    """
+    global _settings_cache
+    if _settings_cache is None:
+        _settings_cache = load_settings()
+    return _settings_cache

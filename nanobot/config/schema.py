@@ -31,7 +31,7 @@ class ChannelsConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    workspace: str = "~/.nanobot/workspace"
+    workspace: str = "~/.nanoresearch/workspace"
     model: str = "anthropic/claude-opus-4-5"
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
@@ -108,7 +108,8 @@ class WebSearchConfig(Base):
     """Web search tool configuration."""
 
     provider: str = "brave"  # brave, tavily, duckduckgo, searxng, jina
-    api_key: str = ""
+    api_key: str = ""  # Brave / Tavily API key
+    jina_api_key: str = ""  # Jina API key (for search and web fetch)
     base_url: str = ""  # SearXNG base URL
     max_results: int = 5
 
@@ -133,6 +134,11 @@ class ResearchConfig(Base):
     default_depth: str = "normal"  # quick / normal / deep
     enable_self_evaluation: bool = True
     evaluation_threshold: float = 6.0  # trigger retry if overall score < threshold
+    # Rerank settings
+    rerank_enabled: bool = True
+    rerank_provider: str = "cross_encoder"  # none | cross_encoder | llm
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_top_k: int = 10
 
 
 class ExecToolConfig(Base):

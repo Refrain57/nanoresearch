@@ -137,10 +137,10 @@ The key (`webhook`) becomes the config section name. The value points to your `B
 ```bash
 pip install -e .
 nanobot plugins list      # verify "Webhook" shows as "plugin"
-nanobot onboard           # auto-adds default config for detected plugins
+nr onboard           # auto-adds default config for detected plugins
 ```
 
-Edit `~/.nanobot/config.json`:
+Edit `~/.nanoresearch/config.json`:
 
 ```json
 {

@@ -246,11 +246,11 @@ class MultimodalAssembler:
             except Exception as e:
                 logger.warning(f"ImageStorage lookup failed for {ref.image_id}: {e}")
         
-        # Convention-based path: ~/.nanobot/rag/images/{collection}/{image_id}.png
+        # Convention-based path: ~/.nanoresearch/rag/images/{collection}/{image_id}.png
         if collection:
             from nanobot.rag.core.settings import resolve_path
             for ext in [".png", ".jpg", ".jpeg", ".webp"]:
-                candidate = resolve_path(f"~/.nanobot/rag/images/{collection}/{ref.image_id}{ext}")
+                candidate = resolve_path(f"~/.nanoresearch/rag/images/{collection}/{ref.image_id}{ext}")
                 if candidate.exists():
                     return str(candidate.resolve())
         

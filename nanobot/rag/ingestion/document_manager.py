@@ -200,31 +200,27 @@ class DocumentManager:
         from being cleaned.
 
         The document is identified by its *source_hash*.  When the hash
-        is not supplied the method tries to compute it from the file;
-        if the file no longer exists it falls back to looking up the
-        hash from the integrity records by path.
+        is not supplied, it is looked up from the integrity records by path.
+        The source file does NOT need to exist for deletion to succeed.
 
         Args:
-            source_path: Original filesystem path of the document.
+            source_path: Original filesystem path or filename of the document.
             collection: Collection the document belongs to.
             source_hash: Pre-computed SHA-256 hash.  When provided the
-                method will not attempt to read the source file.
+                method will skip hash lookup.
 
         Returns:
             ``DeleteResult`` summarising what was cleaned.
         """
         result = DeleteResult(success=True)
 
-        # Resolve hash – prefer caller-supplied, then file, then DB lookup
+        # Resolve hash – prefer caller-supplied, then DB lookup (file not needed)
         if source_hash is None:
-            try:
-                source_hash = self.integrity.compute_sha256(source_path)
-            except Exception as e:
-                source_hash = self._hash_from_path(source_path)
-                if source_hash is None:
-                    result.success = False
-                    result.errors.append(f"Cannot identify document: {e}")
-                    return result
+            source_hash = self._hash_from_path(source_path)
+            if source_hash is None:
+                result.success = False
+                result.errors.append(f"Document not found in database: {source_path}")
+                return result
 
         # 1. ChromaDB – delete chunks matching source_hash
         try:
@@ -334,11 +330,67 @@ class DocumentManager:
             return []
 
     def _hash_from_path(self, source_path: str) -> Optional[str]:
-        """Try to find a source_hash from integrity records by path."""
+        """Try to find a source_hash from integrity records by path.
+
+        Matching strategy:
+        1. Exact path match (normalized)
+        2. Filename-only match (case-insensitive)
+        """
+        from pathlib import Path
+
+        input_path = Path(source_path)
+
+        # Strategy 1: Exact match (normalized path)
+        exact = self._exact_match(source_path)
+        if exact:
+            return exact
+
+        # Strategy 2: Filename-only match
+        filename = input_path.name
+        if filename:
+            return self._filename_match(filename)
+
+        return None
+
+    def _exact_match(self, source_path: str) -> Optional[str]:
+        """Exact path match from integrity records."""
+        try:
+            from pathlib import Path
+
+            input_resolved = Path(source_path).resolve()
+
+            for rec in self.integrity.list_processed():
+                rec_path_str = rec.get("file_path", "")
+                if not rec_path_str:
+                    continue
+
+                rec_resolved = Path(rec_path_str).resolve()
+                if rec_resolved == input_resolved:
+                    return rec["file_hash"]
+
+                # Also try string comparison (handles path separator differences)
+                if rec_path_str == source_path:
+                    return rec["file_hash"]
+
+        except Exception:
+            pass
+        return None
+
+    def _filename_match(self, filename: str) -> Optional[str]:
+        """Find hash by filename (case-insensitive, first match)."""
+        from pathlib import Path  # Local import required
+
         try:
             for rec in self.integrity.list_processed():
-                if rec["file_path"] == source_path:
+                rec_path_str = rec.get("file_path", "")
+                if not rec_path_str:
+                    continue
+
+                rec_filename = Path(rec_path_str).name
+                if rec_filename.lower() == filename.lower():
                     return rec["file_hash"]
-        except Exception:
+
+        except Exception as e:
+            logger.debug(f"_filename_match exception: {e}")
             pass
         return None

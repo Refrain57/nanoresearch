@@ -43,10 +43,10 @@
   - 修复 `VectorStoreWrapper` → `VectorStoreFactory`
   - 创建 `__main__.py` 入口
 
-- [x] **配置 nanobot MCP 连接**
-  - 创建 `~/.nanobot/config.json`
+- [x] **配置 NanoResearch MCP 连接**
+  - 创建 `~/.nanoresearch/config.json`
   - 配置 `tools.mcpServers.rag` 指向 `nanobot.rag.mcp_server`
-  - 验证 nanobot 能加载 MCP 工具
+  - 验证 NanoResearch 能加载 MCP 工具
 
 - [x] **更新 RAG Skill**
   - 更新工具名为 MCP 格式 (`mcp_rag_*`)
@@ -78,7 +78,7 @@ nanobot 项目内部同时是 MCP Server 和 MCP Client：
 | `nanobot/rag/core/` | RAG 核心模块 |
 | `nanobot/rag/ingestion/` | 摄入管道 |
 | `nanobot/rag/libs/` | LLM、Embedding、VectorStore |
-| `~/.nanobot/config.json` | MCP Server 配置 |
+| `~/.nanoresearch/config.json` | MCP Server 配置 |
 
 ---
 

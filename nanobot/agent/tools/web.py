@@ -76,7 +76,11 @@ class WebSearchTool(Tool):
     """Search the web using configured provider."""
 
     name = "web_search"
-    description = "Search the web. Returns titles, URLs, and snippets."
+    description = (
+        "Search the web for current information, news, and quick fact-checking. "
+        "For in-depth knowledge questions requiring synthesis and multi-source analysis, "
+        "first check RAG (research_claims/research_insights), then use the research tool if needed."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -110,7 +114,7 @@ class WebSearchTool(Tool):
             return f"Error: unknown search provider '{provider}'"
 
     async def _search_brave(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY", "BSA4NHbK3oEYb8ucuQORDVMIuzDQpro")
+        api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY")
         if not api_key:
             logger.warning("BRAVE_API_KEY not set, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, n)
@@ -129,7 +133,8 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning("Brave search failed: {}, falling back to DuckDuckGo", e)
+            return await self._search_duckduckgo(query, n)
 
     async def _search_tavily(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
@@ -147,7 +152,8 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning("Tavily search failed: {}, falling back to DuckDuckGo", e)
+            return await self._search_duckduckgo(query, n)
 
     async def _search_searxng(self, query: str, n: int) -> str:
         base_url = (self.config.base_url or os.environ.get("SEARXNG_BASE_URL", "")).strip()
@@ -157,7 +163,8 @@ class WebSearchTool(Tool):
         endpoint = f"{base_url.rstrip('/')}/search"
         is_valid, error_msg = _validate_url(endpoint)
         if not is_valid:
-            return f"Error: invalid SearXNG URL: {error_msg}"
+            logger.warning("Invalid SearXNG URL: {}, falling back to DuckDuckGo", error_msg)
+            return await self._search_duckduckgo(query, n)
         try:
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
@@ -169,10 +176,11 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning("SearXNG search failed: {}, falling back to DuckDuckGo", e)
+            return await self._search_duckduckgo(query, n)
 
     async def _search_jina(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "jina_eb2dcede8d1744cbadb2612f6a4c3aadwfKE3sDCq8WHYqx14L93m8EthWjN")
+        api_key = self.config.jina_api_key
         if not api_key:
             logger.warning("JINA_API_KEY not set, falling back to DuckDuckGo")
             return await self._search_duckduckgo(query, n)
@@ -185,6 +193,10 @@ class WebSearchTool(Tool):
                     headers=headers,
                     timeout=15.0,
                 )
+                # Handle payment/rate limit errors by falling back
+                if r.status_code in (402, 429):
+                    logger.warning("Jina search returned {}, falling back to DuckDuckGo", r.status_code)
+                    return await self._search_duckduckgo(query, n)
                 r.raise_for_status()
             data = r.json().get("data", [])[:n]
             items = [
@@ -193,7 +205,8 @@ class WebSearchTool(Tool):
             ]
             return _format_results(query, items, n)
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning("Jina search failed: {}, falling back to DuckDuckGo", e)
+            return await self._search_duckduckgo(query, n)
 
     async def _search_duckduckgo(self, query: str, n: int) -> str:
         try:
@@ -264,22 +277,45 @@ class WebFetchTool(Tool):
         return result
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
-        """Try fetching via Jina Reader API. Returns None on failure."""
+        """Try fetching via Jina Reader API. Returns None on failure.
+
+        Uses POST method like DeerFlow for better rate limit handling.
+        """
         try:
-            headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
-            jina_key = os.environ.get("JINA_API_KEY", "jina_eb2dcede8d1744cbadb2612f6a4c3aadwfKE3sDCq8WHYqx14L93m8EthWjN")
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            }
+            jina_key = self.config.jina_api_key
             if jina_key:
                 headers["Authorization"] = f"Bearer {jina_key}"
+
             async with httpx.AsyncClient(proxy=self.proxy, timeout=40.0) as client:
-                r = await client.get(f"https://r.jina.ai/{url}", headers=headers)
-                if r.status_code == 429:
-                    logger.debug("Jina Reader rate limited, falling back to readability")
+                r = await client.post(
+                    "https://r.jina.ai/",
+                    headers=headers,
+                    json={"url": url},
+                )
+                # Handle payment/rate limit errors by returning None to trigger fallback
+                if r.status_code in (402, 429):
+                    logger.debug("Jina Reader returned {}, falling back to readability", r.status_code)
                     return None
                 r.raise_for_status()
 
-            data = r.json().get("data", {})
-            title = data.get("title", "")
-            text = data.get("content", "")
+            # Jina returns plain text or JSON depending on Accept header
+            # With Accept: application/json, it returns JSON
+            data = r.json()
+            if isinstance(data, dict):
+                title = data.get("title", "")
+                text = data.get("content", "")
+                final_url = data.get("url", url)
+            else:
+                # Plain text response
+                text = r.text
+                title = ""
+                final_url = url
+
             if not text:
                 return None
 
@@ -291,7 +327,7 @@ class WebFetchTool(Tool):
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
             return json.dumps({
-                "url": url, "finalUrl": data.get("url", url), "status": r.status_code,
+                "url": url, "finalUrl": final_url, "status": r.status_code,
                 "extractor": "jina", "truncated": truncated, "length": len(text),
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
@@ -350,6 +386,10 @@ class WebFetchTool(Tool):
                 "extractor": extractor, "truncated": truncated, "length": len(text),
                 "untrusted": True, "text": text,
             }, ensure_ascii=False)
+        except httpx.HTTPStatusError as e:
+            # Try DuckDuckGo snippet as final fallback
+            logger.info("readability failed for {}: {}, trying DuckDuckGo snippet", url, e.response.status_code)
+            return await self._fetch_ddg_snippet(url, max_chars)
         except (ParserError, LxmlError) as e:
             logger.warning("WebFetch lxml error for {}: {}", url, e)
             return json.dumps({"error": f"lxml parsing error: {e}", "url": url}, ensure_ascii=False)
@@ -359,6 +399,92 @@ class WebFetchTool(Tool):
         except Exception as e:
             logger.error("WebFetch error for {}: {}", url, e)
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
+
+    async def _fetch_ddg_snippet(self, url: str, max_chars: int) -> str:
+        """Final fallback: fetch snippet from DuckDuckGo search results.
+
+        When direct fetching fails (403, blocked, etc.), try to get at least
+        a snippet from DDG search results.
+        """
+        try:
+            from ddgs import DDGS
+            from urllib.parse import urlparse
+
+            # Extract domain and path for search
+            parsed = urlparse(url)
+            domain = parsed.netloc
+
+            # Extract meaningful keywords from URL path
+            path = parsed.path.strip("/")
+            # For article IDs, try searching the full URL first, then domain
+            search_queries = [
+                url,  # Try exact URL first
+                f"site:{domain}",  # Then just domain
+            ]
+
+            # Also try extracting numbers/IDs from path for better matching
+            import re
+            numbers = re.findall(r'\d{6,}', path)  # Find long numbers (article IDs)
+            if numbers:
+                search_queries.insert(1, f"site:{domain} {numbers[0]}")
+
+            ddgs = DDGS(timeout=20)
+
+            for search_query in search_queries:
+                logger.info("DDG snippet fallback: searching for '{}'", search_query)
+                results = await asyncio.to_thread(ddgs.text, search_query, max_results=5)
+
+                if not results:
+                    continue
+
+                # Find matching result
+                for r in results:
+                    href = r.get("href", "")
+                    # Check if this result matches our URL
+                    if url in href or href in url or (numbers and any(n in href for n in numbers)):
+                        title = r.get("title", "")
+                        body = r.get("body", "")
+                        if title or body:
+                            text = f"# {title}\n\n{body}" if title else body
+                            truncated = len(text) > max_chars
+                            if truncated:
+                                text = text[:max_chars]
+                            text = f"{_UNTRUSTED_BANNER}\n\n{text}"
+                            logger.info("DDG snippet fallback: found matching snippet for {}", url)
+
+                            return json.dumps({
+                                "url": url, "finalUrl": href, "status": 200,
+                                "extractor": "ddg_snippet", "truncated": truncated,
+                                "length": len(text), "untrusted": True, "text": text,
+                            }, ensure_ascii=False)
+
+                # No exact match for this query, try next query
+                # But save first result as fallback
+                if search_query == search_queries[-1] and results:
+                    r = results[0]
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    if title or body:
+                        text = f"# {title}\n\n{body}" if title else body
+                        truncated = len(text) > max_chars
+                        if truncated:
+                            text = text[:max_chars]
+                        text = f"{_UNTRUSTED_BANNER}\n\n{text}"
+                        logger.info("DDG snippet fallback: using first result for {}", url)
+
+                        return json.dumps({
+                            "url": url, "finalUrl": r.get("href", url), "status": 200,
+                            "extractor": "ddg_snippet", "truncated": truncated,
+                            "length": len(text), "untrusted": True, "text": text,
+                        }, ensure_ascii=False)
+
+            logger.info("DDG snippet fallback: no results for {}", url)
+            return json.dumps({"error": "No snippet available", "url": url}, ensure_ascii=False)
+
+        except Exception as e:
+            logger.warning("DDG snippet fallback failed for {}: {}", url, e)
+            return json.dumps({"error": f"DDG snippet failed: {e}", "url": url}, ensure_ascii=False)
+            return json.dumps({"error": f"All fetch methods failed: {e}", "url": url}, ensure_ascii=False)
 
     def _to_markdown(self, html_content: str) -> str:
         """Convert HTML to markdown."""

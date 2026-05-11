@@ -1,4 +1,4 @@
-"""CLI commands for nanobot."""
+"""CLI commands for NanoResearch."""
 
 import asyncio
 from contextlib import contextmanager, nullcontext
@@ -39,9 +39,9 @@ from nanobot.config.schema import Config
 from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
-    name="nanobot",
+    name="nr",
     context_settings={"help_option_names": ["-h", "--help"]},
-    help=f"{__logo__} nanobot - Personal AI Assistant",
+    help=f"{__logo__} NanoResearch - Personal AI Research Assistant",
     no_args_is_help=True,
 )
 
@@ -143,7 +143,7 @@ def _print_agent_response(
     content = response or ""
     body = _response_renderable(content, render_markdown, metadata)
     console.print()
-    console.print(f"[cyan]{__logo__} nanobot[/cyan]")
+    console.print(f"[cyan]{__logo__} NanoResearch[/cyan]")
     console.print(body)
     console.print()
 
@@ -179,7 +179,7 @@ async def _print_interactive_response(
         ansi = _render_interactive_ansi(
             lambda c: (
                 c.print(),
-                c.print(f"[cyan]{__logo__} nanobot[/cyan]"),
+                c.print(f"[cyan]{__logo__} NanoResearch[/cyan]"),
                 c.print(_response_renderable(content, render_markdown, metadata)),
                 c.print(),
             )
@@ -228,7 +228,7 @@ async def _read_interactive_input_async() -> str:
 
 def version_callback(value: bool):
     if value:
-        console.print(f"{__logo__} nanobot v{__version__}")
+        console.print(f"{__logo__} NanoResearch v{__version__}")
         raise typer.Exit()
 
 
@@ -238,7 +238,7 @@ def main(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
 ):
-    """nanobot - Personal AI Assistant."""
+    """NanoResearch - Personal AI Research Assistant."""
     pass
 
 
@@ -253,7 +253,7 @@ def onboard(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
     wizard: bool = typer.Option(False, "--wizard", help="Use interactive wizard"),
 ):
-    """Initialize nanobot configuration and workspace."""
+    """Initialize NanoResearch configuration and workspace."""
     from nanobot.config.loader import get_config_path, load_config, save_config, set_config_path
     from nanobot.config.schema import Config
 
@@ -307,7 +307,7 @@ def onboard(
             console.print(f"[green]✓[/green] Config saved at {config_path}")
         except Exception as e:
             console.print(f"[red]✗[/red] Error during configuration: {e}")
-            console.print("[yellow]Please run 'nanobot onboard' again to complete setup.[/yellow]")
+            console.print("[yellow]Please run 'nr onboard' again to complete setup.[/yellow]")
             raise typer.Exit(1)
     _onboard_plugins(config_path)
 
@@ -319,13 +319,13 @@ def onboard(
 
     sync_workspace_templates(workspace_path)
 
-    agent_cmd = 'nanobot agent -m "Hello!"'
-    gateway_cmd = "nanobot gateway"
+    agent_cmd = 'nr agent -m "Hello!"'
+    gateway_cmd = "nr gateway"
     if config:
         agent_cmd += f" --config {config_path}"
         gateway_cmd += f" --config {config_path}"
 
-    console.print(f"\n{__logo__} nanobot is ready!")
+    console.print(f"\n{__logo__} NanoResearch is ready!")
     console.print("\nNext steps:")
     if wizard:
         console.print(f"  1. Chat: [cyan]{agent_cmd}[/cyan]")
@@ -334,7 +334,7 @@ def onboard(
         console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
         console.print("     Get one at: https://openrouter.ai/keys")
         console.print(f"  2. Chat: [cyan]{agent_cmd}[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/Refrain57/nanobot#-chat-apps[/dim]")
 
 
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
@@ -393,7 +393,7 @@ def _make_provider(config: Config):
     if backend == "azure_openai":
         if not p or not p.api_key or not p.api_base:
             console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.nanobot/config.json under providers.azure_openai section")
+            console.print("Set them in ~/.nanoresearch/config.json under providers.azure_openai section")
             console.print("Use the model field to specify the deployment name.")
             raise typer.Exit(1)
     elif backend == "openai_compat" and not model.startswith("bedrock/"):
@@ -401,7 +401,7 @@ def _make_provider(config: Config):
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
             console.print("[red]Error: No API key configured.[/red]")
-            console.print("Set one in ~/.nanobot/config.json under providers section")
+            console.print("Set one in ~/.nanoresearch/config.json under providers section")
             raise typer.Exit(1)
 
     # --- instantiation by backend ---
@@ -503,7 +503,7 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Start the nanobot gateway."""
+    """Start the NanoResearch gateway."""
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
@@ -519,7 +519,7 @@ def gateway(
     config = _load_runtime_config(config, workspace)
     port = port if port is not None else config.gateway.port
 
-    console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
+    console.print(f"{__logo__} Starting NanoResearch gateway version {__version__} on port {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
@@ -532,6 +532,24 @@ def gateway(
     # Create cron service with workspace-scoped store
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
+
+    # Create knowledge search and rag store for research knowledge loop
+    knowledge_search = None
+    rag_store = None
+    if config.tools.research.enabled:
+        try:
+            from nanobot.rag.core.settings import load_settings
+            from nanobot.research.knowledge_search import KnowledgeSearch
+            from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
+            settings = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(settings)
+            # Create RAG store for chunks (separate collection)
+            rag_store = ChromaStore(
+                settings=settings,
+                collection_name="research_chunks",
+            )
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not initialize knowledge search: {e}[/yellow]")
 
     # Create agent with cron service
     agent = AgentLoop(
@@ -551,6 +569,8 @@ def gateway(
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
         research_config=config.tools.research,
+        knowledge_search=knowledge_search,
+        rag_store=rag_store,
     )
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
@@ -711,7 +731,7 @@ def agent(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show NanoResearch runtime logs during chat"),
 ):
     """Interact with the agent directly."""
     from loguru import logger
@@ -734,6 +754,24 @@ def agent(
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
+    # Create knowledge search and rag store for research knowledge loop
+    knowledge_search = None
+    rag_store = None
+    if config.tools.research.enabled:
+        try:
+            from nanobot.rag.core.settings import load_settings
+            from nanobot.research.knowledge_search import KnowledgeSearch
+            from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
+            settings = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(settings)
+            # Create RAG store for chunks (separate collection)
+            rag_store = ChromaStore(
+                settings=settings,
+                collection_name="research_chunks",
+            )
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not initialize knowledge search: {e}[/yellow]")
+
     if logs:
         logger.enable("nanobot")
     else:
@@ -755,6 +793,8 @@ def agent(
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
         research_config=config.tools.research,
+        knowledge_search=knowledge_search,
+        rag_store=rag_store,
     )
 
     # Shared reference for progress callbacks
@@ -994,7 +1034,7 @@ def _get_bridge_dir() -> Path:
 
     if not source:
         console.print("[red]Bridge source not found.[/red]")
-        console.print("Try reinstalling: pip install --force-reinstall nanobot")
+        console.print("Try reinstalling: pip install --force-reinstall nanoresearch-ai")
         raise typer.Exit(1)
 
     console.print(f"{__logo__} Setting up bridge...")
@@ -1102,14 +1142,14 @@ def plugins_list():
 
 @app.command()
 def status():
-    """Show nanobot status."""
+    """Show NanoResearch status."""
     from nanobot.config.loader import get_config_path, load_config
 
     config_path = get_config_path()
     config = load_config()
     workspace = config.workspace_path
 
-    console.print(f"{__logo__} nanobot Status\n")
+    console.print(f"{__logo__} NanoResearch Status\n")
 
     console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")

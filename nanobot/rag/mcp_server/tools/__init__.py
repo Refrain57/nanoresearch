@@ -48,6 +48,12 @@ from nanobot.rag.mcp_server.tools.agentic import (
     register_all_agentic_tools,
 )
 
+# rag_search - unified entry point
+from nanobot.rag.mcp_server.tools.rag_search import (
+    RAGSearchTool,
+    register_tools as register_rag_search_tools,
+)
+
 __all__ = [
     # Retrieval
     "RetrieveDenseTool",
@@ -84,4 +90,7 @@ __all__ = [
     "register_session_tools",
     # All-in-one registration
     "register_all_agentic_tools",
+    # rag_search - unified entry point
+    "RAGSearchTool",
+    "register_rag_search_tools",
 ]

@@ -137,7 +137,11 @@ class TestMemoryDegradation:
         from nanobot.agent.memory import MemoryStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = MemoryStore(Path(tmpdir))
+            # Create mock knowledge_search
+            mock_ks = MagicMock()
+            mock_ks.write_user_memory_sync = MagicMock(return_value=(1, 0))
+
+            store = MemoryStore(Path(tmpdir), knowledge_search=mock_ks)
 
             messages = [
                 {"role": "user", "content": "测试消息", "timestamp": "2024-01-01 10:00"},
@@ -154,12 +158,8 @@ class TestMemoryDegradation:
             for i in range(3):
                 await store.consolidate(messages, mock_provider, "test-model")
 
-            # History should have raw archived content
-            history = store.read_long_term()  # This is MEMORY.md, not HISTORY.md
-
-            # The actual history file check
-            history_content = store.history_file.read_text()
-            assert "[RAW]" in history_content or "测试消息" in history_content
+            # Verify raw archive was called with knowledge_search
+            assert mock_ks.write_user_memory_sync.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_consecutive_failures_counter(self):
@@ -179,15 +179,18 @@ class TestMemoryDegradation:
                 has_tool_calls=False,
             ))
 
+            # Need non-empty messages to trigger consolidation
+            messages = [{"role": "user", "content": "test"}]
+
             # Fail twice
-            await store.consolidate([], mock_provider, "test-model")
+            await store.consolidate(messages, mock_provider, "test-model")
             assert store._consecutive_failures == 1
 
-            await store.consolidate([], mock_provider, "test-model")
+            await store.consolidate(messages, mock_provider, "test-model")
             assert store._consecutive_failures == 2
 
             # Third failure triggers raw archive and resets counter
-            await store.consolidate([], mock_provider, "test-model")
+            await store.consolidate(messages, mock_provider, "test-model")
             assert store._consecutive_failures == 0  # Reset after raw archive
 
 

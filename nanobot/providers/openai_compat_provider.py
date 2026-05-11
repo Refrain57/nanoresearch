@@ -317,18 +317,32 @@ class OpenAICompatProvider(LLMProvider):
 
         usage_map = cls._maybe_mapping(usage_obj)
         if usage_map is not None:
-            return {
+            result = {
                 "prompt_tokens": int(usage_map.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage_map.get("completion_tokens") or 0),
                 "total_tokens": int(usage_map.get("total_tokens") or 0),
             }
+            # DashScope: extract cached_tokens from prompt_tokens_details
+            details = usage_map.get("prompt_tokens_details") or {}
+            if isinstance(details, dict):
+                cached = details.get("cached_tokens", 0)
+                if cached:
+                    result["cache_read_input_tokens"] = int(cached)
+            return result
 
         if usage_obj:
-            return {
+            result = {
                 "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
                 "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
                 "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
             }
+            # DashScope: extract cached_tokens from prompt_tokens_details
+            details = getattr(usage_obj, "prompt_tokens_details", None)
+            if details:
+                cached = getattr(details, "cached_tokens", 0)
+                if cached:
+                    result["cache_read_input_tokens"] = int(cached)
+            return result
         return {}
 
     def _parse(self, response: Any) -> LLMResponse:
@@ -377,11 +391,16 @@ class OpenAICompatProvider(LLMProvider):
                 args = fn.get("arguments", {})
                 if isinstance(args, str):
                     args = json_repair.loads(args)
+                # Qwen 等模型偶尔会生成 [{...}] 而非 {...}
+                if isinstance(args, list) and len(args) > 0 and isinstance(args[0], dict):
+                    args = args[0]
+                elif not isinstance(args, dict):
+                    args = {}
                 ec, prov, fn_prov = _extract_tc_extras(tc)
                 parsed_tool_calls.append(ToolCallRequest(
                     id=_short_tool_id(),
                     name=str(fn.get("name") or ""),
-                    arguments=args if isinstance(args, dict) else {},
+                    arguments=args,
                     extra_content=ec,
                     provider_specific_fields=prov,
                     function_provider_specific_fields=fn_prov,
@@ -418,6 +437,12 @@ class OpenAICompatProvider(LLMProvider):
             args = tc.function.arguments
             if isinstance(args, str):
                 args = json_repair.loads(args)
+            # Qwen 等模型偶尔会生成 [{...}] 而非 {...}
+            # 从数组中提取第一个元素，或回退到空对象
+            if isinstance(args, list) and len(args) > 0 and isinstance(args[0], dict):
+                args = args[0]
+            elif not isinstance(args, dict):
+                args = {}
             ec, prov, fn_prov = _extract_tc_extras(tc)
             tool_calls.append(ToolCallRequest(
                 id=_short_tool_id(),
@@ -509,13 +534,25 @@ class OpenAICompatProvider(LLMProvider):
             for tc in (delta.tool_calls or []) if delta else []:
                 _accum_tc(tc, getattr(tc, "index", 0))
 
+        def _parse_arguments(args_str: str) -> dict[str, Any]:
+            """Parse arguments string, handling malformed arrays from Qwen models."""
+            if not args_str:
+                return {}
+            args = json_repair.loads(args_str)
+            # Qwen 等模型偶尔会生成 [{...}] 而非 {...}
+            if isinstance(args, list) and len(args) > 0 and isinstance(args[0], dict):
+                return args[0]
+            if isinstance(args, dict):
+                return args
+            return {}
+
         return LLMResponse(
             content="".join(content_parts) or None,
             tool_calls=[
                 ToolCallRequest(
                     id=b["id"] or _short_tool_id(),
                     name=b["name"],
-                    arguments=json_repair.loads(b["arguments"]) if b["arguments"] else {},
+                    arguments=_parse_arguments(b["arguments"]),
                     extra_content=b.get("extra_content"),
                     provider_specific_fields=b.get("prov"),
                     function_provider_specific_fields=b.get("fn_prov"),

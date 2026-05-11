@@ -17,7 +17,7 @@ Design Principles:
 """
 
 from pathlib import Path
-from typing import Callable, List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any, Literal
 import time
 
 from nanobot.rag.core.settings import Settings, load_settings, resolve_path
@@ -29,6 +29,7 @@ from nanobot.rag.observability.logger import get_logger
 from nanobot.rag.libs.loader.file_integrity import SQLiteIntegrityChecker
 from nanobot.rag.libs.loader.pdf_loader import PdfLoader
 from nanobot.rag.libs.loader.markdown_loader import MarkdownLoader
+from nanobot.rag.libs.loader.marker_loader import MarkerLoader
 from nanobot.rag.libs.loader.base_loader import BaseLoader
 from nanobot.rag.libs.embedding.embedding_factory import EmbeddingFactory
 from nanobot.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
@@ -172,32 +173,55 @@ class IngestionPipeline:
         self,
         settings: Settings,
         collection: str = "default",
-        force: bool = False
+        force: bool = False,
+        pdf_parser: Literal["markitdown", "marker"] = "marker",
     ):
         """Initialize pipeline with all components.
-        
+
         Args:
             settings: Application settings from settings.yaml
             collection: Collection name for organizing documents
             force: If True, re-process even if file was previously processed
+            pdf_parser: PDF parser to use ("markitdown" or "marker")
         """
         self.settings = settings
         self.collection = collection
         self.force = force
-        
+        self.pdf_parser = pdf_parser
+
         # Initialize all components
         logger.info("Initializing Ingestion Pipeline components...")
-        
+
         # Stage 1: File Integrity
-        self.integrity_checker = SQLiteIntegrityChecker(db_path=str(resolve_path("~/.nanobot/rag/ingestion_history.db")))
+        self.integrity_checker = SQLiteIntegrityChecker(db_path=str(resolve_path("~/.nanoresearch/rag/ingestion_history.db")))
         logger.info("  ✓ FileIntegrityChecker initialized")
 
         # Stage 2: Loaders (lazy initialization based on file type)
-        self._loaders = {
-            ".pdf": PdfLoader(
+        # Select PDF loader based on pdf_parser parameter
+        if pdf_parser == "marker":
+            try:
+                pdf_loader = MarkerLoader(
+                    device="cuda",
+                    extract_images=True,
+                    image_storage_dir=str(resolve_path(f"~/.nanoresearch/rag/images/{collection}"))
+                )
+                logger.info("  ✓ PDF Loader: Marker (GPU-accelerated)")
+            except ImportError:
+                logger.warning("Marker not available, falling back to MarkItDown")
+                pdf_loader = PdfLoader(
+                    extract_images=True,
+                    image_storage_dir=str(resolve_path(f"~/.nanoresearch/rag/images/{collection}"))
+                )
+                logger.info("  ✓ PDF Loader: MarkItDown (fallback)")
+        else:
+            pdf_loader = PdfLoader(
                 extract_images=True,
-                image_storage_dir=str(resolve_path(f"~/.nanobot/rag/images/{collection}"))
-            ),
+                image_storage_dir=str(resolve_path(f"~/.nanoresearch/rag/images/{collection}"))
+            )
+            logger.info("  ✓ PDF Loader: MarkItDown")
+
+        self._loaders = {
+            ".pdf": pdf_loader,
             ".md": MarkdownLoader(),
             ".markdown": MarkdownLoader(),
             ".mdown": MarkdownLoader(),
@@ -239,12 +263,12 @@ class IngestionPipeline:
         self.vector_upserter = VectorUpserter(settings, collection_name=collection)
         logger.info(f"  ✓ VectorUpserter initialized (provider={settings.vector_store.provider}, collection={collection})")
 
-        self.bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"~/.nanobot/rag/bm25/{collection}")))
+        self.bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{collection}")))
         logger.info("  ✓ BM25Indexer initialized")
 
         self.image_storage = ImageStorage(
-            db_path=str(resolve_path("~/.nanobot/rag/image_index.db")),
-            images_root=str(resolve_path("~/.nanobot/rag/images"))
+            db_path=str(resolve_path("~/.nanoresearch/rag/image_index.db")),
+            images_root=str(resolve_path("~/.nanoresearch/rag/images"))
         )
         logger.info("  ✓ ImageStorage initialized")
 
@@ -549,17 +573,22 @@ class IngestionPipeline:
             # Note: Images are already saved by PdfLoader, we just need to index them
             logger.info("  6c. Image Storage Index...")
             images = document.metadata.get("images", [])
+            indexed_count = 0
             for img in images:
-                img_path = Path(img["path"])
-                if img_path.exists():
-                    self.image_storage.register_image(
-                        image_id=img["id"],
-                        file_path=img_path,
-                        collection=self.collection,
-                        doc_hash=file_hash,
-                        page_num=img.get("page", 0)
-                    )
-            logger.info(f"      Indexed {len(images)} images")
+                try:
+                    img_path = Path(img["path"])
+                    if img_path.exists():
+                        self.image_storage.register_image(
+                            image_id=img["id"],
+                            file_path=img_path,
+                            collection=self.collection,
+                            doc_hash=file_hash,
+                            page_num=img.get("page", 0)
+                        )
+                        indexed_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to register image {img.get('id', 'unknown')}: {e}")
+            logger.info(f"      Indexed {indexed_count}/{len(images)} images")
             
             stages["storage"] = {
                 "vector_count": len(vector_ids),
@@ -593,13 +622,13 @@ class IngestionPipeline:
                         "backend": "ChromaDB",
                         "collection": self.collection,
                         "count": len(vector_ids),
-                        "path": "~/.nanobot/rag/chroma/",
+                        "path": "~/.nanoresearch/rag/chroma/",
                     },
                     "sparse_store": {
                         "backend": "BM25",
                         "collection": self.collection,
                         "count": len(sparse_stats),
-                        "path": f"~/.nanobot/rag/bm25/{self.collection}/",
+                        "path": f"~/.nanoresearch/rag/bm25/{self.collection}/",
                     },
                     "image_store": {
                         "backend": "ImageStorage (JSON index)",
@@ -652,22 +681,24 @@ def run_pipeline(
     file_path: str,
     settings_path: Optional[str] = None,
     collection: str = "default",
-    force: bool = False
+    force: bool = False,
+    pdf_parser: str = "marker",
 ) -> PipelineResult:
     """Convenience function to run the pipeline.
-    
+
     Args:
         file_path: Path to file to process
         settings_path: Path to settings.yaml (default: <repo>/config/settings.yaml)
         collection: Collection name
         force: Force reprocessing
-    
+        pdf_parser: PDF parser to use ("markitdown" or "marker")
+
     Returns:
         PipelineResult with execution details
     """
     settings = load_settings(settings_path)
-    pipeline = IngestionPipeline(settings, collection=collection, force=force)
-    
+    pipeline = IngestionPipeline(settings, collection=collection, force=force, pdf_parser=pdf_parser)
+
     try:
         return pipeline.run(file_path)
     finally:

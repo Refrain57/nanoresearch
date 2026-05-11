@@ -46,7 +46,7 @@ class SparseRetriever:
         >>> from nanobot.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
         >>> 
         >>> settings = Settings.load('config/settings.yaml')
-        >>> bm25_indexer = BM25Indexer(index_dir="~/.nanobot/rag/bm25")
+        >>> bm25_indexer = BM25Indexer(index_dir="~/.nanoresearch/rag/bm25")
         >>> bm25_indexer.load("default")
         >>> vector_store = VectorStoreFactory.create(settings)
         >>> 
@@ -293,7 +293,7 @@ def create_sparse_retriever(
     settings: Settings,
     bm25_indexer: Optional[BM25Indexer] = None,
     vector_store: Optional[BaseVectorStore] = None,
-    index_dir: str = "~/.nanobot/rag/bm25",
+    index_dir: str = "~/.nanoresearch/rag/bm25",
 ) -> SparseRetriever:
     """Factory function to create a SparseRetriever with optional dependency injection.
 
@@ -306,7 +306,7 @@ def create_sparse_retriever(
                       If None, created with default index_dir.
         vector_store: Optional pre-configured vector store.
                       If None, created from VectorStoreFactory.
-        index_dir: Directory for BM25 index files (default: "~/.nanobot/rag/bm25").
+        index_dir: Directory for BM25 index files (default: "~/.nanoresearch/rag/bm25").
     
     Returns:
         Configured SparseRetriever instance.

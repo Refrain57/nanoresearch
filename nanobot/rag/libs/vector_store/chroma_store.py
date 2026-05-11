@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from contextlib import contextmanager
 
 try:
     import chromadb
@@ -16,6 +17,12 @@ try:
     CHROMADB_AVAILABLE = True
 except ImportError:
     CHROMADB_AVAILABLE = False
+
+try:
+    import filelock
+    FILELOCK_AVAILABLE = True
+except ImportError:
+    FILELOCK_AVAILABLE = False
 
 from nanobot.rag.core.settings import resolve_path
 from nanobot.rag.libs.vector_store.base_vector_store import BaseVectorStore
@@ -61,11 +68,11 @@ class ChromaStore(BaseVectorStore):
     
     def __init__(self, settings: Settings, **kwargs: Any) -> None:
         """Initialize ChromaStore with configuration.
-        
+
         Args:
             settings: Application settings containing vector_store configuration.
             **kwargs: Optional overrides for collection_name or persist_directory.
-        
+
         Raises:
             ImportError: If chromadb package is not installed.
             ValueError: If required configuration is missing.
@@ -76,7 +83,7 @@ class ChromaStore(BaseVectorStore):
                 "chromadb package is required for ChromaStore. "
                 "Install it with: pip install chromadb"
             )
-        
+
         # Extract configuration
         try:
             vector_store_config = settings.vector_store
@@ -85,23 +92,31 @@ class ChromaStore(BaseVectorStore):
                 "Missing required configuration: settings.vector_store. "
                 "Please ensure 'vector_store' section exists in settings.yaml"
             ) from e
-        
+
         # Collection name (allow override)
         self.collection_name = kwargs.get(
             'collection_name',
             getattr(vector_store_config, 'collection_name', 'knowledge_hub')
         )
-        
+
         # Persist directory (allow override)
         persist_dir_str = kwargs.get(
             'persist_directory',
             getattr(vector_store_config, 'persist_directory', './data/db/chroma')
         )
         self.persist_directory = resolve_path(persist_dir_str)
-        
+
         # Ensure persist directory exists
         self.persist_directory.mkdir(parents=True, exist_ok=True)
-        
+
+        # File lock for multi-process safety
+        lock_path = self.persist_directory / ".chroma.lock"
+        if FILELOCK_AVAILABLE:
+            self._lock = filelock.FileLock(str(lock_path), timeout=30)
+        else:
+            self._lock = None
+            logger.warning("filelock not installed, multi-process ChromaDB access may conflict")
+
         logger.info(
             f"Initializing ChromaStore: collection='{self.collection_name}', "
             f"persist_directory='{self.persist_directory}'"
@@ -113,7 +128,7 @@ class ChromaStore(BaseVectorStore):
             ChromaStore._client_cache: dict[str, chromadb.PersistentClient] = {}
 
         if client_key not in ChromaStore._client_cache:
-            # Initialize ChromaDB client with persistent storage
+            # Initialize ChromaDB client (lock acquired per-operation, not here)
             try:
                 ChromaStore._client_cache[client_key] = chromadb.PersistentClient(
                     path=str(self.persist_directory),
@@ -128,7 +143,7 @@ class ChromaStore(BaseVectorStore):
                 ) from e
 
         self.client = ChromaStore._client_cache[client_key]
-        
+
         # Get or create collection
         try:
             self.collection = self.client.get_or_create_collection(
@@ -139,12 +154,21 @@ class ChromaStore(BaseVectorStore):
             raise RuntimeError(
                 f"Failed to get or create collection '{self.collection_name}': {e}"
             ) from e
-        
+
         logger.info(
             f"ChromaStore initialized successfully. "
             f"Collection count: {self.collection.count()}"
         )
-    
+
+    @contextmanager
+    def _acquire_lock(self):
+        """Acquire file lock for multi-process safety."""
+        if self._lock:
+            with self._lock:
+                yield
+        else:
+            yield
+
     def upsert(
         self,
         records: List[Dict[str, Any]],
@@ -167,46 +191,47 @@ class ChromaStore(BaseVectorStore):
         """
         # Validate records
         self.validate_records(records)
-        
+
         # Prepare data for ChromaDB
         ids = []
         embeddings = []
         metadatas = []
         documents = []  # ChromaDB requires documents field
-        
+
         for record in records:
             ids.append(str(record['id']))
             embeddings.append(record['vector'])
-            
+
             # Metadata: extract or default to empty dict
             metadata = record.get('metadata', {})
             # Ensure all metadata values are JSON-serializable
             # ChromaDB requires string, int, float, or bool values
             sanitized_metadata = self._sanitize_metadata(metadata)
-            
+
             # ChromaDB requires non-empty metadata dict
             if not sanitized_metadata:
                 sanitized_metadata = {'_placeholder': 'true'}
-            
+
             metadatas.append(sanitized_metadata)
-            
+
             # Document: use metadata.text if available, otherwise use id
             document = metadata.get('text', record['id'])
             documents.append(str(document))
-        
+
         # Perform upsert (ChromaDB's add() is idempotent with same IDs)
-        try:
-            self.collection.upsert(
-                ids=ids,
-                embeddings=embeddings,
-                metadatas=metadatas,
-                documents=documents,
-            )
-            logger.debug(f"Successfully upserted {len(records)} records to ChromaDB")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to upsert {len(records)} records to ChromaDB: {e}"
-            ) from e
+        with self._acquire_lock():
+            try:
+                self.collection.upsert(
+                    ids=ids,
+                    embeddings=embeddings,
+                    metadatas=metadatas,
+                    documents=documents,
+                )
+                logger.debug(f"Successfully upserted {len(records)} records to ChromaDB")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to upsert {len(records)} records to ChromaDB: {e}"
+                ) from e
     
     def query(
         self,
@@ -243,17 +268,18 @@ class ChromaStore(BaseVectorStore):
         where_clause = self._build_where_clause(filters) if filters else None
         
         # Perform query
-        try:
-            results = self.collection.query(
-                query_embeddings=[vector],
-                n_results=top_k,
-                where=where_clause,
-                include=["metadatas", "distances", "documents"]
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to query ChromaDB with top_k={top_k}: {e}"
-            ) from e
+        with self._acquire_lock():
+            try:
+                results = self.collection.query(
+                    query_embeddings=[vector],
+                    n_results=top_k,
+                    where=where_clause,
+                    include=["metadatas", "distances", "documents"]
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to query ChromaDB with top_k={top_k}: {e}"
+                ) from e
         
         # Transform results to standard format
         # ChromaDB returns nested lists: [[id1, id2, ...]]
@@ -301,14 +327,15 @@ class ChromaStore(BaseVectorStore):
         """
         if not ids:
             raise ValueError("IDs list cannot be empty")
-        
-        try:
-            self.collection.delete(ids=[str(id_) for id_ in ids])
-            logger.debug(f"Successfully deleted {len(ids)} records from ChromaDB")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to delete {len(ids)} records from ChromaDB: {e}"
-            ) from e
+
+        with self._acquire_lock():
+            try:
+                self.collection.delete(ids=[str(id_) for id_ in ids])
+                logger.debug(f"Successfully deleted {len(ids)} records from ChromaDB")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to delete {len(ids)} records from ChromaDB: {e}"
+                ) from e
     
     def clear(
         self,
@@ -527,15 +554,16 @@ class ChromaStore(BaseVectorStore):
                 - 'text': The stored text content
                 - 'metadata': Associated metadata
         """
-        try:
-            # ChromaDB's get method without IDs returns all records
-            results = self.collection.get(
-                include=["metadatas", "documents"]
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to get all documents from ChromaDB: {e}"
-            ) from e
+        with self._acquire_lock():
+            try:
+                # ChromaDB's get method without IDs returns all records
+                results = self.collection.get(
+                    include=["metadatas", "documents"]
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to get all documents from ChromaDB: {e}"
+                ) from e
 
         output = []
         if results and results.get('ids'):
@@ -629,4 +657,219 @@ class ChromaStore(BaseVectorStore):
                 output.append({})
         
         logger.debug(f"Retrieved {len([r for r in output if r])} of {len(ids)} records by IDs")
+        return output
+
+    def count(self) -> int:
+        """Return the number of records in the collection.
+
+        Returns:
+            Number of records in the ChromaDB collection.
+        """
+        return self.collection.count()
+
+    def query_batch(
+        self,
+        vectors: List[List[float]],
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        threshold: float = 0.0,
+        trace: Optional[Any] = None,
+    ) -> List[List[Dict[str, Any]]]:
+        """Batch query ChromaDB for similar vectors.
+
+        Args:
+            vectors: List of query vectors to search for.
+            top_k: Maximum number of results per query.
+            filters: Optional metadata filters.
+            threshold: Minimum similarity score threshold.
+            trace: Optional TraceContext for observability.
+
+        Returns:
+            List of result lists, one per query vector.
+            Each result contains: id, score, text, metadata.
+
+        Raises:
+            ValueError: If vectors list is empty.
+            RuntimeError: If the query operation fails.
+        """
+        if not vectors:
+            raise ValueError("vectors list cannot be empty")
+
+        where_clause = self._build_where_clause(filters) if filters else None
+
+        try:
+            results = self.collection.query(
+                query_embeddings=vectors,
+                n_results=top_k,
+                where=where_clause,
+                include=["metadatas", "distances", "documents"]
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to batch query ChromaDB: {e}"
+            ) from e
+
+        output = []
+        if results and results.get('ids'):
+            for i, ids in enumerate(results['ids']):
+                query_results = []
+                distances = results['distances'][i] if 'distances' in results else []
+                metadatas = results['metadatas'][i] if 'metadatas' in results else []
+                documents = results['documents'][i] if 'documents' in results else []
+
+                for j, record_id in enumerate(ids):
+                    distance = distances[j] if j < len(distances) else 0.0
+                    score = 1.0 - (distance / 2.0)
+
+                    # Apply threshold filter
+                    if threshold > 0 and score < threshold:
+                        continue
+
+                    query_results.append({
+                        'id': record_id,
+                        'score': max(0.0, score),
+                        'text': documents[j] if j < len(documents) and documents[j] else '',
+                        'metadata': metadatas[j] if j < len(metadatas) and metadatas[j] else {}
+                    })
+
+                output.append(query_results)
+        else:
+            # Return empty lists for each query
+            output = [[] for _ in vectors]
+
+        logger.debug(f"Batch query returned results for {len(output)} vectors")
+        return output
+
+    def update_batch(
+        self,
+        items: List[tuple],
+        trace: Optional[Any] = None,
+    ) -> None:
+        """Batch update metadata for records.
+
+        Args:
+            items: List of (id, metadata) tuples to update.
+            trace: Optional TraceContext for observability.
+
+        Raises:
+            ValueError: If items list is empty.
+            RuntimeError: If the update operation fails.
+        """
+        if not items:
+            return
+
+        ids = [str(item[0]) for item in items]
+        metadatas = [self._sanitize_metadata(item[1]) for item in items]
+
+        with self._acquire_lock():
+            try:
+                # ChromaDB's update method only updates metadata (not embeddings)
+                self.collection.update(
+                    ids=ids,
+                    metadatas=metadatas,
+                )
+                logger.debug(f"Successfully updated {len(items)} records in ChromaDB")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to update {len(items)} records in ChromaDB: {e}"
+                ) from e
+
+    def insert_batch(
+        self,
+        records: List[Dict[str, Any]],
+        trace: Optional[Any] = None,
+    ) -> List[str]:
+        """Batch insert records, returning the inserted IDs.
+
+        Args:
+            records: List of records to insert. Each must have:
+                - 'id': Unique identifier (str)
+                - 'vector': Embedding vector (List[float])
+                - 'metadata': Metadata dict
+            trace: Optional TraceContext for observability.
+
+        Returns:
+            List of inserted record IDs.
+
+        Raises:
+            ValueError: If records list is empty or invalid.
+            RuntimeError: If the insert operation fails.
+        """
+        if not records:
+            return []
+
+        # Validate records
+        self.validate_records(records)
+
+        ids = []
+        embeddings = []
+        metadatas = []
+        documents = []
+
+        for record in records:
+            ids.append(str(record['id']))
+            embeddings.append(record['vector'])
+            metadata = self._sanitize_metadata(record.get('metadata', {}))
+            if not metadata:
+                metadata = {'_placeholder': 'true'}
+            metadatas.append(metadata)
+            documents.append(metadata.get('text', record['id']))
+
+        try:
+            self.collection.add(
+                ids=ids,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                documents=documents,
+            )
+            logger.debug(f"Successfully inserted {len(records)} records to ChromaDB")
+            return ids
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to insert {len(records)} records to ChromaDB: {e}"
+            ) from e
+
+    def query_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        limit: Optional[int] = None,
+        trace: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query records by metadata filters only (no vector search).
+
+        Args:
+            filters: Metadata filters to match.
+            limit: Maximum number of results to return.
+            trace: Optional TraceContext for observability.
+
+        Returns:
+            List of matching records with id, text, metadata.
+        """
+        where_clause = self._build_where_clause(filters) if filters else None
+
+        with self._acquire_lock():
+            try:
+                results = self.collection.get(
+                    where=where_clause,
+                    include=["metadatas", "documents"],
+                    limit=limit,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to query by metadata: {e}"
+                ) from e
+
+        output = []
+        if results and results.get('ids'):
+            ids = results['ids']
+            documents = results.get('documents', [''] * len(ids))
+            metadatas = results.get('metadatas', [{}] * len(ids))
+
+            for i, record_id in enumerate(ids):
+                output.append({
+                    'id': record_id,
+                    'text': documents[i] if documents and documents[i] else '',
+                    'metadata': metadatas[i] if metadatas and metadatas[i] else {}
+                })
+
         return output

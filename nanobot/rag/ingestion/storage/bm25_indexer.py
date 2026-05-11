@@ -9,13 +9,14 @@ This module implements the BM25 indexing component, responsible for:
 Design Principles:
 - Idempotent: Rebuild produces same results for same input
 - Observable: Accepts TraceContext for future integration
-- Persistent: Indexes saved to ~/.nanobot/rag/bm25/ directory
+- Persistent: Indexes saved to ~/.nanoresearch/rag/bm25/ directory
 - Deterministic: Same corpus produces same IDF scores
 """
 
 import json
 import math
 import os
+import threading
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -54,7 +55,7 @@ class BM25Indexer:
         - df = document frequency (number of docs containing term)
     
     Example:
-        >>> indexer = BM25Indexer(index_dir="~/.nanobot/rag/bm25")
+        >>> indexer = BM25Indexer(index_dir="~/.nanoresearch/rag/bm25")
         >>>
         >>> # Build index from SparseEncoder output
         >>> term_stats = [
@@ -70,14 +71,14 @@ class BM25Indexer:
 
     def __init__(
         self,
-        index_dir: str = "~/.nanobot/rag/bm25",
+        index_dir: str = "~/.nanoresearch/rag/bm25",
         k1: float = 1.5,
         b: float = 0.75,
     ):
         """Initialize BM25Indexer.
 
         Args:
-            index_dir: Directory to store index files (default: ~/.nanobot/rag/bm25)
+            index_dir: Directory to store index files (default: ~/.nanoresearch/rag/bm25)
             k1: BM25 term frequency saturation parameter (default: 1.5)
             b: BM25 length normalization parameter (default: 0.75)
         
@@ -92,7 +93,8 @@ class BM25Indexer:
         self.index_dir = Path(index_dir)
         self.k1 = k1
         self.b = b
-        
+        self._lock = threading.Lock()  # Lock for concurrent write protection
+
         # In-memory index structure
         self._index: Dict[str, Dict[str, Any]] = {}
         self._metadata: Dict[str, Any] = {}
@@ -373,8 +375,11 @@ class BM25Indexer:
         and re-saves the index.
 
         Args:
-            doc_id: Document identifier (or prefix).  All postings whose
-                ``chunk_id`` starts with this value are removed.
+            doc_id: Document identifier. Can be:
+                - Full SHA-256 hash (64 chars): Will use first 8 chars as prefix
+                - Short hash prefix (8 chars): Used directly
+                - Any other prefix: Used as-is
+                All postings whose ``chunk_id`` starts with this value are removed.
             collection: Collection name.
 
         Returns:
@@ -384,6 +389,17 @@ class BM25Indexer:
             if not self.load(collection):
                 return False
 
+        # Normalize doc_id:
+        # 1. Full SHA-256 hash (64 chars): Use first 8 chars as prefix
+        # 2. doc_{hash[:16]} format (20 chars): Extract the hash part
+        # 3. Already a short prefix (8 chars): Use directly
+        normalized_id = doc_id
+        if len(normalized_id) == 64 and all(c in '0123456789abcdef' for c in normalized_id.lower()):
+            normalized_id = normalized_id[:8]
+        elif normalized_id.startswith('doc_'):
+            # Extract hash part from "doc_{hash[:16]}" format
+            normalized_id = normalized_id[4:12]  # "doc_" = 4, hash[:16] -> hash[:8]
+
         removed_any = False
         terms_to_delete: list[str] = []
 
@@ -391,7 +407,7 @@ class BM25Indexer:
             original_len = len(term_data["postings"])
             term_data["postings"] = [
                 p for p in term_data["postings"]
-                if not p["chunk_id"].startswith(doc_id)
+                if not p["chunk_id"].startswith(normalized_id)
             ]
             if len(term_data["postings"]) < original_len:
                 removed_any = True
@@ -525,24 +541,25 @@ class BM25Indexer:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         
         index_path = self._get_index_path(collection)
-        
+
         # Prepare data
         data = {
             "metadata": self._metadata,
             "index": self._index
         }
-        
-        # Write atomically (write to temp file, then rename)
-        temp_path = index_path.with_suffix('.tmp')
-        try:
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            # Atomic rename
-            temp_path.replace(index_path)
-            
-        except Exception as e:
-            # Clean up temp file if write failed
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
+
+        # Write atomically with lock for concurrent write protection
+        with self._lock:
+            temp_path = index_path.with_suffix('.tmp')
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+                # Atomic rename
+                temp_path.replace(index_path)
+
+            except Exception as e:
+                # Clean up temp file if write failed
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise

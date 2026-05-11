@@ -257,13 +257,25 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[str | list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None]:
+        """Apply cache_control markers.
+
+        Design: ContextBuilder.build_system_prompt_blocks() already returns blocks
+        with cache_control markers, so Provider layer only needs to pass through.
+        If blocks already have cache_control, just pass through. Otherwise add markers.
+        """
         marker = {"type": "ephemeral"}
 
         if isinstance(system, str) and system:
+            # String format: wrap in list with cache marker
             system = [{"type": "text", "text": system, "cache_control": marker}]
         elif isinstance(system, list) and system:
+            # Already blocks format: check if cache_control exists
             system = list(system)
-            system[-1] = {**system[-1], "cache_control": marker}
+            has_marker = any("cache_control" in b for b in system)
+            if not has_marker:
+                # No cache_control found: add to last block as fallback
+                system[-1] = {**system[-1], "cache_control": marker}
+            # Otherwise: blocks already have cache_control, pass through as-is
 
         new_msgs = list(messages)
         if len(new_msgs) >= 3:

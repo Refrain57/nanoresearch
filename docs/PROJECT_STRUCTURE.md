@@ -1,8 +1,8 @@
-# nanobot 项目结构
+# NanoResearch 项目结构
 
 ## 概述
 
-**nanobot** 是一个超轻量级个人 AI 助手框架，支持多渠道（Telegram、Discord、Slack 等）和多 LLM 提供商。
+**NanoResearch** 是一个超轻量级个人 AI 助手框架，支持多渠道（Telegram、Discord、Slack 等）和多 LLM 提供商。
 
 ## 根目录结构
 
@@ -144,7 +144,7 @@ nanobot/
 ## 全局配置
 
 ```
-~/.nanobot/
+~/.nanoresearch/
 ├── config.json          # MCP Server 配置
 ├── rag/settings.yaml    # RAG 配置（复制到项目内）
 └── workspace/          # 工作空间
@@ -164,7 +164,7 @@ nanobot agent
 
 ## 关键配置
 
-### ~/.nanobot/config.json
+### ~/.nanoresearch/config.json
 ```json
 {
   "tools": {
