@@ -243,9 +243,12 @@ class WebFetchTool(Tool):
         "required": ["url"],
     }
 
-    def __init__(self, max_chars: int = 50000, proxy: str | None = None):
+    def __init__(self, max_chars: int = 50000, proxy: str | None = None, config: "WebSearchConfig | None" = None):
+        from nanobot.config.schema import WebSearchConfig
+
         self.max_chars = max_chars
         self.proxy = proxy
+        self.config = config if config is not None else WebSearchConfig()
 
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> Any:
         max_chars = maxChars or self.max_chars

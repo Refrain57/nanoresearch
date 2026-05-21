@@ -414,6 +414,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
             return text
 
         images = []
+        file_paths = []
         for path in media:
             p = Path(path)
             if not p.is_file():
@@ -421,18 +422,25 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
             raw = p.read_bytes()
             # Detect real MIME type from magic bytes; fallback to filename guess
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
-            if not mime or not mime.startswith("image/"):
-                continue
-            b64 = base64.b64encode(raw).decode()
-            images.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-                "_meta": {"path": str(p)},
-            })
+            if mime and mime.startswith("image/"):
+                b64 = base64.b64encode(raw).decode()
+                images.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    "_meta": {"path": str(p)},
+                })
+            else:
+                file_paths.append(str(p))
+
+        full_text = text
+        if file_paths:
+            paths_note = "\n\n[Received files — use read_file to access:\n" + \
+                         "\n".join(f"- {fp}" for fp in file_paths) + "\n]"
+            full_text = text + paths_note
 
         if not images:
-            return text
-        return images + [{"type": "text", "text": text}]
+            return full_text
+        return images + [{"type": "text", "text": full_text}]
 
     def add_tool_result(
         self, messages: list[dict[str, Any]],

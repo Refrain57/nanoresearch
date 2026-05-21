@@ -21,6 +21,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.paper_fetch import PaperFetchTool
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -125,6 +126,8 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Track which sessions have had startup consolidation to avoid repeated checks
+        self._startup_consolidated: set[str] = set()
         # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
         _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
         self._concurrency_gate: asyncio.Semaphore | None = (
@@ -160,6 +163,7 @@ class AgentLoop:
             ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
+        self.tools.register(PaperFetchTool(workspace=self.workspace))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
@@ -430,8 +434,13 @@ class AgentLoop:
         It ensures that important conversations from previous sessions are preserved
         in MEMORY.md even if the previous session ended normally without token pressure.
         """
+        # Only check once per session to avoid repeated consolidation
+        if session.key in self._startup_consolidated:
+            return
+
         pending_count = len(session.messages) - session.last_consolidated
         if pending_count < 5:
+            self._startup_consolidated.add(session.key)  # Mark as checked
             return  # Not enough messages to bother consolidating
 
         logger.info(
@@ -444,7 +453,8 @@ class AgentLoop:
 
         if success:
             session.last_consolidated = len(session.messages)
-            self.sessions.save(session)
+            await self.sessions.save(session)
+            self._startup_consolidated.add(session.key)  # Mark as done
             logger.info("Startup consolidation complete for {} messages", pending_count)
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
@@ -469,7 +479,7 @@ class AgentLoop:
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
+            session = await self.sessions.get_or_create(key)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
@@ -487,7 +497,7 @@ class AgentLoop:
                 message_id=msg.metadata.get("message_id"),
             )
             self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
+            await self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -496,7 +506,7 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
-        session = self.sessions.get_or_create(key)
+        session = await self.sessions.get_or_create(key)
 
         # Startup consolidation: check if there are unconsolidated messages from last session
         await self._check_pending_consolidation(session)
@@ -546,7 +556,7 @@ class AgentLoop:
             final_content = "I've completed processing but have no response to give."
 
         self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
+        await self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:

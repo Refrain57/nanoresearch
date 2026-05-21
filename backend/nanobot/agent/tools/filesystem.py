@@ -111,6 +111,21 @@ class ReadFileTool(_FsTool):
             if mime and mime.startswith("image/"):
                 return build_image_content_blocks(raw, mime, str(fp), f"(Image file: {path})")
 
+            if (mime == "application/pdf") or fp.suffix.lower() == ".pdf":
+                try:
+                    import io
+                    from pypdf import PdfReader
+                    reader = PdfReader(io.BytesIO(raw))
+                    pages = []
+                    for i, page in enumerate(reader.pages):
+                        pages.append(f"--- Page {i + 1} ---\n{page.extract_text() or ''}")
+                    full_text = "\n\n".join(pages)
+                    if len(full_text) > self._MAX_CHARS:
+                        full_text = full_text[:self._MAX_CHARS] + f"\n\n(Truncated — {len(reader.pages)} pages total)"
+                    return f"[PDF: {fp.name}, {len(reader.pages)} pages]\n\n{full_text}"
+                except Exception as e:
+                    return f"Error reading PDF {path}: {e}"
+
             try:
                 text_content = raw.decode("utf-8")
             except UnicodeDecodeError:

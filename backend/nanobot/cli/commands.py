@@ -523,7 +523,15 @@ def gateway(
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+
+    import os as _os
+    from nanobot.storage.database import init_engine, get_session_factory
+    _db_url = _os.environ.get("DATABASE_URL")
+    _session_factory = None
+    if _db_url:
+        init_engine(_db_url)
+        _session_factory = get_session_factory()
+    session_manager = SessionManager(config.workspace_path, session_factory=_session_factory)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -602,6 +610,18 @@ def gateway(
         response = resp.content if resp else ""
 
         message_tool = agent.tools.get("message")
+        if (
+            isinstance(message_tool, MessageTool)
+            and message_tool._sent_contents
+            and job.payload.channel
+            and job.payload.to
+        ):
+            user_key = f"{job.payload.channel}:{job.payload.to}"
+            user_session = agent.sessions.get_or_create(user_key)
+            user_session.add_message("user", f"[Scheduled Task: {job.name}]")
+            user_session.add_message("assistant", "\n\n".join(message_tool._sent_contents))
+            agent.sessions.save(user_session)
+
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
@@ -622,11 +642,11 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus)
 
-    def _pick_heartbeat_target() -> tuple[str, str]:
+    async def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
         enabled = set(channels.enabled_channels)
         # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
+        for item in await session_manager.list_sessions():
             key = item.get("key") or ""
             if ":" not in key:
                 continue
@@ -641,7 +661,7 @@ def gateway(
     # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:
         """Phase 2: execute heartbeat tasks through the full agent loop."""
-        channel, chat_id = _pick_heartbeat_target()
+        channel, chat_id = await _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
             pass
@@ -656,16 +676,16 @@ def gateway(
 
         # Keep a small tail of heartbeat history so the loop stays bounded
         # without losing all short-term context between runs.
-        session = agent.sessions.get_or_create("heartbeat")
+        session = await agent.sessions.get_or_create("heartbeat")
         session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
-        agent.sessions.save(session)
+        await agent.sessions.save(session)
 
         return resp.content if resp else ""
 
     async def on_heartbeat_notify(response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
         from nanobot.bus.events import OutboundMessage
-        channel, chat_id = _pick_heartbeat_target()
+        channel, chat_id = await _pick_heartbeat_target()
         if channel == "cli":
             return  # No external channel available to deliver to
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
@@ -693,11 +713,23 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    # Dashboard server
+    from nanobot.dashboard.server import create_app as _create_dashboard
+    import uvicorn as _uvicorn
+    _dashboard_app = _create_dashboard(config.workspace_path)
+    _dashboard_cfg = _uvicorn.Config(
+        _dashboard_app, host="0.0.0.0", port=8765,
+        log_level="warning", loop="asyncio",
+    )
+    _dashboard_server = _uvicorn.Server(_dashboard_cfg)
+    console.print("[green]✓[/green] Dashboard: http://localhost:8765")
+
     async def run():
         try:
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
+                _dashboard_server.serve(),
                 agent.run(),
                 channels.start_all(),
             )
@@ -708,6 +740,7 @@ def gateway(
             console.print("\n[red]Error: Gateway crashed unexpectedly[/red]")
             console.print(traceback.format_exc())
         finally:
+            _dashboard_server.should_exit = True
             await agent.close_mcp()
             heartbeat.stop()
             cron.stop()
@@ -943,11 +976,13 @@ def agent(
                             if content and not meta.get("_streamed"):
                                 if renderer:
                                     await renderer.close()
+                                renderer = None
                                 _print_agent_response(
                                     content, render_markdown=markdown, metadata=meta,
                                 )
                         elif renderer and not renderer.streamed:
                             await renderer.close()
+                            renderer = None
                     except KeyboardInterrupt:
                         _restore_terminal()
                         console.print("\nGoodbye!")
