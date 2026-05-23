@@ -1213,6 +1213,88 @@ def status():
 
 
 # ============================================================================
+# API Server
+# ============================================================================
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
+    port: int = typer.Option(8000, "--port", "-p", help="Bind port"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
+    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show runtime logs"),
+):
+    """Start the REST API server (conversations + SSE streaming)."""
+    import uvicorn
+    from loguru import logger
+
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+    from nanobot.cron.service import CronService
+    from nanobot.session.manager import SessionManager
+    from nanobot.storage.database import init_engine, get_session_factory
+    from nanobot.server.main import create_app
+
+    cfg = _load_runtime_config(config, workspace)
+    sync_workspace_templates(cfg.workspace_path)
+
+    if logs:
+        logger.enable("nanobot")
+    else:
+        logger.disable("nanobot")
+
+    init_engine()
+    factory = get_session_factory()
+
+    bus = MessageBus()
+    provider = _make_provider(cfg)
+    cron_store_path = cfg.workspace_path / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
+
+    knowledge_search = None
+    rag_store = None
+    if cfg.tools.research.enabled:
+        try:
+            from nanobot.rag.core.settings import load_settings
+            from nanobot.research.knowledge_search import KnowledgeSearch
+            from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
+            settings = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(settings)
+            rag_store = ChromaStore(settings=settings, collection_name="research_chunks")
+        except Exception as e:
+            console.print(f"[yellow]Warning: knowledge search unavailable: {e}[/yellow]")
+
+    session_manager = SessionManager(cfg.workspace_path, session_factory=factory, default_uid="admin")
+
+    agent_loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=cfg.workspace_path,
+        model=cfg.agents.defaults.model,
+        max_iterations=cfg.agents.defaults.max_tool_iterations,
+        context_window_tokens=cfg.agents.defaults.context_window_tokens,
+        web_search_config=cfg.tools.web.search,
+        web_proxy=cfg.tools.web.proxy or None,
+        exec_config=cfg.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=cfg.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=cfg.tools.mcp_servers,
+        channels_config=cfg.channels,
+        timezone=cfg.agents.defaults.timezone,
+        research_config=cfg.tools.research,
+        knowledge_search=knowledge_search,
+        rag_store=rag_store,
+    )
+
+    fastapi_app = create_app(agent_loop, factory)
+
+    console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
+    uvicorn.run(fastapi_app, host=host, port=port)
+
+
+# ============================================================================
 # OAuth Login
 # ============================================================================
 

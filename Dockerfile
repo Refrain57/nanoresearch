@@ -15,13 +15,13 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Install Python dependencies first (cached layer)
-COPY pyproject.toml README.md LICENSE ./
+COPY backend/pyproject.toml backend/uv.lock* README.md LICENSE ./
 RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
     uv pip install --system --no-cache . && \
     rm -rf nanobot bridge
 
 # Copy the full source and install
-COPY nanobot/ nanobot/
+COPY backend/nanobot/ nanobot/
 COPY bridge/ bridge/
 RUN uv pip install --system --no-cache .
 
@@ -32,11 +32,9 @@ WORKDIR /app/bridge
 RUN npm install && npm run build
 WORKDIR /app
 
-# Create config directory
 RUN mkdir -p /root/.nanobot
 
-# Gateway default port
-EXPOSE 18790
+EXPOSE 18790 8765
 
 ENTRYPOINT ["nanobot"]
 CMD ["status"]

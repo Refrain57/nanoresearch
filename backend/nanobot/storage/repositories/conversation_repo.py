@@ -20,6 +20,51 @@ class ConversationRepository:
             result = await db.execute(select(Conversation).where(Conversation.session_key == key))
             return result.scalar_one_or_none()
 
+    async def get_by_id(self, conv_id: uuid.UUID) -> Conversation | None:
+        async with self._factory() as db:
+            result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
+            return result.scalar_one_or_none()
+
+    async def delete(self, conv_id: uuid.UUID) -> None:
+        async with self._factory() as db:
+            result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
+            conv = result.scalar_one_or_none()
+            if conv:
+                await db.delete(conv)
+                await db.commit()
+
+    async def list_conversations(self, uid: str, limit: int = 20, offset: int = 0) -> list[Conversation]:
+        async with self._factory() as db:
+            result = await db.execute(
+                select(Conversation)
+                .where(Conversation.uid == uid)
+                .order_by(Conversation.updated_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(result.scalars().all())
+
+    async def get_last_message(self, conv_id: uuid.UUID) -> Message | None:
+        async with self._factory() as db:
+            result = await db.execute(
+                select(Message)
+                .where(Message.conversation_id == conv_id)
+                .order_by(Message.seq.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_messages_paged(self, conv_id: uuid.UUID, limit: int = 50, offset: int = 0) -> list[Message]:
+        async with self._factory() as db:
+            result = await db.execute(
+                select(Message)
+                .where(Message.conversation_id == conv_id)
+                .order_by(Message.seq)
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(result.scalars().all())
+
     async def create(
         self,
         key: str,
@@ -27,6 +72,7 @@ class ConversationRepository:
         agent_id: uuid.UUID | None = None,
         metadata: dict | None = None,
         created_at: datetime | None = None,
+        title: str | None = None,
     ) -> Conversation:
         channel, _, chat_id = key.partition(":")
         conv = Conversation(
@@ -35,6 +81,7 @@ class ConversationRepository:
             session_key=key,
             channel=channel or "web",
             channel_chat_id=chat_id or key,
+            title=title,
             conv_metadata=metadata or {},
             created_at=created_at or datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
