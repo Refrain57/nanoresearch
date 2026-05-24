@@ -37,6 +37,17 @@ class AgentRepository:
             await db.refresh(agent)
         return agent
 
+    async def update(self, agent_id: uuid.UUID, **fields) -> Agent | None:
+        async with self._factory() as db:
+            result = await db.execute(select(Agent).where(Agent.id == agent_id))
+            agent = result.scalar_one_or_none()
+            if agent:
+                for key, value in fields.items():
+                    setattr(agent, key, value)
+                await db.commit()
+                await db.refresh(agent)
+            return agent
+
     async def default_exists(self) -> bool:
         async with self._factory() as db:
             result = await db.execute(select(Agent.id).where(Agent.is_default == True))  # noqa: E712

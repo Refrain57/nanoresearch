@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, distinct, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from nanobot.storage.models import AgentRun
@@ -47,6 +47,22 @@ class RunRepository:
                 for key, value in fields.items():
                     setattr(run, key, value)
                 await db.commit()
+
+    async def get_stats_by_agent(self, agent_id: uuid.UUID) -> dict:
+        async with self._factory() as db:
+            row = await db.execute(
+                select(
+                    func.count(AgentRun.id).label("total_runs"),
+                    func.count(distinct(AgentRun.conversation_id)).label("total_conversations"),
+                    func.avg(AgentRun.duration_ms).label("avg_duration_ms"),
+                ).where(AgentRun.agent_id == agent_id)
+            )
+            r = row.one()
+            return {
+                "total_runs": r.total_runs or 0,
+                "total_conversations": r.total_conversations or 0,
+                "avg_run_duration_ms": round(r.avg_duration_ms) if r.avg_duration_ms else None,
+            }
 
     async def list_by_conversation(self, conversation_id: uuid.UUID) -> list[AgentRun]:
         async with self._factory() as db:
