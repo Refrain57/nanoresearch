@@ -41,17 +41,28 @@
           </div>
 
           <!-- Skills -->
-          <a-card title="Skills" :bordered="false" class="section-card" v-if="agent.skills?.length">
-            <div v-for="skill in agent.skills" :key="skill.id" class="skill-row">
-              <div>
-                <span class="skill-name">{{ skill.name }}</span>
-                <span v-if="skill.description" class="skill-desc"> — {{ skill.description }}</span>
-                <div class="skill-tags">
-                  <a-tag v-for="tag in (skill.tags || [])" :key="tag" size="small">{{ tag }}</a-tag>
-                </div>
+          <a-card :bordered="false" class="section-card">
+            <template #title>
+              <div class="card-title-row">
+                <span>Skills</span>
+                <a-button size="small" @click="addSkillOpen = true">
+                  <plus-outlined /> 添加
+                </a-button>
               </div>
-              <a-switch :checked="skill.enabled" disabled size="small" />
+            </template>
+            <div v-if="agent.skills?.length">
+              <div v-for="skill in agent.skills" :key="skill.id" class="skill-row">
+                <div>
+                  <span class="skill-name">{{ skill.name }}</span>
+                  <span v-if="skill.description" class="skill-desc"> — {{ skill.description }}</span>
+                  <div class="skill-tags">
+                    <a-tag v-for="tag in (skill.tags || [])" :key="tag" size="small">{{ tag }}</a-tag>
+                  </div>
+                </div>
+                <a-switch :checked="skill.enabled" size="small" @change="(v) => toggleSkill(skill.id, v)" />
+              </div>
             </div>
+            <a-empty v-else description="暂未配置 Skill" :image="null" />
           </a-card>
 
           <!-- Tools -->
@@ -63,6 +74,27 @@
           </a-card>
         </template>
       </a-spin>
+
+      <!-- 添加 Skill Modal -->
+      <a-modal v-model:open="addSkillOpen" title="添加 Skill" :footer="null" width="560">
+        <div v-if="skillsToAdd.length" class="add-skill-list">
+          <div
+            v-for="s in skillsToAdd"
+            :key="s.name"
+            class="add-skill-row"
+            @click="addSkill(s)"
+          >
+            <div>
+              <div class="add-skill-name">{{ s.name }}</div>
+              <div class="add-skill-desc">{{ s.description }}</div>
+            </div>
+            <a-tag size="small" :color="s.source === 'builtin' ? 'blue' : 'green'">
+              {{ s.source === 'builtin' ? '内置' : '自定义' }}
+            </a-tag>
+          </div>
+        </div>
+        <a-empty v-else description="所有可用 Skill 已添加" />
+      </a-modal>
 
       <!-- 编辑 Modal -->
       <a-modal v-model:open="editModalOpen" title="编辑 Agent 配置" @ok="handleUpdate" :confirm-loading="saving">
@@ -81,6 +113,7 @@
 import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
+import { PlusOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
@@ -94,10 +127,18 @@ const editModalOpen = ref(false)
 const saving = ref(false)
 const editForm = reactive({ name: '', description: '', default_model: '', max_iterations: 40 })
 
+const addSkillOpen = ref(false)
+const skillsToAdd = computed(() =>
+  agentStore.skills.filter(s => !agent.value?.skills?.some(as => as.id === s.name))
+)
+
 const agent = computed(() => agentStore.current)
 const caps = computed(() => agent.value?.capabilities || {})
 
-onMounted(() => agentStore.fetchOne(route.params.id))
+onMounted(async () => {
+  await agentStore.fetchOne(route.params.id)
+  if (!agentStore.skills.length) await agentStore.fetchSkills()
+})
 
 watch(agent, (a) => {
   if (a) {
@@ -111,6 +152,20 @@ watch(agent, (a) => {
 async function handleChat() {
   const conv = await chatStore.newConversation(agent.value?.name, agent.value?.id)
   router.push(`/chat/${conv.id}`)
+}
+
+async function toggleSkill(skillId, enabled) {
+  const newSkills = agent.value.skills.map(s => s.id === skillId ? { ...s, enabled } : s)
+  await agentStore.update(route.params.id, { skills_config: newSkills })
+}
+
+async function addSkill(s) {
+  const newSkills = [
+    ...(agent.value.skills || []),
+    { id: s.name, name: s.name, description: s.description, tags: [], enabled: true }
+  ]
+  await agentStore.update(route.params.id, { skills_config: newSkills })
+  addSkillOpen.value = false
 }
 
 async function handleUpdate() {
@@ -147,4 +202,10 @@ async function handleUpdate() {
 .skill-name { font-weight: 500; }
 .skill-desc { color: #888; font-size: 13px; }
 .skill-tags { margin-top: 4px; }
+.card-title-row { display: flex; align-items: center; justify-content: space-between; }
+.add-skill-list { display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto; margin-top: 8px; }
+.add-skill-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 6px; cursor: pointer; border: 1px solid #f0f0f0; }
+.add-skill-row:hover { background: #e6f4ff; border-color: #91caff; }
+.add-skill-name { font-size: 13px; font-weight: 600; color: #1677ff; }
+.add-skill-desc { font-size: 12px; color: #888; margin-top: 2px; }
 </style>

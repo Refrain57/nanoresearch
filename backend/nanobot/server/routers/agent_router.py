@@ -14,6 +14,15 @@ from nanobot.storage.repositories.run_repo import RunRepository
 router = APIRouter()
 
 
+class AgentCreate(BaseModel):
+    name: str
+    description: str = ""
+    default_model: str | None = None
+    provider: str | None = None
+    max_iterations: int = 40
+    capabilities: dict = {}
+
+
 class AgentUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
@@ -42,6 +51,46 @@ async def _agent_to_card(agent, stats: dict) -> dict:
         "created_at": agent.created_at.isoformat() if agent.created_at else None,
         "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
     }
+
+
+@router.get("/api/skills")
+async def list_skills(_uid: str = Depends(get_current_user)):
+    from nanobot.agent.skills import BUILTIN_SKILLS_DIR, SkillsLoader
+    loader = SkillsLoader(
+        workspace=BUILTIN_SKILLS_DIR.parent,
+        builtin_skills_dir=BUILTIN_SKILLS_DIR,
+    )
+    result = []
+    for s in loader.list_skills(filter_unavailable=False):
+        meta = loader.get_skill_metadata(s["name"]) or {}
+        result.append({
+            "name": s["name"],
+            "description": meta.get("description", s["name"]),
+            "source": s["source"],
+        })
+    return result
+
+
+@router.post("/api/agents", status_code=201)
+async def create_agent(
+    body: AgentCreate,
+    request: Request,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await AgentRepository(factory).create({
+        "name": body.name,
+        "description": body.description,
+        "default_model": body.default_model,
+        "provider": body.provider,
+        "max_iterations": body.max_iterations,
+        "capabilities": body.capabilities,
+        "skills_config": [],
+        "tools_config": [],
+        "is_default": False,
+    })
+    stats = await RunRepository(factory).get_stats_by_agent(agent.id)
+    return await _agent_to_card(agent, stats)
 
 
 @router.get("/api/agents")
@@ -84,6 +133,21 @@ async def update_agent(
     updated = await AgentRepository(factory).update(agent.id, **fields)
     stats = await RunRepository(factory).get_stats_by_agent(updated.id)
     return await _agent_to_card(updated, stats)
+
+
+@router.delete("/api/agents/{agent_id}", status_code=204)
+async def delete_agent(
+    agent_id: str,
+    request: Request,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await _get_agent_or_404(agent_id, factory)
+    if agent.is_default:
+        raise HTTPException(status_code=400, detail="默认 Agent 不能删除")
+    deleted = await AgentRepository(factory).delete(agent.id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
 
 
 async def _get_agent_or_404(agent_id: str, factory):

@@ -48,6 +48,16 @@ class AgentRepository:
                 await db.refresh(agent)
             return agent
 
+    async def delete(self, agent_id: uuid.UUID) -> bool:
+        async with self._factory() as db:
+            result = await db.execute(select(Agent).where(Agent.id == agent_id))
+            agent = result.scalar_one_or_none()
+            if agent is None:
+                return False
+            await db.delete(agent)
+            await db.commit()
+            return True
+
     async def default_exists(self) -> bool:
         async with self._factory() as db:
             result = await db.execute(select(Agent.id).where(Agent.is_default == True))  # noqa: E712

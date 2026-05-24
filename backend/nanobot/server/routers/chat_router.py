@@ -63,6 +63,7 @@ async def list_conversations(
             "id": str(c.id),
             "title": c.title,
             "channel": c.channel,
+            "agent_id": str(c.agent_id) if c.agent_id else None,
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
             "last_message_preview": preview,
