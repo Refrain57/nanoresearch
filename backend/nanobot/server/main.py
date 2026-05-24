@@ -2,15 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
 from nanobot.server.middleware.auth import get_current_user
+from nanobot.server.routers.agent_router import router as agent_router
 from nanobot.server.routers.chat_router import router as chat_router
 
 
-def create_app(agent_loop, session_factory) -> FastAPI:
-    app = FastAPI(title="Nanobot API", version="2.0.0")
+def create_app(agent_loop, session_factory, channel_manager=None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        tasks = []
+        if channel_manager:
+            # Channels route inbound messages via bus → agent_loop.run() must be active
+            tasks.append(asyncio.create_task(agent_loop.run()))
+            tasks.append(asyncio.create_task(channel_manager.start_all()))
+        yield
+        if channel_manager:
+            agent_loop.stop()
+            await channel_manager.stop_all()
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="Nanobot API", version="2.0.0", lifespan=lifespan)
     app.state.agent_loop = agent_loop
     app.state.session_factory = session_factory
     app.state.run_queues = {}  # run_id (str) -> asyncio.Queue
@@ -32,4 +52,14 @@ def create_app(agent_loop, session_factory) -> FastAPI:
         return {"uid": uid}
 
     app.include_router(chat_router)
+    app.include_router(agent_router)
+
+    # 生产静态文件服务（pnpm build 产物），放在所有路由之后
+    import os
+    from pathlib import Path
+    dist = Path(__file__).parent.parent.parent.parent / "web" / "dist"
+    if dist.exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
+
     return app

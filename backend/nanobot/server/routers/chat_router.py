@@ -281,7 +281,21 @@ async def _run_agent(
         )
         finished = _utcnow()
         duration_ms = int((finished - start).total_seconds() * 1000)
-        await run_repo.update(run_id, status="completed", finished_at=finished, duration_ms=duration_ms)
+        usage = loop._last_usage or {}
+        tokens_used = {
+            "input": usage.get("input_tokens", 0),
+            "output": usage.get("output_tokens", 0),
+            "cache_read": usage.get("cache_read_input_tokens", 0),
+            "cache_write": usage.get("cache_creation_input_tokens", 0),
+        }
+        await run_repo.update(
+            run_id,
+            status="completed",
+            finished_at=finished,
+            duration_ms=duration_ms,
+            model_used=loop.model,
+            tokens_used=tokens_used,
+        )
         await queue.put({"type": "run_end", "status": "completed", "duration_ms": duration_ms})
     except Exception as e:
         await run_repo.update(run_id, status="failed", finished_at=_utcnow(), error_message=str(e))

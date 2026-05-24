@@ -1231,6 +1231,7 @@ def serve(
 
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
+    from nanobot.channels.manager import ChannelManager
     from nanobot.cron.service import CronService
     from nanobot.session.manager import SessionManager
     from nanobot.storage.database import init_engine, get_session_factory
@@ -1288,7 +1289,11 @@ def serve(
         rag_store=rag_store,
     )
 
-    fastapi_app = create_app(agent_loop, factory)
+    channel_manager = ChannelManager(cfg, bus)
+    if channel_manager.enabled_channels:
+        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channel_manager.enabled_channels)}")
+
+    fastapi_app = create_app(agent_loop, factory, channel_manager=channel_manager)
 
     console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
     uvicorn.run(fastapi_app, host=host, port=port)
