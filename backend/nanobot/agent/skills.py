@@ -98,17 +98,20 @@ class SkillsLoader:
 
         return "\n\n---\n\n".join(parts) if parts else ""
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, skill_names: list[str] | None = None) -> str:
         """
-        Build a summary of all skills (name, description, path, availability).
+        Build a summary of skills (name, description, path, availability).
 
-        This is used for progressive loading - the agent can read the full
-        skill content using read_file when needed.
+        Args:
+            skill_names: If provided, only include skills with these names.
+                         If None, include all skills.
 
         Returns:
             XML-formatted skills summary.
         """
         all_skills = self.list_skills(filter_unavailable=False)
+        if skill_names is not None:
+            all_skills = [s for s in all_skills if s["name"] in skill_names]
         if not all_skills:
             return ""
 

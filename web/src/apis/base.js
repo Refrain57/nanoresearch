@@ -42,6 +42,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       throw error
     }
 
+    if (response.status === 204) return null
     if (responseType === 'json') return response.json()
     if (responseType === 'text') return response.text()
     return response

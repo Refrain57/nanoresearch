@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from nanobot.server.middleware.auth import get_current_user
+from nanobot.storage.repositories.agent_repo import AgentRepository
 from nanobot.storage.repositories.conversation_repo import ConversationRepository
 from nanobot.storage.repositories.run_repo import RunRepository
 
@@ -179,10 +180,17 @@ async def create_run(
     run = await run_repo.create(conversation_id=conv.id, uid=uid, agent_id=conv.agent_id)
     run_id = run.id
 
+    # 取该 agent 的 enabled skills
+    # None = 不过滤（CLI 模式）；[] = agent 存在但未配置 skill，显示空
+    skill_names: list[str] | None = None
+    if conv.agent_id:
+        agent = await AgentRepository(factory).get_by_id(conv.agent_id)
+        if agent is not None:
+            skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
+
     queue: asyncio.Queue = asyncio.Queue()
     request.app.state.run_queues[str(run_id)] = queue
 
-    # 使用 conv.session_key（创建时存储的），而非 f"web:{conv.id}"（两者 UUID 不同）
     session_key = conv.session_key or f"web:{conv.id}"
     asyncio.create_task(
         _run_agent(
@@ -193,6 +201,8 @@ async def create_run(
             queue=queue,
             factory=factory,
             run_queues=request.app.state.run_queues,
+            skill_names=skill_names,
+            agent_id=str(conv.agent_id) if conv.agent_id else None,
         )
     )
 
@@ -259,10 +269,14 @@ async def _run_agent(
     queue: asyncio.Queue,
     factory,
     run_queues: dict,
+    skill_names: list[str] | None = None,
+    agent_id: str | None = None,
 ) -> None:
     run_repo = RunRepository(factory)
     start = _utcnow()
     await run_repo.update(run_id, status="running", started_at=start)
+
+    tool_calls_log: list[dict] = []
 
     async def on_stream(delta: str) -> None:
         await queue.put({"type": "message_delta", "chunk": delta})
@@ -270,6 +284,9 @@ async def _run_agent(
     async def on_progress(text: str, *, tool_hint: bool = False) -> None:
         if tool_hint:
             await queue.put({"type": "tool_hint", "content": text})
+
+    async def on_tool_call(record: dict) -> None:
+        tool_calls_log.append(record)
 
     try:
         await loop.process_direct(
@@ -279,6 +296,9 @@ async def _run_agent(
             chat_id=session_key.split(":", 1)[-1],
             on_stream=on_stream,
             on_progress=on_progress,
+            on_tool_call=on_tool_call,
+            skill_names=skill_names,
+            agent_id=agent_id,
         )
         finished = _utcnow()
         duration_ms = int((finished - start).total_seconds() * 1000)
@@ -296,6 +316,7 @@ async def _run_agent(
             duration_ms=duration_ms,
             model_used=loop.model,
             tokens_used=tokens_used,
+            tool_calls=tool_calls_log,
         )
         await queue.put({"type": "run_end", "status": "completed", "duration_ms": duration_ms})
     except Exception as e:

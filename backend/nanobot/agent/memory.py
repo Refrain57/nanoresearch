@@ -164,8 +164,11 @@ class MemoryStore:
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path, knowledge_search: Any = None):
-        self.memory_dir = ensure_dir(workspace / "memory")
+    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None):
+        if agent_id:
+            self.memory_dir = ensure_dir(workspace / "agents" / agent_id / "memory")
+        else:
+            self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self._consecutive_failures = 0
         self._cached_hash: str | None = None
@@ -397,7 +400,8 @@ class MemoryConsolidator:
         max_completion_tokens: int = 4096,
         knowledge_search: Any = None,
     ):
-        self.store = MemoryStore(workspace, knowledge_search=knowledge_search)
+        self._workspace = workspace
+        self._knowledge_search = knowledge_search
         self.provider = provider
         self.model = model
         self.sessions = sessions
@@ -409,18 +413,20 @@ class MemoryConsolidator:
 
         # Conversation knowledge extractor (lazy init)
         self._knowledge_extractor = None
-        self._knowledge_search = knowledge_search
 
         # Anti-shake: track last token count to avoid repeated small consolidations
         self._last_session_tokens: dict[str, int] = {}
+
+    def _get_store(self, agent_id: str | None = None) -> MemoryStore:
+        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search, agent_id=agent_id)
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
-    async def consolidate_messages(self, messages: list[dict[str, object]]) -> bool:
+    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None) -> bool:
         """Archive a selected message chunk into persistent memory."""
-        success = await self.store.consolidate(messages, self.provider, self.model)
+        success = await self._get_store(agent_id).consolidate(messages, self.provider, self.model)
 
         # After successful consolidation, extract knowledge from conversation
         if success and self._knowledge_search:
@@ -512,16 +518,16 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
-    async def archive_messages(self, messages: list[dict[str, object]]) -> bool:
+    async def archive_messages(self, messages: list[dict[str, object]], agent_id: str | None = None) -> bool:
         """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
         if not messages:
             return True
-        for _ in range(self.store._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
-            if await self.consolidate_messages(messages):
+        for _ in range(MemoryStore._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
+            if await self.consolidate_messages(messages, agent_id=agent_id):
                 return True
         return True
 
-    async def maybe_consolidate_by_tokens(self, session: Session) -> None:
+    async def maybe_consolidate_by_tokens(self, session: Session, agent_id: str | None = None) -> None:
         """Loop: archive old messages until prompt fits within safe budget.
 
         The budget reserves space for completion tokens and a safety buffer
@@ -586,7 +592,7 @@ class MemoryConsolidator:
                     source,
                     len(chunk),
                 )
-                if not await self.consolidate_messages(chunk):
+                if not await self.consolidate_messages(chunk, agent_id=agent_id):
                     return
                 session.last_consolidated = end_idx
                 self.sessions.save(session)

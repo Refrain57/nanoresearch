@@ -150,6 +150,36 @@ async def delete_agent(
         raise HTTPException(status_code=404, detail="Agent 不存在")
 
 
+@router.get("/api/agents/{agent_id}/runs")
+async def list_agent_runs(
+    agent_id: str,
+    request: Request,
+    limit: int = 20,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await _get_agent_or_404(agent_id, factory)
+    runs = await RunRepository(factory).list_by_agent(agent.id, limit=limit)
+    return [_run_to_dict(r) for r in runs]
+
+
+def _run_to_dict(run) -> dict:
+    return {
+        "id": str(run.id),
+        "conversation_id": str(run.conversation_id),
+        "status": run.status,
+        "model_used": run.model_used,
+        "tool_calls": run.tool_calls or [],
+        "tokens_used": run.tokens_used or {},
+        "duration_ms": run.duration_ms,
+        "error_message": run.error_message,
+        "artifacts": run.artifacts or [],
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+    }
+
+
 async def _get_agent_or_404(agent_id: str, factory):
     try:
         aid = uuid.UUID(agent_id)

@@ -35,7 +35,6 @@ class ContextBuilder:
     ):
         self.workspace = workspace
         self.timezone = timezone
-        self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
         self.knowledge_search = knowledge_search
 
@@ -105,6 +104,7 @@ class ContextBuilder:
         topic: str | None = None,
         tool_names: list[str] | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
+        agent_id: str | None = None,
     ) -> str:
         """Build the system prompt from identity, memory, knowledge, bootstrap, tools, and skills.
 
@@ -118,11 +118,12 @@ class ContextBuilder:
             tool_names: Optional list of registered tool names for dynamic injection.
             total_token_budget: Total token budget for memory + knowledge sections.
         """
-        static = self._build_static_prefix(tool_names)
+        static = self._build_static_prefix(tool_names, skill_names=skill_names)
         dynamic = self._build_dynamic_suffix(
             skill_names=skill_names,
             topic=topic,
             total_token_budget=total_token_budget,
+            agent_id=agent_id,
         )
         if static and dynamic:
             return static + "\n\n---\n\n" + dynamic
@@ -134,6 +135,7 @@ class ContextBuilder:
         topic: str | None = None,
         tool_names: list[str] | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
+        agent_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return system prompt as blocks with cache_control markers.
 
@@ -142,11 +144,12 @@ class ContextBuilder:
         static/dynamic boundary and the static prefix stays cached across
         turns even when memory or knowledge changes.
         """
-        static = self._build_static_prefix(tool_names)
+        static = self._build_static_prefix(tool_names, skill_names=skill_names)
         dynamic = self._build_dynamic_suffix(
             skill_names=skill_names,
             topic=topic,
             total_token_budget=total_token_budget,
+            agent_id=agent_id,
         )
 
         blocks: list[dict[str, Any]] = []
@@ -160,7 +163,7 @@ class ContextBuilder:
             blocks.append({"type": "text", "text": dynamic})
         return blocks
 
-    def _build_static_prefix(self, tool_names: list[str] | None = None) -> str:
+    def _build_static_prefix(self, tool_names: list[str] | None = None, skill_names: list[str] | None = None) -> str:
         """Build the static prefix (rarely changes, cacheable).
 
         Order: identity → bootstrap → tools → skills_summary
@@ -174,9 +177,12 @@ class ContextBuilder:
         if tool_names:
             parts.append(self._build_tools_section(tool_names))
 
-        skills_summary = self.skills.build_skills_summary()
-        if skills_summary:
-            parts.append(f"""# Skills
+        if skill_names is not None and len(skill_names) == 0:
+            parts.append("# Skills\n\nThis agent has no skills configured. Do NOT use read_file or list_dir to discover or load any skill files from the workspace. Do NOT describe, claim, or offer any skills beyond basic conversation and built-in tools.")
+        else:
+            skills_summary = self.skills.build_skills_summary(skill_names=skill_names)
+            if skills_summary:
+                parts.append(f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
@@ -190,6 +196,7 @@ Skills with available="false" need dependencies installed first - you can try in
         skill_names: list[str] | None = None,
         topic: str | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
+        agent_id: str | None = None,
     ) -> str:
         """Build the dynamic suffix (may change per request, non-cacheable).
 
@@ -201,7 +208,7 @@ Skills with available="false" need dependencies installed first - you can try in
         parts: list[str] = []
 
         # 1. 稳定事实 (MEMORY.md)
-        memory = self.memory.get_memory_context()
+        memory = MemoryStore(self.workspace, agent_id=agent_id).get_memory_context()
         if memory:
             memory = self._truncate_to_budget(memory, memory_budget)
             if memory:
@@ -215,9 +222,12 @@ Skills with available="false" need dependencies installed first - you can try in
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+            if skill_names is not None:
+                always_skills = [s for s in always_skills if s in skill_names]
+            if always_skills:
+                always_content = self.skills.load_skills_for_context(always_skills)
+                if always_content:
+                    parts.append(f"# Active Skills\n\n{always_content}")
 
         return "\n\n---\n\n".join(parts)
 
@@ -373,6 +383,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         tool_names: list[str] | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         use_cache_blocks: bool = False,
+        agent_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call.
 
@@ -395,11 +406,11 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
 
         if use_cache_blocks:
             system_content: str | list[dict[str, Any]] = self.build_system_prompt_blocks(
-                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget
+                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget, agent_id=agent_id
             )
         else:
             system_content = self.build_system_prompt(
-                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget
+                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget, agent_id=agent_id
             )
 
         return [

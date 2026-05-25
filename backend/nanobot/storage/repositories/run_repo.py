@@ -64,6 +64,16 @@ class RunRepository:
                 "avg_run_duration_ms": round(r.avg_duration_ms) if r.avg_duration_ms else None,
             }
 
+    async def list_by_agent(self, agent_id: uuid.UUID, limit: int = 20) -> list[AgentRun]:
+        async with self._factory() as db:
+            result = await db.execute(
+                select(AgentRun)
+                .where(AgentRun.agent_id == agent_id)
+                .order_by(AgentRun.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
     async def list_by_conversation(self, conversation_id: uuid.UUID) -> list[AgentRun]:
         async with self._factory() as db:
             result = await db.execute(

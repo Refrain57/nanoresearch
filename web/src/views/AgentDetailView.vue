@@ -2,7 +2,7 @@
   <app-layout>
     <div class="agent-detail-page">
       <a-spin :spinning="agentStore.loading">
-        <template v-if="agent">
+<template v-if="agent">
           <!-- 头部 -->
           <div class="detail-header">
             <div>
@@ -62,7 +62,7 @@
                 <a-switch :checked="skill.enabled" size="small" @change="(v) => toggleSkill(skill.id, v)" />
               </div>
             </div>
-            <a-empty v-else description="暂未配置 Skill" :image="null" />
+            <a-empty v-else description="暂未配置 Skill" />
           </a-card>
 
           <!-- Tools -->
@@ -71,6 +71,30 @@
               <span>{{ tool.name }}</span>
               <a-switch :checked="tool.enabled" disabled size="small" />
             </div>
+          </a-card>
+
+          <!-- 最近运行记录 -->
+          <a-card :bordered="false" class="section-card">
+            <template #title>
+              <div class="card-title-row">
+                <span>最近运行</span>
+                <a-button size="small" @click="loadRuns">刷新</a-button>
+              </div>
+            </template>
+            <a-spin :spinning="runsLoading">
+              <div v-if="runs.length">
+                <a-collapse v-model:activeKey="activeRunKey" accordion>
+                  <a-collapse-panel v-for="run in runs" :key="run.id" :header="runHeader(run)">
+                    <template #extra>
+                      <a-tag :color="statusColor(run.status)" size="small">{{ statusLabel(run.status) }}</a-tag>
+                      <span v-if="run.duration_ms" class="run-dur">{{ (run.duration_ms/1000).toFixed(1) }}s</span>
+                    </template>
+                    <run-timeline v-if="activeRunKey === run.id" :run-id="run.id" />
+                  </a-collapse-panel>
+                </a-collapse>
+              </div>
+              <a-empty v-else description="暂无运行记录" />
+            </a-spin>
           </a-card>
         </template>
       </a-spin>
@@ -115,13 +139,19 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
+import RunTimeline from '@/components/RunTimeline.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
+import { listAgentRuns } from '@/apis/agents'
 
 const route = useRoute()
 const router = useRouter()
 const agentStore = useAgentStore()
 const chatStore = useChatStore()
+
+const runs = ref([])
+const runsLoading = ref(false)
+const activeRunKey = ref(null)
 
 const editModalOpen = ref(false)
 const saving = ref(false)
@@ -136,8 +166,14 @@ const agent = computed(() => agentStore.current)
 const caps = computed(() => agent.value?.capabilities || {})
 
 onMounted(async () => {
-  await agentStore.fetchOne(route.params.id)
-  if (!agentStore.skills.length) await agentStore.fetchSkills()
+  try {
+    await agentStore.fetchOne(route.params.id)
+    if (!agentStore.skills.length) await agentStore.fetchSkills()
+    await loadRuns()
+  } catch (e) {
+    console.error('[AgentDetail] mount error:', e)
+    message.error('加载 Agent 详情失败: ' + (e.message || e))
+  }
 })
 
 watch(agent, (a) => {
@@ -149,23 +185,53 @@ watch(agent, (a) => {
   }
 })
 
+async function loadRuns() {
+  runsLoading.value = true
+  try { runs.value = await listAgentRuns(route.params.id) }
+  catch (e) { message.error('加载运行记录失败') }
+  finally { runsLoading.value = false }
+}
+
+function runHeader(run) {
+  const time = run.created_at ? new Date(run.created_at).toLocaleString('zh-CN', { hour12: false }) : ''
+  const tools = run.tool_calls?.length ? ` · ${run.tool_calls.length} 次工具调用` : ''
+  return `${time}${tools}`
+}
+
+function statusColor(s) {
+  return { completed: 'green', failed: 'red', running: 'blue', pending: 'orange' }[s] || 'default'
+}
+
+function statusLabel(s) {
+  return { completed: '完成', failed: '失败', running: '运行中', pending: '待运行' }[s] || s
+}
+
 async function handleChat() {
   const conv = await chatStore.newConversation(agent.value?.name, agent.value?.id)
   router.push(`/chat/${conv.id}`)
 }
 
 async function toggleSkill(skillId, enabled) {
-  const newSkills = agent.value.skills.map(s => s.id === skillId ? { ...s, enabled } : s)
-  await agentStore.update(route.params.id, { skills_config: newSkills })
+  try {
+    const newSkills = agent.value.skills.map(s => s.id === skillId ? { ...s, enabled } : s)
+    await agentStore.update(route.params.id, { skills_config: newSkills })
+  } catch (e) {
+    message.error(e.message || '更新失败')
+  }
 }
 
 async function addSkill(s) {
-  const newSkills = [
-    ...(agent.value.skills || []),
-    { id: s.name, name: s.name, description: s.description, tags: [], enabled: true }
-  ]
-  await agentStore.update(route.params.id, { skills_config: newSkills })
-  addSkillOpen.value = false
+  try {
+    const newSkills = [
+      ...(agent.value.skills || []),
+      { id: s.name, name: s.name, description: s.description, tags: [], enabled: true }
+    ]
+    await agentStore.update(route.params.id, { skills_config: newSkills })
+    addSkillOpen.value = false
+    message.success(`已添加 ${s.name}`)
+  } catch (e) {
+    message.error(e.message || '添加失败')
+  }
 }
 
 async function handleUpdate() {

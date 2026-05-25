@@ -248,6 +248,7 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
         *,
         channel: str = "cli",
         chat_id: str = "direct",
@@ -298,6 +299,18 @@ class AgentLoop:
                 for tc in context.tool_calls:
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tc.name, args_str[:200])
+
+            async def after_iteration(self, context: AgentHookContext) -> None:
+                if on_tool_call and context.tool_calls:
+                    for tc, result in zip(context.tool_calls, context.tool_results or []):
+                        result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                        is_error = result_str.startswith("Error:") if isinstance(result_str, str) else False
+                        await on_tool_call({
+                            "name": tc.name,
+                            "input": tc.arguments,
+                            "output": result_str[:2000],
+                            "status": "error" if is_error else "success",
+                        })
 
             def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
                 return loop_self._strip_think(content)
@@ -427,7 +440,7 @@ class AgentLoop:
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
 
-    async def _check_pending_consolidation(self, session: Session) -> None:
+    async def _check_pending_consolidation(self, session: Session, agent_id: str | None = None) -> None:
         """Check if there are unconsolidated messages from last session and consolidate them.
 
         This runs once per session when the first message arrives after startup.
@@ -449,7 +462,7 @@ class AgentLoop:
         )
 
         pending = session.messages[session.last_consolidated:]
-        success = await self.memory_consolidator.consolidate_messages(pending)
+        success = await self.memory_consolidator.consolidate_messages(pending, agent_id=agent_id)
 
         if success:
             session.last_consolidated = len(session.messages)
@@ -471,6 +484,9 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
+        skill_names: list[str] | None = None,
+        agent_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -480,7 +496,7 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = await self.sessions.get_or_create(key)
-            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
@@ -491,6 +507,7 @@ class AgentLoop:
                 topic=msg.content,
                 tool_names=self.tools.tool_names,
                 use_cache_blocks=self._use_cache_blocks,
+                agent_id=agent_id,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
@@ -498,7 +515,7 @@ class AgentLoop:
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             await self.sessions.save(session)
-            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -509,7 +526,7 @@ class AgentLoop:
         session = await self.sessions.get_or_create(key)
 
         # Startup consolidation: check if there are unconsolidated messages from last session
-        await self._check_pending_consolidation(session)
+        await self._check_pending_consolidation(session, agent_id=agent_id)
 
         # Slash commands
         raw = msg.content.strip()
@@ -517,7 +534,7 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return result
 
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -533,6 +550,8 @@ class AgentLoop:
             topic=msg.content,
             tool_names=self.tools.tool_names,
             use_cache_blocks=self._use_cache_blocks,
+            skill_names=skill_names,
+            agent_id=agent_id,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -548,6 +567,7 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
+            on_tool_call=on_tool_call,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
         )
@@ -557,7 +577,7 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         await self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -645,6 +665,9 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
+        skill_names: list[str] | None = None,
+        agent_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -652,4 +675,5 @@ class AgentLoop:
         return await self._process_message(
             msg, session_key=session_key, on_progress=on_progress,
             on_stream=on_stream, on_stream_end=on_stream_end,
+            on_tool_call=on_tool_call, skill_names=skill_names, agent_id=agent_id,
         )

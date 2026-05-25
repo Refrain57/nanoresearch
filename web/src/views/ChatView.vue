@@ -103,9 +103,10 @@
             <a-textarea
               v-model:value="inputText"
               :auto-size="{ minRows: 1, maxRows: 6 }"
-              placeholder="输入消息，Ctrl+Enter 发送"
+              placeholder="输入消息，Enter 发送，Alt+Enter 换行"
               :disabled="chatStore.streaming"
-              @keydown.ctrl.enter="handleSend"
+              @keydown.enter.exact.prevent="handleSend"
+              @keydown.alt.enter="(e) => { inputText += '\n' }"
               class="chat-input"
             />
             <a-button
