@@ -6,13 +6,20 @@
         <div class="run-header">
           <div class="run-meta">
             <a-tag :color="statusColor">{{ statusLabel }}</a-tag>
+            <router-link v-if="run.agent_id" :to="`/agents/${run.agent_id}`" class="agent-link">
+              <robot-outlined /> {{ agentName || run.agent_id.slice(0, 8) }}
+            </router-link>
+            <span v-else class="agent-link-plain"><robot-outlined /> 默认 Agent</span>
             <span class="model">{{ run.model_used || '未知模型' }}</span>
             <span class="duration" v-if="run.duration_ms">
               <clock-circle-outlined /> {{ (run.duration_ms / 1000).toFixed(2) }}s
             </span>
           </div>
-          <div class="run-time">
-            {{ formatTime(run.started_at) }}
+          <div class="run-meta-right">
+            <span v-if="successRate !== null" class="success-rate" :class="successRate >= 80 ? 'good' : successRate >= 50 ? 'warn' : 'bad'">
+              成功率 {{ successRate }}%
+            </span>
+            <div class="run-time">{{ formatTime(run.started_at) }}</div>
           </div>
         </div>
 
@@ -88,19 +95,24 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
-import { ClockCircleOutlined, FileOutlined } from '@ant-design/icons-vue'
+import { ClockCircleOutlined, FileOutlined, RobotOutlined } from '@ant-design/icons-vue'
 import { getRun } from '@/apis/runs'
+import { getAgent } from '@/apis/agents'
 
 const props = defineProps({ runId: { type: String, required: true } })
 
 const run = ref(null)
 const loading = ref(false)
+const agentName = ref('')
 
 async function fetchRun() {
   if (!props.runId) return
   loading.value = true
   try {
     run.value = await getRun(props.runId)
+    if (run.value?.agent_id) {
+      getAgent(run.value.agent_id).then(a => { agentName.value = a?.name || '' }).catch(() => {})
+    }
   } finally {
     loading.value = false
   }
@@ -108,6 +120,13 @@ async function fetchRun() {
 
 onMounted(fetchRun)
 watch(() => props.runId, fetchRun)
+
+const successRate = computed(() => {
+  const tcs = run.value?.tool_calls
+  if (!tcs?.length) return null
+  const ok = tcs.filter(tc => tc.status === 'success').length
+  return Math.round(ok / tcs.length * 100)
+})
 
 const statusColor = computed(() => ({
   completed: 'green', failed: 'red', pending: 'orange', running: 'blue'
@@ -152,11 +171,19 @@ function formatSize(bytes) {
 
 <style scoped>
 .run-timeline { padding: 0; }
-.run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.run-meta { display: flex; align-items: center; gap: 12px; }
+.run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+.run-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.run-meta-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .model { font-size: 13px; color: #555; }
 .duration { font-size: 13px; color: #888; display: flex; align-items: center; gap: 4px; }
 .run-time { font-size: 12px; color: #aaa; }
+.agent-link { font-size: 13px; color: #1677ff; display: flex; align-items: center; gap: 4px; text-decoration: none; }
+.agent-link:hover { text-decoration: underline; }
+.agent-link-plain { font-size: 13px; color: #888; display: flex; align-items: center; gap: 4px; }
+.success-rate { font-size: 12px; font-weight: 600; }
+.success-rate.good { color: #52c41a; }
+.success-rate.warn { color: #faad14; }
+.success-rate.bad  { color: #f5222d; }
 
 .token-card { background: #fafafa; border-radius: 8px; margin-bottom: 16px; }
 .token-bar-wrap { display: flex; flex-direction: column; gap: 8px; }

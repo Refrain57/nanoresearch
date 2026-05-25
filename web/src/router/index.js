@@ -8,6 +8,7 @@ const routes = [
   { path: '/agents', component: () => import('@/views/AgentsView.vue'), meta: { requiresAuth: true } },
   { path: '/agents/:id', component: () => import('@/views/AgentDetailView.vue'), meta: { requiresAuth: true } },
   { path: '/runs/:id', component: () => import('@/views/RunDetailView.vue'), meta: { requiresAuth: true } },
+  { path: '/conversations/:id', component: () => import('@/views/ConversationDetailView.vue'), meta: { requiresAuth: true } },
   { path: '/', redirect: '/chat' }
 ]
 

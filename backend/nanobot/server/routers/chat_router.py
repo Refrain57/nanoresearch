@@ -361,6 +361,7 @@ def _run_to_dict(run) -> dict:
     return {
         "id": str(run.id),
         "conversation_id": str(run.conversation_id),
+        "agent_id": str(run.agent_id) if run.agent_id else None,
         "status": run.status,
         "model_used": run.model_used,
         "tool_calls": run.tool_calls or [],

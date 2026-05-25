@@ -73,27 +73,35 @@
             </div>
           </a-card>
 
-          <!-- 最近运行记录 -->
+          <!-- 工具调用统计 -->
           <a-card :bordered="false" class="section-card">
             <template #title>
               <div class="card-title-row">
-                <span>最近运行</span>
-                <a-button size="small" @click="loadRuns">刷新</a-button>
+                <span>工具调用统计</span>
+                <a-button size="small" @click="loadToolStats">刷新</a-button>
               </div>
             </template>
-            <a-spin :spinning="runsLoading">
-              <div v-if="runs.length">
-                <a-collapse v-model:activeKey="activeRunKey" accordion>
-                  <a-collapse-panel v-for="run in runs" :key="run.id" :header="runHeader(run)">
-                    <template #extra>
-                      <a-tag :color="statusColor(run.status)" size="small">{{ statusLabel(run.status) }}</a-tag>
-                      <span v-if="run.duration_ms" class="run-dur">{{ (run.duration_ms/1000).toFixed(1) }}s</span>
-                    </template>
-                    <run-timeline v-if="activeRunKey === run.id" :run-id="run.id" />
-                  </a-collapse-panel>
-                </a-collapse>
-              </div>
-              <a-empty v-else description="暂无运行记录" />
+            <a-spin :spinning="toolStatsLoading">
+              <table v-if="toolStats.length" class="stats-table">
+                <thead>
+                  <tr><th>工具</th><th>调用次数</th><th>成功</th><th>失败</th><th>成功率</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="s in toolStats" :key="s.tool_name">
+                    <td class="tool-name-cell">{{ s.tool_name }}</td>
+                    <td>{{ s.total }}</td>
+                    <td class="success-cell">{{ s.success }}</td>
+                    <td class="error-cell">{{ s.error }}</td>
+                    <td>
+                      <div class="rate-bar-wrap">
+                        <div class="rate-bar" :style="{ width: s.success_rate + '%' }" />
+                        <span class="rate-text">{{ s.success_rate }}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <a-empty v-else description="暂无工具调用记录" />
             </a-spin>
           </a-card>
         </template>
@@ -139,19 +147,17 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
-import RunTimeline from '@/components/RunTimeline.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
-import { listAgentRuns } from '@/apis/agents'
+import { getAgentToolStats } from '@/apis/agents'
 
 const route = useRoute()
 const router = useRouter()
 const agentStore = useAgentStore()
 const chatStore = useChatStore()
 
-const runs = ref([])
-const runsLoading = ref(false)
-const activeRunKey = ref(null)
+const toolStats = ref([])
+const toolStatsLoading = ref(false)
 
 const editModalOpen = ref(false)
 const saving = ref(false)
@@ -169,7 +175,7 @@ onMounted(async () => {
   try {
     await agentStore.fetchOne(route.params.id)
     if (!agentStore.skills.length) await agentStore.fetchSkills()
-    await loadRuns()
+    await loadToolStats()
   } catch (e) {
     console.error('[AgentDetail] mount error:', e)
     message.error('加载 Agent 详情失败: ' + (e.message || e))
@@ -185,25 +191,11 @@ watch(agent, (a) => {
   }
 })
 
-async function loadRuns() {
-  runsLoading.value = true
-  try { runs.value = await listAgentRuns(route.params.id) }
-  catch (e) { message.error('加载运行记录失败') }
-  finally { runsLoading.value = false }
-}
-
-function runHeader(run) {
-  const time = run.created_at ? new Date(run.created_at).toLocaleString('zh-CN', { hour12: false }) : ''
-  const tools = run.tool_calls?.length ? ` · ${run.tool_calls.length} 次工具调用` : ''
-  return `${time}${tools}`
-}
-
-function statusColor(s) {
-  return { completed: 'green', failed: 'red', running: 'blue', pending: 'orange' }[s] || 'default'
-}
-
-function statusLabel(s) {
-  return { completed: '完成', failed: '失败', running: '运行中', pending: '待运行' }[s] || s
+async function loadToolStats() {
+  toolStatsLoading.value = true
+  try { toolStats.value = await getAgentToolStats(route.params.id) }
+  catch (e) { message.error('加载工具统计失败') }
+  finally { toolStatsLoading.value = false }
 }
 
 async function handleChat() {
@@ -269,6 +261,17 @@ async function handleUpdate() {
 .skill-desc { color: #888; font-size: 13px; }
 .skill-tags { margin-top: 4px; }
 .card-title-row { display: flex; align-items: center; justify-content: space-between; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.stats-table th { text-align: left; padding: 6px 10px; color: #888; font-weight: 600; border-bottom: 1px solid #f0f0f0; }
+.stats-table td { padding: 8px 10px; border-bottom: 1px solid #f9f9f9; }
+.stats-table tr:last-child td { border-bottom: none; }
+.tool-name-cell { font-family: monospace; color: #1677ff; font-weight: 500; }
+.success-cell { color: #52c41a; }
+.error-cell { color: #f5222d; }
+.rate-bar-wrap { display: flex; align-items: center; gap: 8px; }
+.rate-bar { height: 6px; border-radius: 3px; background: #52c41a; min-width: 2px; max-width: 80px; }
+.rate-text { font-size: 12px; color: #555; }
+.run-dur { font-size: 12px; color: #aaa; margin-left: 8px; }
 .add-skill-list { display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto; margin-top: 8px; }
 .add-skill-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 6px; cursor: pointer; border: 1px solid #f0f0f0; }
 .add-skill-row:hover { background: #e6f4ff; border-color: #91caff; }

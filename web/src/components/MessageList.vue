@@ -8,7 +8,7 @@
 
       <div class="bubble">
         <span v-if="msg.role === 'user'">{{ msgText(msg) }}</span>
-        <span v-else style="white-space: pre-wrap">{{ msgText(msg) }}</span>
+        <div v-else class="md-body" v-html="renderMd(msgText(msg))" />
       </div>
 
       <div v-if="msg.role === 'user'" class="avatar user-avatar">
@@ -20,7 +20,7 @@
     <div v-if="streamingText" class="message assistant">
       <div class="avatar agent-avatar" :style="agentAvatarStyle">{{ agentInitial }}</div>
       <div class="bubble streaming">
-        <span style="white-space: pre-wrap">{{ streamingText }}</span>
+        <div class="md-body" v-html="renderMd(streamingText)" />
         <span class="cursor">▌</span>
       </div>
     </div>
@@ -34,6 +34,14 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
 import { LoadingOutlined } from '@ant-design/icons-vue'
+import { marked } from 'marked'
+
+marked.setOptions({ breaks: true, gfm: true })
+
+function renderMd(text) {
+  if (!text) return ''
+  return marked.parse(text)
+}
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -108,4 +116,25 @@ watch(() => [props.messages.length, props.streamingText], async () => {
   font-size: 12px;
   padding: 4px 0;
 }
+
+.md-body { line-height: 1.7; }
+.md-body :deep(p) { margin: 0 0 8px; }
+.md-body :deep(p:last-child) { margin-bottom: 0; }
+.md-body :deep(h1),:deep(h2),:deep(h3),:deep(h4) { margin: 12px 0 6px; font-weight: 700; line-height: 1.3; }
+.md-body :deep(h1) { font-size: 1.25em; }
+.md-body :deep(h2) { font-size: 1.1em; }
+.md-body :deep(h3) { font-size: 1em; }
+.md-body :deep(ul),:deep(ol) { margin: 6px 0; padding-left: 20px; }
+.md-body :deep(li) { margin: 2px 0; }
+.md-body :deep(code) { background: rgba(0,0,0,0.07); border-radius: 3px; padding: 1px 5px; font-family: monospace; font-size: 0.9em; }
+.md-body :deep(pre) { background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 12px 14px; overflow-x: auto; margin: 8px 0; }
+.md-body :deep(pre code) { background: none; padding: 0; font-size: 0.88em; }
+.md-body :deep(blockquote) { border-left: 3px solid #d0d0d0; margin: 6px 0; padding: 2px 12px; color: #666; }
+.md-body :deep(table) { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 0.9em; }
+.md-body :deep(th),:deep(td) { border: 1px solid #e0e0e0; padding: 5px 10px; }
+.md-body :deep(th) { background: #f5f5f5; font-weight: 600; }
+.md-body :deep(a) { color: #1677ff; text-decoration: none; }
+.md-body :deep(a:hover) { text-decoration: underline; }
+.md-body :deep(hr) { border: none; border-top: 1px solid #e8e8e8; margin: 10px 0; }
+.message.assistant .md-body :deep(code) { background: rgba(0,0,0,0.06); }
 </style>

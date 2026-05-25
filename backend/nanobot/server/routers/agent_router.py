@@ -150,6 +150,17 @@ async def delete_agent(
         raise HTTPException(status_code=404, detail="Agent 不存在")
 
 
+@router.get("/api/agents/{agent_id}/tool-stats")
+async def get_agent_tool_stats(
+    agent_id: str,
+    request: Request,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await _get_agent_or_404(agent_id, factory)
+    return await RunRepository(factory).get_tool_stats_by_agent(agent.id)
+
+
 @router.get("/api/agents/{agent_id}/runs")
 async def list_agent_runs(
     agent_id: str,

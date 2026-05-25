@@ -82,8 +82,8 @@
               <a-tag v-if="currentAgent.capabilities?.deep_research" color="red"    size="small">深研</a-tag>
               <a-tag v-if="currentAgent.capabilities?.knowledge_base" color="purple" size="small">知识库</a-tag>
             </div>
-            <router-link :to="`/agents/${currentAgent.id}`" class="agent-bar-link">
-              <info-circle-outlined /> 详情
+            <router-link :to="`/conversations/${chatStore.currentConvId}`" class="agent-bar-link">
+              <bar-chart-outlined /> 详情
             </router-link>
           </div>
 
@@ -94,11 +94,6 @@
             :agent-name="currentAgent?.name || 'Agent'"
             :user-name="userStore.uid || 'U'"
           />
-          <div class="run-hint" v-if="lastRunId && !chatStore.streaming">
-            <router-link :to="`/runs/${lastRunId}`" class="run-link">
-              <bar-chart-outlined /> 查看运行详情
-            </router-link>
-          </div>
           <div class="input-area">
             <a-textarea
               v-model:value="inputText"

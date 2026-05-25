@@ -64,6 +64,36 @@ class RunRepository:
                 "avg_run_duration_ms": round(r.avg_duration_ms) if r.avg_duration_ms else None,
             }
 
+    async def get_tool_stats_by_agent(self, agent_id: uuid.UUID) -> list[dict]:
+        """Aggregate tool call stats across all runs for an agent."""
+        async with self._factory() as db:
+            from sqlalchemy import text
+            result = await db.execute(text("""
+                SELECT
+                    tc->>'name' AS tool_name,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN tc->>'status' = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN tc->>'status' = 'error'   THEN 1 ELSE 0 END) AS error_count
+                FROM agent_runs,
+                     jsonb_array_elements(tool_calls) AS tc
+                WHERE agent_id = :agent_id
+                  AND jsonb_typeof(tool_calls) = 'array'
+                  AND jsonb_array_length(tool_calls) > 0
+                GROUP BY tc->>'name'
+                ORDER BY total DESC
+            """), {"agent_id": str(agent_id)})
+            rows = result.fetchall()
+        return [
+            {
+                "tool_name": r.tool_name,
+                "total": r.total,
+                "success": r.success_count,
+                "error": r.error_count,
+                "success_rate": round(r.success_count / r.total * 100) if r.total else 0,
+            }
+            for r in rows
+        ]
+
     async def list_by_agent(self, agent_id: uuid.UUID, limit: int = 20) -> list[AgentRun]:
         async with self._factory() as db:
             result = await db.execute(
