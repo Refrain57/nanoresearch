@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -17,6 +18,54 @@ from nanobot.storage.repositories.conversation_repo import ConversationRepositor
 from nanobot.storage.repositories.run_repo import RunRepository
 
 router = APIRouter()
+
+
+async def _get_web_loop(uid: str, state):
+    """Return (or lazily create) the per-uid AgentLoop. Double-checked locking.
+
+    Falls back to state.channel_loop when loop_config is absent (e.g. tests).
+    """
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.session.manager import SessionManager
+
+    cfg = getattr(state, "loop_config", None) or {}
+    if "base_workspace" not in cfg:
+        # No per-uid config — use the channel loop as-is (test / minimal deploy mode)
+        return state.channel_loop
+
+    if uid in state.web_loops:          # fast path (no lock)
+        return state.web_loops[uid]
+
+    async with state.web_loops_lock:
+        if uid not in state.web_loops:  # double-check after acquiring lock
+            base: Path = cfg["base_workspace"]
+            ws = base / "users" / uid
+            ws.mkdir(parents=True, exist_ok=True)
+
+            session_manager = SessionManager(ws, session_factory=state.session_factory, default_uid=uid)
+            loop = AgentLoop(
+                bus=cfg["bus"],
+                provider=cfg["provider"],
+                workspace=ws,
+                model=cfg.get("model"),
+                max_iterations=cfg.get("max_iterations", 40),
+                context_window_tokens=cfg.get("context_window_tokens", 65536),
+                web_search_config=cfg.get("web_search_config"),
+                web_proxy=cfg.get("web_proxy"),
+                exec_config=cfg.get("exec_config"),
+                cron_service=cfg.get("cron_service"),
+                restrict_to_workspace=True,
+                session_manager=session_manager,
+                mcp_servers=cfg.get("mcp_servers"),
+                channels_config=cfg.get("channels_config"),
+                timezone=cfg.get("timezone"),
+                research_config=cfg.get("research_config"),
+                knowledge_search=cfg.get("knowledge_search"),
+                rag_store=cfg.get("rag_store"),
+            )
+            state.web_loops[uid] = loop
+
+    return state.web_loops[uid]
 
 
 def _utcnow() -> datetime:
@@ -173,10 +222,10 @@ async def create_run(
     uid: str = Depends(get_current_user),
 ):
     factory = request.app.state.session_factory
-    agent_loop = request.app.state.agent_loop
     run_repo = RunRepository(factory)
 
     conv = await _get_conv_or_404(body.conversation_id, uid, request)
+    agent_loop = await _get_web_loop(uid, request.app.state)
     run = await run_repo.create(conversation_id=conv.id, uid=uid, agent_id=conv.agent_id)
     run_id = run.id
 

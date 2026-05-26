@@ -24,7 +24,10 @@ def run(coro):
 
 
 class FakeAgentLoop:
-    async def process_direct(self, content, *, session_key, channel, chat_id, on_stream, on_progress):
+    model = "fake-model"
+    _last_usage: dict = {}
+
+    async def process_direct(self, content, *, on_stream, on_progress, **kwargs):
         await on_stream("ok")
 
 
@@ -39,7 +42,7 @@ def clean_tables():
 def app(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
     from nanobot.server.main import create_app
-    return create_app(agent_loop=FakeAgentLoop(), session_factory=make_factory())
+    return create_app(channel_loop=FakeAgentLoop(), session_factory=make_factory())
 
 
 @pytest.fixture

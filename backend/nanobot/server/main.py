@@ -15,25 +15,30 @@ from nanobot.server.routers.knowledge_router import router as knowledge_router
 from nanobot.server.routers.eval_router import router as eval_router
 
 
-def create_app(agent_loop, session_factory, channel_manager=None, rag_settings=None) -> FastAPI:
+def create_app(channel_loop, session_factory, loop_config=None, channel_manager=None, rag_settings=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks = []
         if channel_manager:
-            # Channels route inbound messages via bus → agent_loop.run() must be active
-            tasks.append(asyncio.create_task(agent_loop.run()))
+            # Channels route inbound messages via bus → channel_loop.run() must be active
+            tasks.append(asyncio.create_task(channel_loop.run()))
             tasks.append(asyncio.create_task(channel_manager.start_all()))
         yield
         if channel_manager:
-            agent_loop.stop()
+            channel_loop.stop()
             await channel_manager.stop_all()
+        for loop in list(app.state.web_loops.values()):
+            loop.stop()
         for t in tasks:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(title="Nanobot API", version="2.0.0", lifespan=lifespan)
-    app.state.agent_loop = agent_loop
+    app.state.channel_loop = channel_loop
+    app.state.web_loops = {}              # uid -> AgentLoop (per-user, lazily created)
+    app.state.web_loops_lock = asyncio.Lock()
+    app.state.loop_config = loop_config or {}
     app.state.session_factory = session_factory
     app.state.run_queues = {}  # run_id (str) -> asyncio.Queue
     app.state.rag_settings = rag_settings  # loaded lazily if None

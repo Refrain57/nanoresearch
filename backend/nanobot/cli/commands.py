@@ -1266,9 +1266,9 @@ def serve(
         except Exception as e:
             console.print(f"[yellow]Warning: knowledge search unavailable: {e}[/yellow]")
 
-    session_manager = SessionManager(cfg.workspace_path, session_factory=factory, default_uid="admin")
-
-    agent_loop = AgentLoop(
+    # Channel loop: handles bot integrations (Feishu, Telegram, etc.), uses global workspace
+    channel_session_manager = SessionManager(cfg.workspace_path, session_factory=factory, default_uid="admin")
+    channel_loop = AgentLoop(
         bus=bus,
         provider=provider,
         workspace=cfg.workspace_path,
@@ -1280,7 +1280,27 @@ def serve(
         exec_config=cfg.tools.exec,
         cron_service=cron,
         restrict_to_workspace=cfg.tools.restrict_to_workspace,
-        session_manager=session_manager,
+        session_manager=channel_session_manager,
+        mcp_servers=cfg.tools.mcp_servers,
+        channels_config=cfg.channels,
+        timezone=cfg.agents.defaults.timezone,
+        research_config=cfg.tools.research,
+        knowledge_search=knowledge_search,
+        rag_store=rag_store,
+    )
+
+    # Shared config for per-uid web API loops (workspace and session_manager set per user)
+    loop_config = dict(
+        bus=bus,
+        provider=provider,
+        base_workspace=cfg.workspace_path,
+        model=cfg.agents.defaults.model,
+        max_iterations=cfg.agents.defaults.max_tool_iterations,
+        context_window_tokens=cfg.agents.defaults.context_window_tokens,
+        web_search_config=cfg.tools.web.search,
+        web_proxy=cfg.tools.web.proxy or None,
+        exec_config=cfg.tools.exec,
+        cron_service=cron,
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
         timezone=cfg.agents.defaults.timezone,
@@ -1293,7 +1313,7 @@ def serve(
     if channel_manager.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channel_manager.enabled_channels)}")
 
-    fastapi_app = create_app(agent_loop, factory, channel_manager=channel_manager, rag_settings=settings if cfg.tools.research.enabled else None)
+    fastapi_app = create_app(channel_loop, factory, loop_config=loop_config, channel_manager=channel_manager, rag_settings=settings if cfg.tools.research.enabled else None)
 
     console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
     uvicorn.run(fastapi_app, host=host, port=port)
