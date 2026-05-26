@@ -9,6 +9,9 @@ const routes = [
   { path: '/agents/:id', component: () => import('@/views/AgentDetailView.vue'), meta: { requiresAuth: true } },
   { path: '/runs/:id', component: () => import('@/views/RunDetailView.vue'), meta: { requiresAuth: true } },
   { path: '/conversations/:id', component: () => import('@/views/ConversationDetailView.vue'), meta: { requiresAuth: true } },
+  { path: '/knowledge', component: () => import('@/views/KnowledgeView.vue'), meta: { requiresAuth: true } },
+  { path: '/knowledge/:id', component: () => import('@/views/KnowledgeDetailView.vue'), meta: { requiresAuth: true } },
+  { path: '/knowledge/:id/eval', component: () => import('@/views/KnowledgeEvalView.vue'), meta: { requiresAuth: true } },
   { path: '/', redirect: '/chat' }
 ]
 

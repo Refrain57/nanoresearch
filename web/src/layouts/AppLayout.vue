@@ -12,6 +12,10 @@
           <robot-outlined />
           <span>Agent</span>
         </a-menu-item>
+        <a-menu-item key="/knowledge">
+          <database-outlined />
+          <span>知识库</span>
+        </a-menu-item>
       </a-menu>
 
       <div class="sider-footer">
@@ -33,7 +37,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { CommentOutlined, RobotOutlined, LogoutOutlined } from '@ant-design/icons-vue'
+import { CommentOutlined, RobotOutlined, LogoutOutlined, DatabaseOutlined } from '@ant-design/icons-vue'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
@@ -43,6 +47,7 @@ const collapsed = ref(false)
 
 const activeKey = computed(() => {
   if (route.path.startsWith('/agents')) return '/agents'
+  if (route.path.startsWith('/knowledge')) return '/knowledge'
   return '/chat'
 })
 

@@ -1293,7 +1293,7 @@ def serve(
     if channel_manager.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channel_manager.enabled_channels)}")
 
-    fastapi_app = create_app(agent_loop, factory, channel_manager=channel_manager)
+    fastapi_app = create_app(agent_loop, factory, channel_manager=channel_manager, rag_settings=settings if cfg.tools.research.enabled else None)
 
     console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
     uvicorn.run(fastapi_app, host=host, port=port)

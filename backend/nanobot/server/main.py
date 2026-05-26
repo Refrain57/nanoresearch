@@ -11,9 +11,11 @@ from fastapi.security import OAuth2PasswordRequestForm
 from nanobot.server.middleware.auth import get_current_user
 from nanobot.server.routers.agent_router import router as agent_router
 from nanobot.server.routers.chat_router import router as chat_router
+from nanobot.server.routers.knowledge_router import router as knowledge_router
+from nanobot.server.routers.eval_router import router as eval_router
 
 
-def create_app(agent_loop, session_factory, channel_manager=None) -> FastAPI:
+def create_app(agent_loop, session_factory, channel_manager=None, rag_settings=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks = []
@@ -34,6 +36,7 @@ def create_app(agent_loop, session_factory, channel_manager=None) -> FastAPI:
     app.state.agent_loop = agent_loop
     app.state.session_factory = session_factory
     app.state.run_queues = {}  # run_id (str) -> asyncio.Queue
+    app.state.rag_settings = rag_settings  # loaded lazily if None
 
     @app.post("/api/auth/token")
     async def login(form: OAuth2PasswordRequestForm = Depends()):
@@ -53,6 +56,8 @@ def create_app(agent_loop, session_factory, channel_manager=None) -> FastAPI:
 
     app.include_router(chat_router)
     app.include_router(agent_router)
+    app.include_router(knowledge_router)
+    app.include_router(eval_router)
 
     # 生产静态文件服务（pnpm build 产物），放在所有路由之后
     import os
