@@ -163,6 +163,9 @@ class BatchProcessor:
                 
             except Exception as e:
                 # Record failure but continue with remaining batches
+                import sys, traceback as _tb
+                print(f"[BatchProcessor] batch {batch_idx} failed: {e}", flush=True, file=sys.stderr)
+                _tb.print_exc(file=sys.stderr)
                 failed_chunks += len(batch)
                 if trace:
                     trace.record_stage(

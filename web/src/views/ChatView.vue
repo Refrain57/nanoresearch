@@ -74,7 +74,7 @@
             </div>
             <div class="agent-bar-info">
               <span class="agent-bar-name">{{ currentAgent.name }}</span>
-              <span class="agent-bar-model">{{ currentAgent.model || '未配置模型' }}</span>
+              <span class="agent-bar-model">{{ overrideModel || currentAgent.model || '未配置模型' }}<span v-if="overrideModel" class="override-badge">对话覆盖</span></span>
             </div>
             <div class="agent-bar-caps">
               <a-tag v-if="currentAgent.capabilities?.streaming"     color="green"  size="small">流式</a-tag>
@@ -124,19 +124,23 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DeleteOutlined, RobotOutlined, BarChartOutlined, InfoCircleOutlined, CheckCircleFilled } from '@ant-design/icons-vue'
+import { message } from 'ant-design-vue'
+import { DeleteOutlined, RobotOutlined, BarChartOutlined, InfoCircleOutlined, CheckCircleFilled, EditOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import MessageList from '@/components/MessageList.vue'
 import { useChatStore } from '@/stores/chat'
 import { useAgentStore } from '@/stores/agent'
 import { useUserStore } from '@/stores/user'
+import { useSettingsStore } from '@/stores/settings'
 import { useRunStream } from '@/composables/useRunStream'
+import { updateAgentOverride } from '@/apis/conversations'
 
 const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
 const agentStore = useAgentStore()
 const userStore = useUserStore()
+const settingsStore = useSettingsStore()
 const runStream = useRunStream()
 
 const inputText = ref('')
@@ -145,6 +149,43 @@ const lastRunId = ref('')
 const newConvOpen = ref(false)
 const newConvLoading = ref(false)
 const selectedAgentId = ref(null)
+
+// Agent override modal
+const overrideOpen = ref(false)
+const overrideSaving = ref(false)
+const overrideForm = ref({ model: null, max_iterations: null })
+
+const currentConv = computed(() => chatStore.conversations.find(c => c.id === chatStore.currentConvId))
+const overrideModel = computed(() => currentConv.value?.agent_override?.model || null)
+
+function openOverrideModal() {
+  const ov = currentConv.value?.agent_override || {}
+  overrideForm.value = {
+    model: ov.model || null,
+    max_iterations: ov.max_iterations || null,
+  }
+  overrideOpen.value = true
+}
+
+async function saveOverride() {
+  overrideSaving.value = true
+  try {
+    const payload = {
+      model: overrideForm.value.model || '',           // "" clears
+      max_iterations: overrideForm.value.max_iterations || null,
+    }
+    const res = await updateAgentOverride(chatStore.currentConvId, payload)
+    // Patch the local conv so the bar updates immediately
+    const conv = chatStore.conversations.find(c => c.id === chatStore.currentConvId)
+    if (conv) conv.agent_override = res.agent_override
+    overrideOpen.value = false
+    message.success('覆盖配置已保存')
+  } catch (e) {
+    message.error('保存失败：' + (e.message || '未知错误'))
+  } finally {
+    overrideSaving.value = false
+  }
+}
 
 // 当前会话绑定的 Agent
 const currentAgent = computed(() => {
@@ -246,6 +287,10 @@ async function handleSend() {
 .agent-bar-caps { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
 .agent-bar-link { font-size: 12px; color: #1677ff; display: flex; align-items: center; gap: 3px; white-space: nowrap; }
 .agent-bar-link:hover { color: #0958d9; }
+.agent-bar-edit { color: #999; padding: 0 4px; }
+.agent-bar-edit:hover { color: #1677ff; }
+.override-badge { margin-left: 4px; font-size: 10px; color: #faad14; font-weight: 500; }
+.field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
 
 .run-hint { padding: 4px 16px; border-top: 1px solid #f0f0f0; background: #fafafa; }
 .run-link { font-size: 12px; color: #1677ff; display: flex; align-items: center; gap: 4px; width: fit-content; }

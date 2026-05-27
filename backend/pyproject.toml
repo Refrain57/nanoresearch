@@ -57,6 +57,9 @@ dependencies = [
     "ragas>=0.4.3",
     "pypdf>=6.10.2",
     "langchain-community>=0.4.1",
+    "jieba>=0.42.1",
+    "chromadb>=1.5.9",
+    "markitdown[pdf]>=0.1.6",
 ]
 
 [project.optional-dependencies]

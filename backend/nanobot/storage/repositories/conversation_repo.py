@@ -102,6 +102,22 @@ class ConversationRepository:
                 conv.updated_at = updated_at
                 await db.commit()
 
+    async def update_agent_override(self, conv_id: uuid.UUID, override: dict) -> Conversation | None:
+        from sqlalchemy.orm.attributes import flag_modified
+        async with self._factory() as db:
+            result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
+            conv = result.scalar_one_or_none()
+            if conv is None:
+                return None
+            meta = dict(conv.conv_metadata or {})
+            meta["agent_override"] = override
+            conv.conv_metadata = meta
+            flag_modified(conv, "conv_metadata")
+            conv.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(conv)
+        return conv
+
     async def get_messages(self, conv_id: uuid.UUID) -> list[Message]:
         async with self._factory() as db:
             result = await db.execute(

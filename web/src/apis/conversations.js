@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiDelete } from './base'
+import { apiGet, apiPost, apiPut, apiDelete } from './base'
 
 export const listConversations = (params = {}) => {
   const qs = new URLSearchParams(params).toString()
@@ -12,3 +12,4 @@ export const getMessages = (id, params = {}) => {
 }
 export const deleteConversation  = (id) => apiDelete(`/api/conversations/${id}`)
 export const getConversationRuns = (id) => apiGet(`/api/conversations/${id}/runs`)
+export const updateAgentOverride = (id, data) => apiPut(`/api/conversations/${id}/agent-override`, data)

@@ -49,6 +49,44 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def check_schema_migrations() -> None:
+    """Warn at startup if pending schema migrations are detected.
+
+    This catches the case where the DB has the old schema but the code expects
+    new columns — fail-fast with a clear message instead of a cryptic 500 at
+    runtime.
+    """
+    if _engine is None:
+        return
+    CHECKS = [
+        ("eval_runs", "eval_type"),
+        ("eval_runs", "error_message"),
+        ("eval_run_items", "retrieved_contexts"),
+        ("user_settings", "uid"),
+    ]
+    missing = []
+    async with _engine.connect() as conn:
+        for table, column in CHECKS:
+            result = await conn.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = :t AND column_name = :c"
+                ),
+                {"t": table, "c": column},
+            )
+            if result.scalar() is None:
+                missing.append(f"{table}.{column}")
+    if missing:
+        import sys
+        print(
+            "\n⚠️  Schema migration required before starting the server.\n"
+            f"   Missing columns: {', '.join(missing)}\n"
+            "   Run:  psql $DATABASE_URL -f scripts/migrate_eval_dual_track.sql\n",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency: yield an async DB session."""
     factory = get_session_factory()

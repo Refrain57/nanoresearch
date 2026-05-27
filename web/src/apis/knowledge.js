@@ -42,5 +42,6 @@ export const uploadDataset = (kbId, name, file) => {
 // Eval runs
 export const listEvalRuns   = (kbId)       => apiGet(`/api/eval/${kbId}/runs`)
 export const createEvalRun  = (kbId, data) => apiPost(`/api/eval/${kbId}/runs`, data)
+export const createRagasRun = (kbId, data) => apiPost(`/api/eval/${kbId}/runs/ragas`, data)
 export const getEvalRun     = (kbId, runId) => apiGet(`/api/eval/${kbId}/runs/${runId}`)
 export const deleteEvalRun  = (kbId, runId) => apiDelete(`/api/eval/${kbId}/runs/${runId}`)

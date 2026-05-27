@@ -41,9 +41,16 @@
                     size="small"
                     type="primary"
                     @click.stop="startRun(ds)"
-                    :loading="startingRun === ds.id"
+                    :loading="startingRun === ds.id + ':quick'"
                   >
-                    启动评估
+                    Quick
+                  </a-button>
+                  <a-button
+                    size="small"
+                    @click.stop="startRagasRun(ds)"
+                    :loading="startingRun === ds.id + ':ragas'"
+                  >
+                    RAGAS
                   </a-button>
                   <a-popconfirm title="确定删除数据集？" ok-type="danger" @confirm="removeDataset(ds.id)">
                     <a-button size="small" danger type="text" @click.stop>
@@ -80,6 +87,7 @@
                 <div class="run-header" @click="toggleRun(run)">
                   <div class="run-left">
                     <span class="run-name">{{ run.name }}</span>
+                    <a-tag :color="run.eval_type === 'ragas' ? 'purple' : 'cyan'" size="small">{{ run.eval_type || 'quick' }}</a-tag>
                     <a-tag :color="runStatusColor(run.status)" size="small">{{ runStatusLabel(run.status) }}</a-tag>
                   </div>
                   <div class="run-right">
@@ -114,11 +122,13 @@
                       <div class="items-header">
                         <span style="flex: 2">问题</span>
                         <span style="flex: 2">参考答案</span>
+                        <span v-if="expandedRunType === 'ragas'" style="flex: 2">生成答案</span>
                         <span v-for="k in metricKeys" :key="k" style="width: 80px; text-align: center">{{ k }}</span>
                       </div>
                       <div v-for="item in runItems" :key="item.id" class="items-row">
                         <span style="flex: 2" class="item-text">{{ item.query }}</span>
                         <span style="flex: 2" class="item-text">{{ item.gold_answer || '-' }}</span>
+                        <span v-if="expandedRunType === 'ragas'" style="flex: 2" class="item-text">{{ item.generated_answer || '-' }}</span>
                         <span
                           v-for="k in metricKeys" :key="k"
                           style="width: 80px; text-align: center; font-size: 12px"
@@ -152,7 +162,7 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import {
   listDatasets, uploadDataset, deleteDataset,
-  listEvalRuns, createEvalRun, getEvalRun, deleteEvalRun
+  listEvalRuns, createEvalRun, createRagasRun, getEvalRun, deleteEvalRun
 } from '@/apis/knowledge'
 
 const route = useRoute()
@@ -171,6 +181,7 @@ const runsLoading = ref(false)
 const startingRun = ref(null)
 
 const expandedRun = ref(null)
+const expandedRunType = ref('quick')
 const runItems = ref([])
 const itemsLoading = ref(false)
 
@@ -234,15 +245,32 @@ async function removeDataset(id) {
 }
 
 async function startRun(ds) {
-  startingRun.value = ds.id
+  startingRun.value = ds.id + ':quick'
   try {
     const run = await createEvalRun(kbId, {
       dataset_id: ds.id,
-      name: `${ds.name} - 评估`,
+      name: `${ds.name} - Quick`,
       top_k: 5,
     })
     evalRuns.value.unshift(run)
-    message.success('评估已启动')
+    message.success('Quick 评估已启动')
+  } catch (e) {
+    message.error(e.message || '启动失败')
+  } finally {
+    startingRun.value = null
+  }
+}
+
+async function startRagasRun(ds) {
+  startingRun.value = ds.id + ':ragas'
+  try {
+    const run = await createRagasRun(kbId, {
+      dataset_id: ds.id,
+      name: `${ds.name} - RAGAS`,
+      top_k: 5,
+    })
+    evalRuns.value.unshift(run)
+    message.success('RAGAS 评估已启动')
   } catch (e) {
     message.error(e.message || '启动失败')
   } finally {
@@ -256,6 +284,7 @@ async function toggleRun(run) {
     return
   }
   expandedRun.value = run.id
+  expandedRunType.value = run.eval_type || 'quick'
   itemsLoading.value = true
   try {
     const detail = await getEvalRun(kbId, run.id)

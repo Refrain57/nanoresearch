@@ -128,7 +128,7 @@ async def upload_document(
     )
 
     asyncio.create_task(
-        _ingest_document(request, uuid.UUID(kb_id), doc.id, tmp_path, kb.chroma_collection or str(kb_id))
+        _ingest_document(request, uuid.UUID(kb_id), doc.id, tmp_path, kb.chroma_collection or str(kb_id), original_filename=file.filename or "upload")
     )
     return _doc_to_dict(doc)
 
@@ -163,7 +163,7 @@ async def delete_document(
 
         chroma_col = kb.chroma_collection or kb_id
         chroma = VectorStoreFactory.create(settings, collection_name=chroma_col)
-        bm25 = BM25Indexer(index_dir=str(resolve_path("~/.nanoresearch/rag/bm25_index")))
+        bm25 = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{chroma_col}")))
         img_storage = ImageStorage(
             db_path=str(resolve_path("~/.nanoresearch/rag/images.db")),
             images_root=str(resolve_path("~/.nanoresearch/rag/images")),
@@ -235,7 +235,7 @@ async def test_query(
 
         embedding = EmbeddingFactory.create(settings)
         vector_store = VectorStoreFactory.create(settings, collection_name=chroma_col)
-        bm25 = BM25Indexer(index_dir=str(resolve_path("~/.nanoresearch/rag/bm25_index")))
+        bm25 = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{chroma_col}")))
 
         dense = DenseRetriever(settings=settings, embedding_client=embedding, vector_store=vector_store)
         sparse = SparseRetriever(settings=settings, bm25_indexer=bm25, vector_store=vector_store, default_collection=chroma_col)
@@ -250,7 +250,7 @@ async def test_query(
         )
 
         result = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: hybrid.search(body.query, top_k=body.top_k)
+            None, lambda: hybrid.search(body.query, top_k=body.top_k, return_details=True)
         )
 
         # Look up full chunk content from PG using chroma_ids
@@ -334,7 +334,7 @@ def _chunk_to_dict(chunk) -> dict:
     }
 
 
-async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID, file_path: str, chroma_collection: str = "") -> None:
+async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID, file_path: str, chroma_collection: str = "", original_filename: str = "") -> None:
     """Background task: run IngestionPipeline and persist chunks to DB."""
     repo = KnowledgeRepository(request.app.state.session_factory)
     settings = _rag_settings(request)
@@ -344,10 +344,11 @@ async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID
     try:
         from nanobot.rag.ingestion.pipeline import IngestionPipeline
 
-        pipeline = IngestionPipeline(settings, collection=collection)
+        pipeline = IngestionPipeline(settings, collection=collection, force=True)
         result = await asyncio.get_running_loop().run_in_executor(
             None, lambda: pipeline.run(file_path)
         )
+
 
         if not result.success:
             await repo.update_document_status(doc_id, "error", error_msg=result.error or "ingestion failed")
@@ -367,7 +368,9 @@ async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID
                     if items:
                         item = items[0]
                         text = item.get("text", item.get("document", ""))
-                        meta = item.get("metadata", {})
+                        meta = dict(item.get("metadata") or {})
+                        if original_filename:
+                            meta["source_path"] = original_filename
                         chunk_rows.append(KbChunk(
                             kb_id=kb_id,
                             document_id=doc_id,
@@ -394,6 +397,9 @@ async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID
         await repo.increment_counts(kb_id, doc_delta=1, chunk_delta=chunk_count)
 
     except Exception as exc:
+        import traceback, sys
+        print(f"[INGEST ERROR] doc={doc_id}: {exc}", flush=True, file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         await repo.update_document_status(doc_id, "error", error_msg=str(exc))
     finally:
         try:

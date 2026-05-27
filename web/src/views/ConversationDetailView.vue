@@ -32,6 +32,21 @@
           </div>
         </div>
 
+        <!-- Agent 覆盖配置 -->
+        <div class="override-card" v-if="!loading">
+          <div class="override-header">
+            <span class="override-title">对话参数覆盖</span>
+            <a-button type="link" size="small" @click="openOverride">
+              <edit-outlined /> 编辑
+            </a-button>
+          </div>
+          <div class="override-body">
+            <span v-if="overrideData.model" class="override-tag">模型：{{ overrideData.model }}</span>
+            <span v-if="overrideData.max_iterations" class="override-tag">最大迭代：{{ overrideData.max_iterations }}</span>
+            <span v-if="!overrideData.model && !overrideData.max_iterations" class="override-empty">使用 Agent 默认配置</span>
+          </div>
+        </div>
+
         <!-- 各 Agent 卡片 -->
         <div v-for="ag in agentSummaries" :key="ag.agentId" class="agent-block">
           <div class="agent-block-header">
@@ -92,29 +107,99 @@
       </a-spin>
     </div>
   </app-layout>
+
+  <a-modal
+    v-model:open="overrideOpen"
+    title="对话参数覆盖"
+    ok-text="保存"
+    cancel-text="取消"
+    :confirm-loading="overrideSaving"
+    @ok="saveOverride"
+    width="400"
+  >
+    <a-form layout="vertical" style="margin-top: 16px">
+      <a-form-item label="模型">
+        <a-auto-complete
+          v-model:value="overrideForm.model"
+          :options="settingsStore.allModelOptions"
+          placeholder="留空则使用 Agent 默认模型"
+          allow-clear
+          style="width: 100%"
+        />
+        <div class="field-hint">覆盖此对话的模型，留空恢复 Agent 默认</div>
+      </a-form-item>
+      <a-form-item label="最大迭代次数">
+        <a-input-number
+          v-model:value="overrideForm.max_iterations"
+          :min="1"
+          :max="200"
+          placeholder="留空则使用 Agent 默认"
+          style="width: 100%"
+        />
+        <div class="field-hint">覆盖此对话的最大 Agent 迭代次数</div>
+      </a-form-item>
+    </a-form>
+  </a-modal>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeftOutlined, RobotOutlined } from '@ant-design/icons-vue'
+import { message } from 'ant-design-vue'
+import { ArrowLeftOutlined, RobotOutlined, EditOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import RunTimeline from '@/components/RunTimeline.vue'
-import { getConversationRuns } from '@/apis/conversations'
+import { getConversationRuns, getConversation, updateAgentOverride } from '@/apis/conversations'
 import { getAgent } from '@/apis/agents'
+import { useSettingsStore } from '@/stores/settings'
 
 const route = useRoute()
 const router = useRouter()
+const settingsStore = useSettingsStore()
 
 const runs = ref([])
 const loading = ref(false)
 const agentNameCache = ref({})
+const overrideData = ref({})
+const overrideOpen = ref(false)
+const overrideSaving = ref(false)
+const overrideForm = ref({ model: null, max_iterations: null })
+
+function openOverride() {
+  overrideForm.value = {
+    model: overrideData.value.model || null,
+    max_iterations: overrideData.value.max_iterations || null,
+  }
+  overrideOpen.value = true
+}
+
+async function saveOverride() {
+  overrideSaving.value = true
+  try {
+    const res = await updateAgentOverride(route.params.id, {
+      model: overrideForm.value.model || '',
+      max_iterations: overrideForm.value.max_iterations || null,
+    })
+    overrideData.value = res.agent_override
+    overrideOpen.value = false
+    message.success('已保存')
+  } catch (e) {
+    message.error('保存失败：' + (e.message || '未知错误'))
+  } finally {
+    overrideSaving.value = false
+  }
+}
 
 onMounted(async () => {
   loading.value = true
   try {
-    runs.value = await getConversationRuns(route.params.id)
-    const ids = [...new Set(runs.value.map(r => r.agent_id).filter(Boolean))]
+    const [runsData, conv] = await Promise.all([
+      getConversationRuns(route.params.id),
+      getConversation(route.params.id),
+    ])
+    runs.value = runsData
+    overrideData.value = conv.agent_override || {}
+    const ids = [...new Set(runsData.map(r => r.agent_id).filter(Boolean))]
     const entries = await Promise.all(ids.map(async id => {
       try { return [id, (await getAgent(id))?.name || id.slice(0, 8)] }
       catch { return [id, id.slice(0, 8)] }
@@ -205,4 +290,15 @@ const formatTime = iso => iso ? new Date(iso).toLocaleString('zh-CN', { hour12: 
 .rate-bar { height: 6px; border-radius: 3px; background: #52c41a; min-width: 2px; max-width: 80px; }
 .no-tools { font-size: 13px; color: #bbb; padding: 8px 0 12px; }
 .run-collapse { margin-top: 4px; }
+
+.override-card {
+  background: #fff; border: 1px solid #e8e8e8; border-radius: 10px;
+  padding: 16px 20px; margin-bottom: 16px;
+}
+.override-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.override-title { font-size: 14px; font-weight: 600; color: #333; }
+.override-body { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.override-tag { font-size: 12px; background: #e6f4ff; color: #1677ff; padding: 2px 10px; border-radius: 4px; }
+.override-empty { font-size: 12px; color: #bbb; }
+.field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
 </style>

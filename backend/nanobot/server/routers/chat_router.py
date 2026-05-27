@@ -20,34 +20,63 @@ from nanobot.storage.repositories.run_repo import RunRepository
 router = APIRouter()
 
 
-async def _get_web_loop(uid: str, state):
+async def _get_web_loop(uid: str, state, model_override: str | None = None):
     """Return (or lazily create) the per-uid AgentLoop. Double-checked locking.
 
     Falls back to state.channel_loop when loop_config is absent (e.g. tests).
+    model_override: conversation-level model override; triggers loop eviction if different.
     """
     from nanobot.agent.loop import AgentLoop
     from nanobot.session.manager import SessionManager
 
     cfg = getattr(state, "loop_config", None) or {}
     if "base_workspace" not in cfg:
-        # No per-uid config — use the channel loop as-is (test / minimal deploy mode)
         return state.channel_loop
+
+    # Evict loop if the conversation needs a different model than what's cached
+    cached = state.web_loops.get(uid)
+    if cached and model_override and getattr(cached, "model", None) != model_override:
+        state.web_loops.pop(uid, None)
 
     if uid in state.web_loops:          # fast path (no lock)
         return state.web_loops[uid]
 
     async with state.web_loops_lock:
         if uid not in state.web_loops:  # double-check after acquiring lock
+            from nanobot.storage.repositories.user_settings_repo import UserSettingsRepository
+            user_cfg = await UserSettingsRepository(state.session_factory).get(uid)
+            # Precedence: conversation override > user settings > system default
+            model = model_override or (user_cfg.model if user_cfg else None) or cfg.get("model")
+
             base: Path = cfg["base_workspace"]
             ws = base / "users" / uid
             ws.mkdir(parents=True, exist_ok=True)
 
             session_manager = SessionManager(ws, session_factory=state.session_factory, default_uid=uid)
+
+            # Per-user provider: find the provider whose models list contains the selected model
+            providers = ((user_cfg.extra or {}).get("providers") or []) if user_cfg else []
+            matched = next(
+                (p for p in providers if model and model in p.get("models", [])),
+                providers[0] if providers else None,  # fallback: first provider if any
+            )
+            user_api_key = (matched or {}).get("api_key") or None
+            if user_api_key:
+                from nanobot.providers.openai_compat_provider import OpenAICompatProvider
+                user_api_base = (matched or {}).get("api_base") or None
+                provider = OpenAICompatProvider(
+                    api_key=user_api_key,
+                    api_base=user_api_base,
+                    default_model=model or "gpt-4o",
+                )
+            else:
+                provider = cfg["provider"]
+
             loop = AgentLoop(
                 bus=cfg["bus"],
-                provider=cfg["provider"],
+                provider=provider,
                 workspace=ws,
-                model=cfg.get("model"),
+                model=model,
                 max_iterations=cfg.get("max_iterations", 40),
                 context_window_tokens=cfg.get("context_window_tokens", 65536),
                 web_search_config=cfg.get("web_search_config"),
@@ -86,6 +115,11 @@ class RunCreate(BaseModel):
     content: str
 
 
+class AgentOverrideUpdate(BaseModel):
+    model: str | None = None          # "" clears override
+    max_iterations: int | None = None  # None keeps existing
+
+
 # ---------------------------------------------------------------------------
 # Conversations
 # ---------------------------------------------------------------------------
@@ -114,6 +148,7 @@ async def list_conversations(
             "title": c.title,
             "channel": c.channel,
             "agent_id": str(c.agent_id) if c.agent_id else None,
+            "agent_override": (c.conv_metadata or {}).get("agent_override") or {},
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
             "last_message_preview": preview,
@@ -157,6 +192,7 @@ async def get_conversation(
         "title": conv.title,
         "session_key": conv.session_key,
         "agent_id": str(conv.agent_id) if conv.agent_id else None,
+        "agent_override": (conv.conv_metadata or {}).get("agent_override") or {},
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
         "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
     }
@@ -198,6 +234,36 @@ async def delete_conversation(
     await repo.delete(conv.id)
 
 
+@router.put("/api/conversations/{conv_id}/agent-override")
+async def update_agent_override(
+    conv_id: str,
+    request: Request,
+    body: AgentOverrideUpdate,
+    uid: str = Depends(get_current_user),
+):
+    conv = await _get_conv_or_404(conv_id, uid, request)
+    repo = ConversationRepository(request.app.state.session_factory)
+
+    # Build new override from existing + updates
+    current = dict((conv.conv_metadata or {}).get("agent_override") or {})
+    sent = body.model_fields_set if hasattr(body, "model_fields_set") else body.__fields_set__
+    if "model" in sent:
+        if body.model:
+            current["model"] = body.model
+        else:
+            current.pop("model", None)
+    if "max_iterations" in sent:
+        if body.max_iterations is not None:
+            current["max_iterations"] = body.max_iterations
+        else:
+            current.pop("max_iterations", None)
+
+    await repo.update_agent_override(conv.id, current)
+    # Evict loop so next message picks up new model if changed
+    request.app.state.web_loops.pop(uid, None)
+    return {"agent_override": current}
+
+
 @router.get("/api/conversations/{conv_id}/runs")
 async def get_conversation_runs(
     conv_id: str,
@@ -225,7 +291,9 @@ async def create_run(
     run_repo = RunRepository(factory)
 
     conv = await _get_conv_or_404(body.conversation_id, uid, request)
-    agent_loop = await _get_web_loop(uid, request.app.state)
+    agent_override: dict = (conv.conv_metadata or {}).get("agent_override") or {}
+
+    agent_loop = await _get_web_loop(uid, request.app.state, model_override=agent_override.get("model"))
     run = await run_repo.create(conversation_id=conv.id, uid=uid, agent_id=conv.agent_id)
     run_id = run.id
 
@@ -252,6 +320,7 @@ async def create_run(
             run_queues=request.app.state.run_queues,
             skill_names=skill_names,
             agent_id=str(conv.agent_id) if conv.agent_id else None,
+            agent_override=agent_override or None,
         )
     )
 
@@ -320,6 +389,7 @@ async def _run_agent(
     run_queues: dict,
     skill_names: list[str] | None = None,
     agent_id: str | None = None,
+    agent_override: dict | None = None,
 ) -> None:
     run_repo = RunRepository(factory)
     start = _utcnow()
@@ -348,6 +418,7 @@ async def _run_agent(
             on_tool_call=on_tool_call,
             skill_names=skill_names,
             agent_id=agent_id,
+            agent_override=agent_override,
         )
         finished = _utcnow()
         duration_ms = int((finished - start).total_seconds() * 1000)

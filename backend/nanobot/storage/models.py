@@ -27,6 +27,16 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    uid: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str | None] = mapped_column(String)
+    max_iterations: Mapped[int | None] = mapped_column(Integer)
+    extra: Mapped[dict] = mapped_column(JSONB, default=dict)  # fast_model, future fields
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
 class Agent(Base):
     __tablename__ = "agents"
 
@@ -181,12 +191,14 @@ class EvalRun(Base):
     kb_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False, index=True)
     dataset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("eval_datasets.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str | None] = mapped_column(String)
+    eval_type: Mapped[str] = mapped_column(String, default="quick")  # quick|ragas
     status: Mapped[str] = mapped_column(String, default="pending")  # pending|running|completed|failed
     retrieval_config: Mapped[dict] = mapped_column(JSONB, default=dict)
     metrics: Mapped[dict] = mapped_column(JSONB, default=dict)
     overall_score: Mapped[float | None] = mapped_column(Float)
     total_items: Mapped[int] = mapped_column(Integer, default=0)
     completed_items: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -200,5 +212,5 @@ class EvalRunItem(Base):
     query: Mapped[str | None] = mapped_column(Text)
     gold_answer: Mapped[str | None] = mapped_column(Text)
     generated_answer: Mapped[str | None] = mapped_column(Text)
-    retrieved_chunk_ids: Mapped[list | None] = mapped_column(JSONB)  # list of chunk id strings
+    retrieved_contexts: Mapped[list | None] = mapped_column(JSONB)  # chunk ids (quick) or texts (ragas)
     item_metrics: Mapped[dict] = mapped_column("metrics", JSONB, default=dict)

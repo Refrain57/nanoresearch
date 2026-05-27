@@ -22,7 +22,7 @@
 - **2026-05-05** 📚 Agentic RAG 多路召回 + Cross-Encoder 精排，Top-10 召回率提升 ~25%
 - **2026-05-01** 💾 Token 感知记忆压缩，整合后上下文降至触发阈值 50%
 - **2026-04-28** ⚡ Subagent 异步执行耗时研究任务，MessageBus 回注主会话
-- **2026-04-25" 🏗️ 完成研究流程编排：Planner → Searcher → Synthesizer → Refiner → Reporter
+- **2026-04-25** 🏗️ 完成研究流程编排：Planner → Searcher → Synthesizer → Refiner → Reporter
 
 <details>
 <summary>Earlier news</summary>
@@ -31,7 +31,7 @@
 - **2026-04-15** 📊 Cross-Encoder 精排 + 去重，去重率约 38%
 - **2026-04-10** 📝 带引用溯源的报告生成器
 - **2026-04-05** 🔍 并行搜索 + RRF 融合的多路召回
-- **2026-04-01" 🎯 项目启动，基于 NanoResearch 框架扩展研究能力
+- **2026-04-01** 🎯 项目启动，基于 NanoResearch 框架扩展研究能力
 
 </details>
 
@@ -59,6 +59,15 @@
 ⚡ **Subagent 异步执行** — 耗时任务后台处理
 - 主流程即时响应，后台任务完成自动通知
 - 复用 RAG 检索服务作为长期记忆
+
+🌐 **Web 管理界面** — 可视化管理与监控
+- Vue 3 + Ant Design Vue 构建，覆盖对话、Agent、知识库全流程
+- 对话详情页展示 Agent 工具调用时间线与 token 用量统计
+- 知识库上传、检索、评估一体化管理
+
+📊 **知识库评估** — RAGAS 框架驱动的 RAG 质量评估
+- 支持自定义评估数据集，量化召回率、准确率、忠实度等指标
+- 评估结果持久化，支持多次评估对比
 
 🪶 **轻量级 Agent 框架**
 - 基于 ReAct 循环自研，代码简洁易扩展
@@ -144,6 +153,7 @@
 - [Deep Research](#-deep-research)
 - [Agentic RAG](#-agentic-rag)
 - [混合记忆系统](#-混合记忆系统)
+- [Web 管理界面](#-web-管理界面)
 - [Chat Apps](#-chat-apps)
 - [Configuration](#️-configuration)
 - [Multiple Instances](#-multiple-instances)
@@ -517,6 +527,36 @@ NanoResearch 采用分层记忆架构，结合短期上下文与长期知识库�
   }
 }
 ```
+
+## 🌐 Web 管理界面
+
+NanoResearch 提供基于 Vue 3 的 Web 管理界面，通过 FastAPI REST API 与后端交互。
+
+### 启动
+
+```bash
+# 启动后端 API 服务
+cd backend
+uvicorn nanobot.server.app:app --host 0.0.0.0 --port 8000
+
+# 启动前端开发服务器
+cd web
+pnpm dev
+```
+
+### 主要功能页面
+
+| 页面 | 功能 |
+|------|------|
+| **对话界面** | 多会话管理，实时流式输出，支持选择自定义 Agent |
+| **对话详情** | Agent 工具调用时间线，每步 token 用量，工具统计 |
+| **Agent 画廊** | 创建/编辑自定义 Agent，配置 skills、tools 与系统提示 |
+| **知识库** | 文档上传、分块预览、语义检索测试 |
+| **知识库评估** | 基于 RAGAS 的 RAG 质量评估，支持自定义评估数据集 |
+
+### API 鉴权
+
+Web 界面使用 JWT + bcrypt 鉴权。登录后 token 自动注入请求头，所有接口均为 per-user 隔离。
 
 ## 💬 Chat Apps
 
@@ -909,49 +949,58 @@ systemctl --user enable --now nanoresearch-gateway
 
 ```
 nanobot/
-├── agent/                    # 🧠 Core Agent
-│   ├── loop.py               #    ReAct 执行循环
-│   ├── context.py            #    上下文构建
-│   ├── memory.py             #    Token 压缩 + 长期记忆
-│   ├── subagent.py           #    后台任务执行
-│   ├── skills.py             #    Skill 渐进式加载
-│   └── tools/                #    内置工具
-│       ├── research.py       #    Deep Research 工具
-│       ├── spawn.py          #    Subagent 启动工具
-│       └── ...
+├── backend/nanobot/          # 🐍 Python 后端
+│   ├── agent/                #    🧠 Core Agent
+│   │   ├── loop.py           #       ReAct 执行循环（per-session 串行 + 跨 session 并发）
+│   │   ├── context.py        #       上下文构建，Prompt Caching 分层优化
+│   │   ├── memory.py         #       Token 感知压缩 + LLM 驱动整合
+│   │   ├── subagent.py       #       后台异步任务，MessageBus 回注
+│   │   ├── skills.py         #       Skill 渐进式加载
+│   │   └── tools/            #       内置工具（web, file, shell, research, spawn...）
+│   │
+│   ├── research/             #    🔬 Deep Research Pipeline
+│   │   ├── runner.py         #       7 阶段流程编排，自适应深度
+│   │   ├── planner.py        #       主题分解（3-6 子问题 + 双语关键词）
+│   │   ├── searcher.py       #       并行搜索 + Cross-Encoder 精排去重
+│   │   ├── synthesizer.py    #       信息综合，覆盖度评分
+│   │   ├── refiner.py        #       迭代终止判断
+│   │   ├── reporter.py       #       报告生成 + 自评估重试
+│   │   ├── knowledge_processor.py # 知识入库（Claims / Insights）
+│   │   └── knowledge_search.py  #  知识预查询，时间衰减置信度
+│   │
+│   ├── rag/                  #    📚 RAG 系统
+│   │   ├── core/query_engine/
+│   │   │   ├── hybrid_search.py  # Dense + Sparse 并行检索
+│   │   │   ├── dense_retriever.py
+│   │   │   ├── sparse_retriever.py # BM25
+│   │   │   └── fusion.py         # RRF 融合（source 加权）
+│   │   ├── libs/
+│   │   │   ├── reranker/         # Cross-Encoder 精排
+│   │   │   ├── embedding/        # 向量编码（BAAI/bge-large-en-v1.5）
+│   │   │   ├── evaluator/        # RAGAS 评估框架
+│   │   │   └── vector_store/     # ChromaDB 封装
+│   │   └── mcp_server/           # MCP 协议 RAG 服务（stdio JSON-RPC）
+│   │
+│   ├── server/               #    🌐 REST API（FastAPI）
+│   │   └── routers/          #       chat, agents, knowledge, eval 路由
+│   │
+│   ├── storage/              #    🗄️ 数据持久层
+│   │   ├── models.py         #       SQLAlchemy ORM（User/Agent/Conv/Run/KB/Eval）
+│   │   └── repositories/     #       数据访问层
+│   │
+│   ├── skills/               #    🎯 内置 Skills（deep-research, rag, memory...）
+│   ├── channels/             #    📱 聊天平台适配器（12+ 渠道，动态发现）
+│   ├── bus/                  #    🚌 消息总线（Pub/Sub）
+│   ├── providers/            #    🤖 LLM 提供商注册表（20+）
+│   ├── session/              #    💬 会话管理
+│   ├── config/               #    ⚙️ Pydantic 配置 Schema
+│   └── cli/                  #    🖥️ CLI（Typer）
 │
-├── research/                 # 🔬 Deep Research
-│   ├── runner.py             #    研究流程编排
-│   ├── planner.py            #    主题分解
-│   ├── searcher.py           #    并行搜索 + 评分
-│   ├── synthesizer.py        #    信息综合
-│   ├── refiner.py            #    迭代判断
-│   ├── reporter.py           #    报告生成
-│   ├── knowledge_processor.py #   知识沉淀
-│   └── knowledge_search.py   #    知识检索
-│
-├── rag/                      # 📚 RAG 系统
-│   ├── core/
-│   │   ├── query_engine/     #    检索引擎
-│   │   │   ├── hybrid_search.py   # 多路召回
-│   │   │   ├── dense_retriever.py # 向量检索
-│   │   │   ├── sparse_retriever.py# BM25 检索
-│   │   │   └── fusion.py     #    RRF 融合
-│   │   └── response/         #    响应构建
-│   ├── libs/
-│   │   ├── reranker/         #    精排模块
-│   │   ├── embedding/        #    向量编码
-│   │   └── vector_store/     #    向量存储
-│   └── mcp_server/           #    MCP 协议服务
-│       └── tools/agentic/    #    Agentic RAG 工具
-│
-├── skills/                   # 🎯 Skills (deep-research, rag, memory...)
-├── channels/                 # 📱 聊天平台接入
-├── bus/                      # 🚌 消息总线
-├── providers/                # 🤖 LLM 提供商
-├── session/                  # 💬 会话管理
-├── config/                   # ⚙️ 配置
-└── cli/                      # 🖥️ 命令行
+└── web/                      # 🖥️ Vue 3 前端
+    └── src/
+        ├── views/            #    对话、Agent 画廊、知识库、评估页面
+        ├── apis/             #    API 请求层（auth/conv/agent/knowledge/run）
+        └── stores/           #    Pinia 状态管理
 ```
 
 ## 📊 Performance

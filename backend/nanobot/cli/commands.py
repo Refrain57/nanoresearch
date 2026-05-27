@@ -1234,7 +1234,7 @@ def serve(
     from nanobot.channels.manager import ChannelManager
     from nanobot.cron.service import CronService
     from nanobot.session.manager import SessionManager
-    from nanobot.storage.database import init_engine, get_session_factory
+    from nanobot.storage.database import init_engine, get_session_factory, check_schema_migrations
     from nanobot.server.main import create_app
 
     cfg = _load_runtime_config(config, workspace)
@@ -1246,6 +1246,8 @@ def serve(
         logger.disable("nanobot")
 
     init_engine()
+    import asyncio as _asyncio
+    _asyncio.run(check_schema_migrations())
     factory = get_session_factory()
 
     bus = MessageBus()
@@ -1313,9 +1315,19 @@ def serve(
     if channel_manager.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channel_manager.enabled_channels)}")
 
-    fastapi_app = create_app(channel_loop, factory, loop_config=loop_config, channel_manager=channel_manager, rag_settings=settings if cfg.tools.research.enabled else None)
+    fastapi_app = create_app(
+        channel_loop, factory,
+        loop_config=loop_config,
+        channel_manager=channel_manager,
+        rag_settings=settings if cfg.tools.research.enabled else None,
+        allowed_models=cfg.agents.allowed_models or [],
+    )
 
     console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
+    import sys as _sys
+    if _sys.platform == "win32":
+        import asyncio as _asyncio
+        _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(fastapi_app, host=host, port=port)
 
 
