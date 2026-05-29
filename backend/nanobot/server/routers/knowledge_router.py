@@ -38,6 +38,7 @@ class KbCreate(BaseModel):
     name: str
     description: str | None = None
     embedding_model: str | None = None
+    chunk_strategy: str = "auto"
 
 
 class KbUpdate(BaseModel):
@@ -49,6 +50,8 @@ class KbUpdate(BaseModel):
 class QueryTestRequest(BaseModel):
     query: str
     top_k: int = 5
+    enable_dense: bool = True
+    enable_sparse: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +66,7 @@ async def list_knowledge(request: Request, uid: str = Depends(get_current_user))
 
 @router.post("/api/knowledge", status_code=201)
 async def create_knowledge(request: Request, body: KbCreate, uid: str = Depends(get_current_user)):
-    kb = await _kb_repo(request).create(uid, body.name, body.description, body.embedding_model)
+    kb = await _kb_repo(request).create(uid, body.name, body.description, body.embedding_model, chunk_strategy=body.chunk_strategy)
     chroma_collection = f"{uid}_{kb.id}"
     kb = await _kb_repo(request).update(kb.id, chroma_collection=chroma_collection)
     return _kb_to_dict(kb)
@@ -128,7 +131,7 @@ async def upload_document(
     )
 
     asyncio.create_task(
-        _ingest_document(request, uuid.UUID(kb_id), doc.id, tmp_path, kb.chroma_collection or str(kb_id), original_filename=file.filename or "upload")
+        _ingest_document(request, uuid.UUID(kb_id), doc.id, tmp_path, kb.chroma_collection or str(kb_id), original_filename=file.filename or "upload", chunk_strategy=kb.chunk_strategy or "auto")
     )
     return _doc_to_dict(doc)
 
@@ -246,7 +249,7 @@ async def test_query(
             dense_retriever=dense,
             sparse_retriever=sparse,
             fusion=fusion,
-            config=HybridSearchConfig(fusion_top_k=body.top_k),
+            config=HybridSearchConfig(fusion_top_k=body.top_k, enable_dense=body.enable_dense, enable_sparse=body.enable_sparse),
         )
 
         result = await asyncio.get_running_loop().run_in_executor(
@@ -263,6 +266,8 @@ async def test_query(
                 {
                     "chunk_id": r.chunk_id,
                     "score": r.score,
+                    "dense_score": r.dense_score,
+                    "sparse_score": r.sparse_score,
                     "text": chunk_map[r.chunk_id].content if r.chunk_id in chunk_map else r.text,
                     "metadata": chunk_map[r.chunk_id].chunk_metadata if r.chunk_id in chunk_map else r.metadata,
                 }
@@ -296,6 +301,7 @@ def _kb_to_dict(kb) -> dict:
         "name": kb.name,
         "description": kb.description,
         "embedding_model": kb.embedding_model,
+        "chunk_strategy": kb.chunk_strategy,
         "chunk_size": kb.chunk_size,
         "chunk_overlap": kb.chunk_overlap,
         "status": kb.status,
@@ -334,7 +340,7 @@ def _chunk_to_dict(chunk) -> dict:
     }
 
 
-async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID, file_path: str, chroma_collection: str = "", original_filename: str = "") -> None:
+async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID, file_path: str, chroma_collection: str = "", original_filename: str = "", chunk_strategy: str = "auto") -> None:
     """Background task: run IngestionPipeline and persist chunks to DB."""
     repo = KnowledgeRepository(request.app.state.session_factory)
     settings = _rag_settings(request)
@@ -344,7 +350,7 @@ async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID
     try:
         from nanobot.rag.ingestion.pipeline import IngestionPipeline
 
-        pipeline = IngestionPipeline(settings, collection=collection, force=True)
+        pipeline = IngestionPipeline(settings, collection=collection, force=True, chunk_strategy_override=chunk_strategy)
         result = await asyncio.get_running_loop().run_in_executor(
             None, lambda: pipeline.run(file_path)
         )

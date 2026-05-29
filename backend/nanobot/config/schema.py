@@ -48,6 +48,7 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    allowed_models: list[str] = Field(default_factory=list)  # empty = no restriction
 
 
 class ProviderConfig(Base):

@@ -614,27 +614,36 @@ class HybridSearch:
         
         if not ranking_lists:
             return []
-        
+
+        # Build score maps for cross-reference; None means "not recalled by this retriever"
+        dense_score_map = {r.chunk_id: r.score for r in dense_results}
+        sparse_score_map = {r.chunk_id: r.score for r in sparse_results}
+
         if len(ranking_lists) == 1:
             # Only one source, no fusion needed
-            return ranking_lists[0][:top_k]
-        
-        _t0 = time.monotonic()
-        fused = self.fusion.fuse(
-            ranking_lists=ranking_lists,
-            top_k=top_k,
-            trace=trace,
-        )
-        _elapsed = (time.monotonic() - _t0) * 1000.0
-        if trace is not None:
-            trace.record_stage("fusion", {
-                "method": "rrf",
-                "input_lists": len(ranking_lists),
-                "top_k": top_k,
-                "result_count": len(fused),
-                "chunks": _snapshot_results(fused),
-            }, elapsed_ms=_elapsed)
-        return fused
+            results = ranking_lists[0][:top_k]
+        else:
+            _t0 = time.monotonic()
+            results = self.fusion.fuse(
+                ranking_lists=ranking_lists,
+                top_k=top_k,
+                trace=trace,
+            )
+            _elapsed = (time.monotonic() - _t0) * 1000.0
+            if trace is not None:
+                trace.record_stage("fusion", {
+                    "method": "rrf",
+                    "input_lists": len(ranking_lists),
+                    "top_k": top_k,
+                    "result_count": len(results),
+                    "chunks": _snapshot_results(results),
+                }, elapsed_ms=_elapsed)
+
+        for r in results:
+            r.dense_score = dense_score_map.get(r.chunk_id)
+            r.sparse_score = sparse_score_map.get(r.chunk_id)
+
+        return results
     
     def _interleave_results(
         self,

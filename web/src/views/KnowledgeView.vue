@@ -66,6 +66,16 @@
         <a-form-item label="描述">
           <a-textarea v-model:value="form.description" :rows="2" placeholder="可选" />
         </a-form-item>
+        <a-form-item label="分块策略">
+          <a-select v-model:value="form.chunk_strategy">
+            <a-select-option value="auto">自动检测（推荐）</a-select-option>
+            <a-select-option value="fixed">固定大小</a-select-option>
+            <a-select-option value="document_based">结构感知（标题/章节）</a-select-option>
+          </a-select>
+          <div style="font-size: 12px; color: #999; margin-top: 4px">
+            自动检测：根据文档结构自动选择；固定大小：按 token 数均匀切分；结构感知：按标题层级保留文档结构
+          </div>
+        </a-form-item>
         <a-form-item label="Embedding 模型">
           <a-input v-model:value="form.embedding_model" placeholder="留空使用默认配置" />
         </a-form-item>
@@ -87,12 +97,12 @@ const kbStore = useKnowledgeStore()
 
 const createOpen = ref(false)
 const creating = ref(false)
-const form = reactive({ name: '', description: '', embedding_model: '' })
+const form = reactive({ name: '', description: '', chunk_strategy: 'auto', embedding_model: '' })
 
 onMounted(() => kbStore.fetchList())
 
 function openCreate() {
-  Object.assign(form, { name: '', description: '', embedding_model: '' })
+  Object.assign(form, { name: '', description: '', chunk_strategy: 'auto', embedding_model: '' })
   createOpen.value = true
 }
 
@@ -103,6 +113,7 @@ async function handleCreate() {
     const kb = await kbStore.create({
       name: form.name,
       description: form.description || null,
+      chunk_strategy: form.chunk_strategy,
       embedding_model: form.embedding_model || null,
     })
     createOpen.value = false

@@ -86,7 +86,16 @@
                   >
                     <div class="chunk-header">
                       <span class="chunk-index">#{{ chunk.chunk_index }}</span>
+                      <a-tag
+                        v-if="chunk.metadata?.content_type && chunk.metadata.content_type !== 'text'"
+                        :color="contentTypeColor(chunk.metadata.content_type)"
+                        size="small"
+                        style="margin: 0"
+                      >{{ chunk.metadata.content_type }}</a-tag>
                       <span class="chunk-tokens" v-if="chunk.token_count">{{ chunk.token_count }} tokens</span>
+                    </div>
+                    <div v-if="chunk.metadata?.section_path" class="chunk-section-path">
+                      {{ chunk.metadata.section_path }}
                     </div>
                     <div class="chunk-preview">{{ chunk.content.slice(0, 120) }}{{ chunk.content.length > 120 ? '…' : '' }}</div>
                   </div>
@@ -109,22 +118,50 @@
                 style="flex: 1"
               />
               <a-input-number v-model:value="queryTopK" :min="1" :max="20" :step="1" style="width: 80px" />
+              <a-segmented v-model:value="queryMode" :options="queryModeOptions" />
               <a-button type="primary" :loading="queryLoading" @click="runQuery">检索</a-button>
             </div>
 
             <a-spin :spinning="queryLoading">
               <div v-if="queryResults.length" class="query-results">
                 <div
-                  v-for="(r, i) in queryResults"
-                  :key="r.chunk_id"
-                  class="query-result-item"
+                  v-for="group in groupedQueryResults"
+                  :key="group.filename"
+                  class="result-file-group"
                 >
-                  <div class="result-header">
-                    <span class="result-rank">#{{ i + 1 }}</span>
-                    <a-tag color="blue" size="small">相似度 {{ (r.score * 100).toFixed(1) }}%</a-tag>
-                    <span class="result-source">{{ r.metadata?.source_path?.split('/').pop() || '' }}</span>
+                  <div class="result-file-header" @click="toggleGroup(group.filename)">
+                    <file-text-outlined style="color: #1677ff" />
+                    <span class="result-file-name">{{ group.filename }}</span>
+                    <a-badge :count="group.chunks.length" color="#1677ff" :overflow-count="99" />
+                    <caret-right-outlined
+                      class="group-toggle-icon"
+                      :class="{ expanded: !collapsedGroups.has(group.filename) }"
+                    />
                   </div>
-                  <div class="result-text">{{ r.text }}</div>
+                  <div v-if="!collapsedGroups.has(group.filename)" class="result-file-chunks">
+                    <div
+                      v-for="r in group.chunks"
+                      :key="r.chunk_id"
+                      class="query-result-item"
+                      @click="openResultDetail(r)"
+                    >
+                      <div class="result-header">
+                        <span class="result-rank">#{{ r._rank }}</span>
+                        <a-tooltip title="RRF 融合分">
+                          <a-tag color="blue" size="small">{{ (r.score * 100).toFixed(2) }}%</a-tag>
+                        </a-tooltip>
+                        <a-tooltip v-if="r.dense_score != null" title="语义检索分">
+                          <a-tag color="purple" size="small">D {{ (r.dense_score * 100).toFixed(1) }}%</a-tag>
+                        </a-tooltip>
+                        <a-tooltip v-if="r.sparse_score != null" title="关键词检索分">
+                          <a-tag color="cyan" size="small">S {{ (r.sparse_score * 100).toFixed(1) }}%</a-tag>
+                        </a-tooltip>
+                        <a-tag v-if="r.dense_score == null" size="small" color="default">仅关键词</a-tag>
+                        <a-tag v-if="r.sparse_score == null" size="small" color="default">仅语义</a-tag>
+                      </div>
+                      <div class="result-text">{{ r.text }}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
               <a-empty v-else-if="queryDone" description="未找到相关内容" />
@@ -133,19 +170,73 @@
         </a-tab-pane>
       </a-tabs>
 
+      <!-- Query result detail modal -->
+      <a-modal v-model:open="resultDetailOpen" title="检索结果详情" :footer="null" width="760">
+        <div v-if="selectedResult">
+          <div class="chunk-meta-pills">
+            <span class="meta-pill">排名 #{{ selectedResult._rank }}</span>
+            <a-tooltip title="RRF 融合分">
+              <a-tag color="blue">{{ (selectedResult.score * 100).toFixed(2) }}%</a-tag>
+            </a-tooltip>
+            <a-tooltip v-if="selectedResult.dense_score != null" title="语义检索分">
+              <a-tag color="purple">D {{ (selectedResult.dense_score * 100).toFixed(1) }}%</a-tag>
+            </a-tooltip>
+            <a-tooltip v-if="selectedResult.sparse_score != null" title="关键词检索分">
+              <a-tag color="cyan">S {{ (selectedResult.sparse_score * 100).toFixed(1) }}%</a-tag>
+            </a-tooltip>
+          </div>
+          <div class="chunk-content markdown-body" v-html="renderMarkdown(selectedResult.text)"></div>
+          <template v-if="selectedResult.metadata && Object.keys(selectedResult.metadata).length">
+            <div class="chunk-meta-title">元数据</div>
+            <div class="chunk-meta-structured">
+              <template v-for="(val, key) in structuredMetaFields(selectedResult.metadata)" :key="key">
+                <div class="meta-row">
+                  <span class="meta-key">{{ key }}</span>
+                  <span class="meta-val">{{ val }}</span>
+                </div>
+              </template>
+              <template v-if="Object.keys(rawMetaRemainder(selectedResult.metadata)).length">
+                <div class="meta-row meta-row-json">
+                  <span class="meta-key">其他</span>
+                  <pre class="meta-val-json">{{ JSON.stringify(rawMetaRemainder(selectedResult.metadata), null, 2) }}</pre>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </a-modal>
+
       <!-- Chunk detail modal -->
       <a-modal v-model:open="chunkModalOpen" title="Chunk 详情" :footer="null" width="720">
         <div v-if="selectedChunk">
-          <div class="chunk-meta">
-            <span>索引 #{{ selectedChunk.chunk_index }}</span>
-            <span v-if="selectedChunk.token_count">{{ selectedChunk.token_count }} tokens</span>
-            <span v-if="selectedChunk.char_start !== null">字符 {{ selectedChunk.char_start }}–{{ selectedChunk.char_end }}</span>
+          <div class="chunk-meta-pills">
+            <span class="meta-pill">#{{ selectedChunk.chunk_index }}</span>
+            <span class="meta-pill" v-if="selectedChunk.token_count">{{ selectedChunk.token_count }} tokens</span>
+            <span class="meta-pill" v-if="selectedChunk.char_start != null">字符 {{ selectedChunk.char_start }}–{{ selectedChunk.char_end }}</span>
+            <a-tag
+              v-if="selectedChunk.metadata?.content_type"
+              :color="contentTypeColor(selectedChunk.metadata.content_type)"
+              size="small"
+            >{{ selectedChunk.metadata.content_type }}</a-tag>
           </div>
-          <pre class="chunk-content">{{ selectedChunk.content }}</pre>
-          <div v-if="selectedChunk.metadata && Object.keys(selectedChunk.metadata).length">
+          <div class="chunk-content markdown-body" v-html="renderMarkdown(selectedChunk.content)"></div>
+          <template v-if="selectedChunk.metadata && Object.keys(selectedChunk.metadata).length">
             <div class="chunk-meta-title">元数据</div>
-            <pre class="chunk-meta-json">{{ JSON.stringify(selectedChunk.metadata, null, 2) }}</pre>
-          </div>
+            <div class="chunk-meta-structured">
+              <template v-for="(val, key) in structuredMetaFields(selectedChunk.metadata)" :key="key">
+                <div class="meta-row">
+                  <span class="meta-key">{{ key }}</span>
+                  <span class="meta-val">{{ val }}</span>
+                </div>
+              </template>
+              <template v-if="Object.keys(rawMetaRemainder(selectedChunk.metadata)).length">
+                <div class="meta-row meta-row-json">
+                  <span class="meta-key">其他</span>
+                  <pre class="meta-val-json">{{ JSON.stringify(rawMetaRemainder(selectedChunk.metadata), null, 2) }}</pre>
+                </div>
+              </template>
+            </div>
+          </template>
         </div>
       </a-modal>
     </div>
@@ -153,11 +244,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
+import { marked } from 'marked'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
-  ArrowLeftOutlined, UploadOutlined, FileTextOutlined, DatabaseOutlined
+  ArrowLeftOutlined, UploadOutlined, FileTextOutlined, DatabaseOutlined, CaretRightOutlined
 } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
@@ -180,12 +272,21 @@ const chunksLoading = ref(false)
 
 const queryText = ref('')
 const queryTopK = ref(5)
+const queryMode = ref('hybrid')
+const queryModeOptions = [
+  { label: '混合', value: 'hybrid' },
+  { label: '语义', value: 'dense' },
+  { label: '关键词', value: 'sparse' },
+]
 const queryLoading = ref(false)
 const queryResults = ref([])
 const queryDone = ref(false)
 
 const chunkModalOpen = ref(false)
 const selectedChunk = ref(null)
+const resultDetailOpen = ref(false)
+const selectedResult = ref(null)
+const collapsedGroups = reactive(new Set())
 
 let pollTimer = null
 
@@ -262,13 +363,63 @@ function openChunkDetail(chunk) {
   chunkModalOpen.value = true
 }
 
+const groupedQueryResults = computed(() => {
+  const map = new Map()
+  queryResults.value.forEach((r, i) => {
+    const filename = r.metadata?.source_path?.split('/').pop() || r.metadata?.source_path || '未知来源'
+    if (!map.has(filename)) map.set(filename, [])
+    map.get(filename).push({ ...r, _rank: i + 1 })
+  })
+  return Array.from(map.entries()).map(([filename, chunks]) => ({ filename, chunks }))
+})
+
+function toggleGroup(filename) {
+  if (collapsedGroups.has(filename)) collapsedGroups.delete(filename)
+  else collapsedGroups.add(filename)
+}
+
+function contentTypeColor(type) {
+  return { code: 'orange', table: 'green', list: 'cyan', text: 'default' }[type] || 'default'
+}
+
+const STRUCTURED_META_KEYS = ['title', 'section_path', 'section_level', 'content_type', 'chunk_strategy_used', 'page_num', 'tags', 'summary', 'refined_by', 'enriched_by', 'prev_chunk_id', 'next_chunk_id']
+
+function structuredMetaFields(meta) {
+  const result = {}
+  for (const key of STRUCTURED_META_KEYS) {
+    if (meta[key] != null) {
+      const val = Array.isArray(meta[key]) ? meta[key].join(', ') : String(meta[key])
+      if (val) result[key] = val
+    }
+  }
+  return result
+}
+
+function openResultDetail(r) {
+  selectedResult.value = r
+  resultDetailOpen.value = true
+}
+
+function renderMarkdown(text) {
+  return marked.parse(text || '')
+}
+
+function rawMetaRemainder(meta) {
+  const knownKeys = new Set([...STRUCTURED_META_KEYS, 'source_path', 'source_ref', 'chunk_index', 'doc_type'])
+  const remainder = {}
+  for (const [k, v] of Object.entries(meta)) {
+    if (!knownKeys.has(k)) remainder[k] = v
+  }
+  return remainder
+}
+
 async function runQuery() {
   if (!queryText.value.trim()) return
   queryLoading.value = true
   queryDone.value = false
   queryResults.value = []
   try {
-    const res = await testQuery(kbId, queryText.value, queryTopK.value)
+    const res = await testQuery(kbId, queryText.value, queryTopK.value, queryMode.value)
     queryResults.value = res.results || []
     queryDone.value = true
   } catch (e) {
@@ -326,6 +477,8 @@ function formatSize(bytes) {
 
 .chunk-list-panel { flex: 1; overflow-y: auto; padding: 12px; }
 .chunk-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: #bbb; font-size: 14px; }
+
+/* Chunk list */
 .chunk-items { display: flex; flex-direction: column; gap: 8px; }
 .chunk-item {
   border: 1px solid #f0f0f0; border-radius: 6px; padding: 10px 12px;
@@ -335,21 +488,55 @@ function formatSize(bytes) {
 .chunk-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .chunk-index { font-size: 11px; font-weight: 700; color: #1677ff; background: #e6f4ff; border-radius: 4px; padding: 1px 6px; }
 .chunk-tokens { font-size: 11px; color: #999; }
+.chunk-section-path { font-size: 11px; color: #888; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chunk-preview { font-size: 12px; color: #555; line-height: 1.5; }
 
 /* Query */
-.query-panel { max-width: 800px; }
+.query-panel { max-width: 900px; }
 .query-input-row { display: flex; gap: 8px; margin-bottom: 20px; }
-.query-results { display: flex; flex-direction: column; gap: 12px; }
-.query-result-item { border: 1px solid #f0f0f0; border-radius: 8px; padding: 14px; }
-.result-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.query-results { display: flex; flex-direction: column; gap: 8px; }
+
+.result-file-group { border: 1px solid #f0f0f0; border-radius: 8px; overflow: hidden; }
+.result-file-header {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  background: #fafafa; cursor: pointer; user-select: none;
+  border-bottom: 1px solid #f0f0f0;
+}
+.result-file-header:hover { background: #f0f8ff; }
+.result-file-name { flex: 1; font-size: 13px; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.group-toggle-icon { font-size: 12px; color: #999; transition: transform 0.2s; }
+.group-toggle-icon.expanded { transform: rotate(90deg); }
+.result-file-chunks { display: flex; flex-direction: column; gap: 0; }
+.query-result-item { padding: 12px 14px; border-bottom: 1px solid #f8f8f8; cursor: pointer; transition: background 0.15s; }
+.query-result-item:hover { background: #f0f8ff; }
+.query-result-item:last-child { border-bottom: none; }
+.result-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .result-rank { font-size: 12px; font-weight: 700; color: #1677ff; }
-.result-source { font-size: 11px; color: #999; }
 .result-text { font-size: 13px; color: #444; line-height: 1.6; }
 
 /* Chunk modal */
-.chunk-meta { display: flex; gap: 16px; font-size: 12px; color: #888; margin-bottom: 12px; }
-.chunk-content { background: #f8f8f8; border-radius: 6px; padding: 12px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; }
+.chunk-meta-pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.meta-pill { font-size: 12px; color: #888; background: #f5f5f5; border-radius: 4px; padding: 2px 8px; }
+.chunk-content { background: #f8f8f8; border-radius: 6px; padding: 12px 16px; font-size: 13px; line-height: 1.7; max-height: 400px; overflow-y: auto; word-break: break-word; }
+.chunk-content :deep(h1),.chunk-content :deep(h2),.chunk-content :deep(h3) { font-weight: 600; margin: 8px 0 4px; }
+.chunk-content :deep(h1) { font-size: 16px; }
+.chunk-content :deep(h2) { font-size: 14px; }
+.chunk-content :deep(h3) { font-size: 13px; }
+.chunk-content :deep(p) { margin: 4px 0; }
+.chunk-content :deep(pre) { background: #e8e8e8; border-radius: 4px; padding: 8px; overflow-x: auto; font-size: 12px; }
+.chunk-content :deep(code) { background: #e8e8e8; border-radius: 3px; padding: 1px 4px; font-size: 12px; }
+.chunk-content :deep(pre code) { background: none; padding: 0; }
+.chunk-content :deep(table) { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0; }
+.chunk-content :deep(th),.chunk-content :deep(td) { border: 1px solid #ddd; padding: 4px 8px; }
+.chunk-content :deep(th) { background: #eee; }
+.chunk-content :deep(ul),.chunk-content :deep(ol) { padding-left: 20px; margin: 4px 0; }
+.chunk-content :deep(blockquote) { border-left: 3px solid #ccc; margin: 4px 0; padding-left: 10px; color: #666; }
 .chunk-meta-title { font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
-.chunk-meta-json { background: #f8f8f8; border-radius: 6px; padding: 10px; font-size: 12px; max-height: 200px; overflow-y: auto; }
+.chunk-meta-structured { border: 1px solid #f0f0f0; border-radius: 6px; overflow: hidden; }
+.meta-row { display: flex; gap: 0; border-bottom: 1px solid #f8f8f8; font-size: 12px; }
+.meta-row:last-child { border-bottom: none; }
+.meta-key { width: 160px; flex-shrink: 0; padding: 6px 10px; background: #fafafa; color: #888; font-family: monospace; }
+.meta-val { flex: 1; padding: 6px 10px; color: #333; word-break: break-all; }
+.meta-row-json { align-items: flex-start; }
+.meta-val-json { flex: 1; padding: 6px 10px; font-size: 11px; margin: 0; background: none; white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto; }
 </style>

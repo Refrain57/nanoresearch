@@ -175,6 +175,7 @@ class IngestionPipeline:
         collection: str = "default",
         force: bool = False,
         pdf_parser: Literal["markitdown", "marker"] = "marker",
+        chunk_strategy_override: Optional[str] = None,
     ):
         """Initialize pipeline with all components.
 
@@ -183,11 +184,13 @@ class IngestionPipeline:
             collection: Collection name for organizing documents
             force: If True, re-process even if file was previously processed
             pdf_parser: PDF parser to use ("markitdown" or "marker")
+            chunk_strategy_override: Per-KB chunk strategy ("auto", "fixed", "document_based")
         """
         self.settings = settings
         self.collection = collection
         self.force = force
         self.pdf_parser = pdf_parser
+        self.chunk_strategy_override = chunk_strategy_override
 
         # Initialize all components
         logger.info("Initializing Ingestion Pipeline components...")
@@ -229,7 +232,7 @@ class IngestionPipeline:
         logger.info(f"  ✓ Loaders initialized: {list(self._loaders.keys())}")
         
         # Stage 3: Chunker
-        self.chunker = DocumentChunker(settings)
+        self.chunker = DocumentChunker(settings, chunk_strategy_override=chunk_strategy_override)
         logger.info("  ✓ DocumentChunker initialized")
         
         # Stage 4: Transforms

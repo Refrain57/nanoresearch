@@ -253,6 +253,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        max_iterations_override: int | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -319,7 +320,7 @@ class AgentLoop:
             initial_messages=initial_messages,
             tools=self.tools,
             model=self.model,
-            max_iterations=self.max_iterations,
+            max_iterations=max_iterations_override or self.max_iterations,
             hook=_LoopHook(),
             error_message="Sorry, I encountered an error calling the AI model.",
             concurrent_tools=True,
@@ -487,6 +488,7 @@ class AgentLoop:
         on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
         skill_names: list[str] | None = None,
         agent_id: str | None = None,
+        agent_override: dict | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -570,6 +572,7 @@ class AgentLoop:
             on_tool_call=on_tool_call,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+            max_iterations_override=(agent_override or {}).get("max_iterations"),
         )
 
         if final_content is None:
@@ -668,6 +671,7 @@ class AgentLoop:
         on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
         skill_names: list[str] | None = None,
         agent_id: str | None = None,
+        agent_override: dict | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -676,4 +680,5 @@ class AgentLoop:
             msg, session_key=session_key, on_progress=on_progress,
             on_stream=on_stream, on_stream_end=on_stream_end,
             on_tool_call=on_tool_call, skill_names=skill_names, agent_id=agent_id,
+            agent_override=agent_override,
         )

@@ -123,6 +123,7 @@ class KnowledgeBase(Base):
     description: Mapped[str | None] = mapped_column(Text)
     embedding_model: Mapped[str | None] = mapped_column(String)
     chroma_collection: Mapped[str | None] = mapped_column(String)
+    chunk_strategy: Mapped[str] = mapped_column(String, default="auto")
     chunk_size: Mapped[int] = mapped_column(Integer, default=512)
     chunk_overlap: Mapped[int] = mapped_column(Integer, default=50)
     status: Mapped[str] = mapped_column(String, default="active")

@@ -25,8 +25,13 @@ export const listChunks        = (kbId, params = {}) => {
 export const listDocumentChunks = (kbId, docId) => apiGet(`/api/knowledge/${kbId}/documents/${docId}/chunks`)
 
 // Test retrieval
-export const testQuery = (kbId, query, topK = 5) =>
-  apiPost(`/api/knowledge/${kbId}/query/test`, { query, top_k: topK })
+export const testQuery = (kbId, query, topK = 5, mode = 'hybrid') =>
+  apiPost(`/api/knowledge/${kbId}/query/test`, {
+    query,
+    top_k: topK,
+    enable_dense: mode !== 'sparse',
+    enable_sparse: mode !== 'dense',
+  })
 
 // Eval datasets
 export const listDatasets   = (kbId)       => apiGet(`/api/eval/${kbId}/datasets`)

@@ -101,11 +101,13 @@ class EvalRepository:
         dataset_id: uuid.UUID,
         name: str | None = None,
         retrieval_config: dict | None = None,
+        eval_type: str = "quick",
     ) -> EvalRun:
         run = EvalRun(
             kb_id=kb_id,
             dataset_id=dataset_id,
             name=name,
+            eval_type=eval_type,
             retrieval_config=retrieval_config or {},
         )
         async with self._factory() as db:
@@ -130,7 +132,7 @@ class EvalRepository:
                 query=item.get("query"),
                 gold_answer=item.get("gold_answer"),
                 generated_answer=item.get("generated_answer"),
-                retrieved_chunk_ids=item.get("retrieved_chunk_ids"),
+                retrieved_contexts=item.get("retrieved_contexts"),
                 item_metrics=item.get("metrics", {}),
             )
             for item in items

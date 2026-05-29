@@ -33,8 +33,8 @@ class KnowledgeRepository:
             result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
             return result.scalar_one_or_none()
 
-    async def create(self, uid: str, name: str, description: str | None = None, embedding_model: str | None = None, chroma_collection: str | None = None) -> KnowledgeBase:
-        kb = KnowledgeBase(uid=uid, name=name, description=description, embedding_model=embedding_model, chroma_collection=chroma_collection)
+    async def create(self, uid: str, name: str, description: str | None = None, embedding_model: str | None = None, chroma_collection: str | None = None, chunk_strategy: str = "auto") -> KnowledgeBase:
+        kb = KnowledgeBase(uid=uid, name=name, description=description, embedding_model=embedding_model, chroma_collection=chroma_collection, chunk_strategy=chunk_strategy)
         async with self._factory() as db:
             db.add(kb)
             await db.commit()

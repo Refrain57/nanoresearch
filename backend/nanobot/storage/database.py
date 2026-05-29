@@ -63,6 +63,7 @@ async def check_schema_migrations() -> None:
         ("eval_runs", "error_message"),
         ("eval_run_items", "retrieved_contexts"),
         ("user_settings", "uid"),
+        ("knowledge_bases", "chunk_strategy"),
     ]
     missing = []
     async with _engine.connect() as conn:
@@ -81,7 +82,7 @@ async def check_schema_migrations() -> None:
         print(
             "\n⚠️  Schema migration required before starting the server.\n"
             f"   Missing columns: {', '.join(missing)}\n"
-            "   Run:  psql $DATABASE_URL -f scripts/migrate_eval_dual_track.sql\n",
+            "   Run the relevant migration script in scripts/\n",
             file=sys.stderr,
         )
         raise SystemExit(1)

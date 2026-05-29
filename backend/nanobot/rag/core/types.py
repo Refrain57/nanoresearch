@@ -293,6 +293,8 @@ class RetrievalResult:
     score: float
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+    dense_score: Optional[float] = None
+    sparse_score: Optional[float] = None
     
     def __post_init__(self):
         """Validate fields after initialization."""

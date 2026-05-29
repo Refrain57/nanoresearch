@@ -128,7 +128,7 @@ class DocumentChunker:
         >>> print(f"First chunk index: {chunks[0].metadata['chunk_index']}")
     """
 
-    def __init__(self, settings: Settings, auto_detect: bool = True):
+    def __init__(self, settings: Settings, auto_detect: bool = True, chunk_strategy_override: Optional[str] = None):
         """Initialize DocumentChunker with configuration.
 
         Args:
@@ -136,12 +136,15 @@ class DocumentChunker:
                      The splitter config is expected at settings.splitter.*
             auto_detect: If True, automatically detect best chunking strategy
                         based on document structure (default: True)
+            chunk_strategy_override: Per-KB override ("auto", "fixed", "document_based").
+                        "auto" keeps auto-detect; others force a specific strategy.
 
         Raises:
             ValueError: If splitter configuration is invalid or provider unknown
         """
         self._settings = settings
-        self._auto_detect = auto_detect
+        self._chunk_strategy_override = chunk_strategy_override if chunk_strategy_override and chunk_strategy_override != "auto" else None
+        self._auto_detect = auto_detect if self._chunk_strategy_override is None else False
         self._structure_chunker: Optional[DocumentStructureChunker] = None
         self._splitter = None
 
@@ -208,7 +211,10 @@ class DocumentChunker:
 
         # Determine chunking strategy
         detected_strategy = None
-        if self._auto_detect:
+        if self._chunk_strategy_override:
+            detected_strategy = self._chunk_strategy_override
+            logger.info(f"Using KB-level chunk strategy override: {detected_strategy}")
+        elif self._auto_detect:
             detected_strategy = detect_chunk_strategy(document)
             logger.info(f"Auto-detected chunk strategy: {detected_strategy} for document {document.id}")
         else:

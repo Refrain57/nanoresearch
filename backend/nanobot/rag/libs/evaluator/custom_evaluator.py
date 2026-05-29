@@ -1,8 +1,4 @@
-"""Custom evaluator implementation for lightweight metrics.
-
-This evaluator computes simple, deterministic metrics such as hit rate and MRR.
-It is designed for fast regression checks and sanity validation.
-"""
+"""Custom evaluator: Recall@K and F1@K for online retrieval quality checks."""
 
 from __future__ import annotations
 
@@ -12,13 +8,9 @@ from nanobot.rag.libs.evaluator.base_evaluator import BaseEvaluator
 
 
 class CustomEvaluator(BaseEvaluator):
-    """Custom evaluator for lightweight metrics (hit_rate, mrr).
+    """Recall@K and F1@K evaluator — fast, deterministic, no LLM needed."""
 
-    The evaluator expects retrieved chunks to contain an identifier field.
-    Supported id fields: id, chunk_id, document_id, doc_id.
-    """
-
-    SUPPORTED_METRICS = {"hit_rate", "mrr"}
+    SUPPORTED_METRICS = {"recall@k", "f1@k"}
     _ID_FIELDS = ("id", "chunk_id", "document_id", "doc_id")
 
     def __init__(
@@ -33,15 +25,15 @@ class CustomEvaluator(BaseEvaluator):
         if metrics is None:
             metrics = self._metrics_from_settings(settings)
 
-        normalized = [str(metric).strip().lower() for metric in (metrics or [])]
+        normalized = [str(m).strip().lower() for m in (metrics or [])]
         if not normalized:
-            normalized = ["hit_rate", "mrr"]
+            normalized = ["recall@k", "f1@k"]
 
-        unsupported = [metric for metric in normalized if metric not in self.SUPPORTED_METRICS]
+        unsupported = [m for m in normalized if m not in self.SUPPORTED_METRICS]
         if unsupported:
             raise ValueError(
-                "Unsupported custom metrics: "
-                f"{', '.join(unsupported)}. Supported: {', '.join(sorted(self.SUPPORTED_METRICS))}"
+                f"Unsupported metrics: {', '.join(unsupported)}. "
+                f"Supported: {', '.join(sorted(self.SUPPORTED_METRICS))}"
             )
 
         self.metrics = normalized
@@ -55,19 +47,6 @@ class CustomEvaluator(BaseEvaluator):
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> Dict[str, float]:
-        """Compute requested metrics for the given retrieval results.
-
-        Args:
-            query: The user query string.
-            retrieved_chunks: Retrieved chunks or records.
-            generated_answer: Optional generated answer (unused).
-            ground_truth: Ground truth ids or structure.
-            trace: Optional TraceContext (unused).
-            **kwargs: Additional parameters (unused).
-
-        Returns:
-            Dictionary of metric name to float value.
-        """
         self.validate_query(query)
         self.validate_retrieved_chunks(retrieved_chunks)
 
@@ -75,25 +54,21 @@ class CustomEvaluator(BaseEvaluator):
         ground_truth_ids = self._extract_ground_truth_ids(ground_truth)
 
         results: Dict[str, float] = {}
-
-        if "hit_rate" in self.metrics:
-            results["hit_rate"] = self._compute_hit_rate(retrieved_ids, ground_truth_ids)
-        if "mrr" in self.metrics:
-            results["mrr"] = self._compute_mrr(retrieved_ids, ground_truth_ids)
-
+        if "recall@k" in self.metrics:
+            results["recall@k"] = self._compute_recall(retrieved_ids, ground_truth_ids)
+        if "f1@k" in self.metrics:
+            results["f1@k"] = self._compute_f1(retrieved_ids, ground_truth_ids)
         return results
 
+    # ------------------------------------------------------------------
+
     def _metrics_from_settings(self, settings: Any) -> List[str]:
-        """Extract metrics list from settings if available."""
         if settings is None:
             return []
         metrics = getattr(getattr(settings, "evaluation", None), "metrics", None)
-        if metrics is None:
-            return []
-        return [str(metric) for metric in metrics]
+        return [str(m) for m in metrics] if metrics else []
 
     def _extract_ground_truth_ids(self, ground_truth: Optional[Any]) -> List[str]:
-        """Extract ground truth ids from various input shapes."""
         if ground_truth is None:
             return []
         if isinstance(ground_truth, str):
@@ -104,14 +79,9 @@ class CustomEvaluator(BaseEvaluator):
             return self._extract_ids([ground_truth], label="ground_truth")
         if isinstance(ground_truth, list):
             return self._extract_ids(ground_truth, label="ground_truth")
-
-        raise ValueError(
-            f"Unsupported ground_truth type: {type(ground_truth).__name__}. "
-            "Expected str, dict, list, or None."
-        )
+        raise ValueError(f"Unsupported ground_truth type: {type(ground_truth).__name__}")
 
     def _extract_ids(self, items: Iterable[Any], label: str) -> List[str]:
-        """Extract ids from a list of items."""
         ids: List[str] = []
         for index, item in enumerate(items):
             if isinstance(item, str):
@@ -131,25 +101,26 @@ class CustomEvaluator(BaseEvaluator):
             if hasattr(item, "id"):
                 ids.append(str(getattr(item, "id")))
                 continue
-
             raise ValueError(
-                f"Unable to extract id from {label}[{index}] of type "
-                f"{type(item).__name__}"
+                f"Unable to extract id from {label}[{index}] of type {type(item).__name__}"
             )
-
         return ids
 
-    def _compute_hit_rate(self, retrieved_ids: Sequence[str], ground_truth_ids: Sequence[str]) -> float:
-        """Compute hit rate (binary)."""
-        if not ground_truth_ids:
+    def _compute_recall(self, retrieved: Sequence[str], gold: Sequence[str]) -> float:
+        if not gold:
             return 0.0
-        return 1.0 if any(item in ground_truth_ids for item in retrieved_ids) else 0.0
+        gold_set = set(gold)
+        hits = sum(1 for r in retrieved if r in gold_set)
+        return hits / len(gold_set)
 
-    def _compute_mrr(self, retrieved_ids: Sequence[str], ground_truth_ids: Sequence[str]) -> float:
-        """Compute Mean Reciprocal Rank (MRR)."""
-        if not ground_truth_ids:
+    def _compute_f1(self, retrieved: Sequence[str], gold: Sequence[str]) -> float:
+        if not gold or not retrieved:
             return 0.0
-        for rank, item in enumerate(retrieved_ids, start=1):
-            if item in ground_truth_ids:
-                return 1.0 / rank
-        return 0.0
+        gold_set = set(gold)
+        ret_set = set(retrieved)
+        tp = len(ret_set & gold_set)
+        if tp == 0:
+            return 0.0
+        precision = tp / len(ret_set)
+        recall = tp / len(gold_set)
+        return 2 * precision * recall / (precision + recall)
