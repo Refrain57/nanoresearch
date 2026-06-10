@@ -489,6 +489,9 @@ class AgentLoop:
         skill_names: list[str] | None = None,
         agent_id: str | None = None,
         agent_override: dict | None = None,
+        custom_persona: str | None = None,
+        harness: dict | None = None,
+        agents_registry: list[dict] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -543,6 +546,10 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        _harness = harness or {}
+        _total_token_budget = _harness.get("total_token_budget", 3000)
+        _memory_budget_ratio = _harness.get("memory_budget_ratio", 0.6)
+
         history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
             history=history,
@@ -554,6 +561,10 @@ class AgentLoop:
             use_cache_blocks=self._use_cache_blocks,
             skill_names=skill_names,
             agent_id=agent_id,
+            custom_persona=custom_persona,
+            total_token_budget=_total_token_budget,
+            memory_budget_ratio=_memory_budget_ratio,
+            agents_registry=agents_registry,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -672,6 +683,9 @@ class AgentLoop:
         skill_names: list[str] | None = None,
         agent_id: str | None = None,
         agent_override: dict | None = None,
+        custom_persona: str | None = None,
+        harness: dict | None = None,
+        agents_registry: list[dict] | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -679,6 +693,10 @@ class AgentLoop:
         return await self._process_message(
             msg, session_key=session_key, on_progress=on_progress,
             on_stream=on_stream, on_stream_end=on_stream_end,
-            on_tool_call=on_tool_call, skill_names=skill_names, agent_id=agent_id,
+            on_tool_call=on_tool_call,
+            skill_names=skill_names, agent_id=agent_id,
             agent_override=agent_override,
+            custom_persona=custom_persona,
+            harness=harness,
+            agents_registry=agents_registry,
         )

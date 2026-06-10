@@ -118,6 +118,7 @@ class RunCreate(BaseModel):
 class AgentOverrideUpdate(BaseModel):
     model: str | None = None          # "" clears override
     max_iterations: int | None = None  # None keeps existing
+    skills: list[str] | None = None   # None = keep existing; [] = clear to agent default
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +258,11 @@ async def update_agent_override(
             current["max_iterations"] = body.max_iterations
         else:
             current.pop("max_iterations", None)
+    if "skills" in sent:
+        if body.skills is not None:
+            current["skills"] = body.skills  # [] means "clear override, use agent default"
+        else:
+            current.pop("skills", None)
 
     await repo.update_agent_override(conv.id, current)
     # Evict loop so next message picks up new model if changed
@@ -297,13 +303,27 @@ async def create_run(
     run = await run_repo.create(conversation_id=conv.id, uid=uid, agent_id=conv.agent_id)
     run_id = run.id
 
-    # 取该 agent 的 enabled skills
+    # 取该 agent 的 enabled skills、persona、harness，再应用对话级别覆盖
     # None = 不过滤（CLI 模式）；[] = agent 存在但未配置 skill，显示空
     skill_names: list[str] | None = None
+    custom_persona: str | None = None
+    agent_harness: dict = {}
+    agents_registry: list[dict] = []
     if conv.agent_id:
         agent = await AgentRepository(factory).get_by_id(conv.agent_id)
         if agent is not None:
-            skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
+            agent_skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
+            override_skills = agent_override.get("skills")
+            if override_skills is not None:
+                skill_names = [s for s in override_skills if s in agent_skill_names]
+            else:
+                skill_names = agent_skill_names
+            custom_persona = agent.persona or None
+            agent_harness = agent.harness or {}
+
+    # Build agent registry: user's agents + default agents (uid-scoped, multi-user safe)
+    all_agents = await AgentRepository(factory).list_by_user(uid)
+    agents_registry = [{"id": str(a.id), "name": a.name, "description": a.description or ""} for a in all_agents]
 
     queue: asyncio.Queue = asyncio.Queue()
     request.app.state.run_queues[str(run_id)] = queue
@@ -321,6 +341,9 @@ async def create_run(
             skill_names=skill_names,
             agent_id=str(conv.agent_id) if conv.agent_id else None,
             agent_override=agent_override or None,
+            custom_persona=custom_persona,
+            harness=agent_harness or None,
+            agents_registry=agents_registry or None,
         )
     )
 
@@ -390,6 +413,9 @@ async def _run_agent(
     skill_names: list[str] | None = None,
     agent_id: str | None = None,
     agent_override: dict | None = None,
+    custom_persona: str | None = None,
+    harness: dict | None = None,
+    agents_registry: list[dict] | None = None,
 ) -> None:
     run_repo = RunRepository(factory)
     start = _utcnow()
@@ -419,6 +445,9 @@ async def _run_agent(
             skill_names=skill_names,
             agent_id=agent_id,
             agent_override=agent_override,
+            custom_persona=custom_persona,
+            harness=harness,
+            agents_registry=agents_registry,
         )
         finished = _utcnow()
         duration_ms = int((finished - start).total_seconds() * 1000)

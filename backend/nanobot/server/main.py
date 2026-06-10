@@ -14,12 +14,19 @@ from nanobot.server.routers.chat_router import router as chat_router
 from nanobot.server.routers.knowledge_router import router as knowledge_router
 from nanobot.server.routers.eval_router import router as eval_router
 from nanobot.server.routers.settings_router import router as settings_router
+from nanobot.server.routers.workspace_router import router as workspace_router
 
 
 def create_app(channel_loop, session_factory, loop_config=None, channel_manager=None, rag_settings=None, allowed_models=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks = []
+        # Dispose stale asyncpg connections from any previous process before accepting requests.
+        # Without this, the first request after a restart fails on Windows (ProactorEventLoop
+        # proactor is None on old connections).
+        from nanobot.storage.database import _engine
+        if _engine is not None:
+            await _engine.dispose()
         if channel_manager:
             # Channels route inbound messages via bus → channel_loop.run() must be active
             tasks.append(asyncio.create_task(channel_loop.run()))
@@ -66,6 +73,7 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     app.include_router(knowledge_router)
     app.include_router(eval_router)
     app.include_router(settings_router)
+    app.include_router(workspace_router)
 
     # 生产静态文件服务（pnpm build 产物），放在所有路由之后
     import os

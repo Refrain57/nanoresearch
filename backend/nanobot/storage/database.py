@@ -64,6 +64,8 @@ async def check_schema_migrations() -> None:
         ("eval_run_items", "retrieved_contexts"),
         ("user_settings", "uid"),
         ("knowledge_bases", "chunk_strategy"),
+        ("agents", "harness"),
+        ("agents", "persona"),
     ]
     missing = []
     async with _engine.connect() as conn:

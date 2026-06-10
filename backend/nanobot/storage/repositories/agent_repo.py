@@ -29,6 +29,16 @@ class AgentRepository:
             result = await db.execute(select(Agent).order_by(Agent.created_at))
             return list(result.scalars().all())
 
+    async def list_by_user(self, uid: str) -> list[Agent]:
+        from sqlalchemy import or_
+        async with self._factory() as db:
+            result = await db.execute(
+                select(Agent)
+                .where(or_(Agent.created_by == uid, Agent.is_default == True))  # noqa: E712
+                .order_by(Agent.created_at)
+            )
+            return list(result.scalars().all())
+
     async def create(self, data: dict) -> Agent:
         agent = Agent(**data)
         async with self._factory() as db:

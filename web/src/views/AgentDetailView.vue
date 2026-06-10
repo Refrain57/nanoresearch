@@ -104,6 +104,58 @@
               <a-empty v-else description="暂无工具调用记录" />
             </a-spin>
           </a-card>
+
+          <!-- Harness -->
+          <a-card :bordered="false" class="section-card">
+            <template #title>
+              <div class="card-title-row">
+                <span>Harness</span>
+                <div style="display:flex;gap:6px">
+                  <a-button size="small" :loading="promptPreviewLoading" @click="loadPromptPreview">预览 Prompt</a-button>
+                  <a-button size="small" type="primary" :loading="harnessLoading" @click="saveHarness">保存</a-button>
+                </div>
+              </div>
+            </template>
+
+            <!-- 角色设定 -->
+            <div class="harness-section">
+              <div class="harness-label">角色设定 <span class="harness-hint">（替换默认身份，定义此 Agent 的专长与行为）</span></div>
+              <a-textarea
+                v-model:value="harnessForm.persona"
+                :rows="6"
+                placeholder="例：你是一个专注于代码审查的 Agent，精通 Python 和 TypeScript。你的职责是..."
+                class="harness-textarea"
+              />
+            </div>
+
+            <!-- 上下文 & 记忆参数 -->
+            <div class="harness-section">
+              <div class="harness-label">上下文 & 记忆参数</div>
+              <div class="harness-grid">
+                <div class="harness-field">
+                  <div class="harness-field-label">Memory Token 预算 <span class="harness-hint">（注入系统提示的记忆+知识总 token 上限，默认 3000）</span></div>
+                  <a-input-number v-model:value="harnessForm.total_token_budget" :min="500" :max="20000" :step="500" style="width:160px" />
+                </div>
+                <div class="harness-field">
+                  <div class="harness-field-label">记忆占比 <span class="harness-hint">（记忆 vs 知识的分配比，默认 0.6）</span></div>
+                  <a-input-number v-model:value="harnessForm.memory_budget_ratio" :min="0.1" :max="0.9" :step="0.1" :precision="1" style="width:120px" />
+                </div>
+                <div class="harness-field">
+                  <div class="harness-field-label">上下文窗口覆盖 <span class="harness-hint">（token，留空使用模型默认值）</span></div>
+                  <a-input-number v-model:value="harnessForm.context_window_tokens" :min="8192" :max="200000" :step="8192" :placeholder="'模型默认'" style="width:160px" allow-clear />
+                </div>
+                <div class="harness-field">
+                  <div class="harness-field-label">压缩目标比例 <span class="harness-hint">（压缩后保留上下文窗口的几成，默认 0.5）</span></div>
+                  <a-input-number v-model:value="harnessForm.compression_target_ratio" :min="0.2" :max="0.8" :step="0.1" :precision="1" style="width:120px" />
+                </div>
+              </div>
+            </div>
+          </a-card>
+
+          <!-- Prompt 预览 Modal -->
+          <a-modal v-model:open="promptPreviewOpen" title="System Prompt 预览" width="720" :footer="null">
+            <pre class="prompt-preview-text">{{ promptPreviewText }}</pre>
+          </a-modal>
         </template>
       </a-spin>
 
@@ -133,7 +185,15 @@
         <a-form :model="editForm" layout="vertical" style="margin-top: 16px">
           <a-form-item label="名称"><a-input v-model:value="editForm.name" /></a-form-item>
           <a-form-item label="描述"><a-textarea v-model:value="editForm.description" :rows="3" /></a-form-item>
-          <a-form-item label="默认模型"><a-input v-model:value="editForm.default_model" /></a-form-item>
+          <a-form-item label="默认模型">
+            <a-auto-complete
+              v-model:value="editForm.default_model"
+              :options="settingsStore.allModelOptions"
+              placeholder="例：anthropic/claude-opus-4-5"
+              allow-clear
+              style="width: 100%"
+            />
+          </a-form-item>
           <a-form-item label="最大迭代次数"><a-input-number v-model:value="editForm.max_iterations" :min="1" :max="100" /></a-form-item>
         </a-form>
       </a-modal>
@@ -149,12 +209,14 @@ import { PlusOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
-import { getAgentToolStats } from '@/apis/agents'
+import { useSettingsStore } from '@/stores/settings'
+import { getAgentToolStats, getAgentPromptPreview } from '@/apis/agents'
 
 const route = useRoute()
 const router = useRouter()
 const agentStore = useAgentStore()
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 
 const toolStats = ref([])
 const toolStatsLoading = ref(false)
@@ -162,6 +224,19 @@ const toolStatsLoading = ref(false)
 const editModalOpen = ref(false)
 const saving = ref(false)
 const editForm = reactive({ name: '', description: '', default_model: '', max_iterations: 40 })
+
+// Harness state
+const harnessLoading = ref(false)
+const harnessForm = reactive({
+  persona: '',
+  total_token_budget: 3000,
+  memory_budget_ratio: 0.6,
+  context_window_tokens: null,
+  compression_target_ratio: 0.5,
+})
+const promptPreviewOpen = ref(false)
+const promptPreviewLoading = ref(false)
+const promptPreviewText = ref('')
 
 const addSkillOpen = ref(false)
 const skillsToAdd = computed(() =>
@@ -175,6 +250,7 @@ onMounted(async () => {
   try {
     await agentStore.fetchOne(route.params.id)
     if (!agentStore.skills.length) await agentStore.fetchSkills()
+    if (!settingsStore.providers.length) settingsStore.fetchAll()
     await loadToolStats()
   } catch (e) {
     console.error('[AgentDetail] mount error:', e)
@@ -188,6 +264,13 @@ watch(agent, (a) => {
     editForm.description = a.description || ''
     editForm.default_model = a.model || ''
     editForm.max_iterations = a.max_iterations || 40
+    // Sync harness form
+    harnessForm.persona = a.persona || ''
+    const h = a.harness || {}
+    harnessForm.total_token_budget = h.total_token_budget ?? 3000
+    harnessForm.memory_budget_ratio = h.memory_budget_ratio ?? 0.6
+    harnessForm.context_window_tokens = h.context_window_tokens ?? null
+    harnessForm.compression_target_ratio = h.compression_target_ratio ?? 0.5
   }
 })
 
@@ -238,6 +321,42 @@ async function handleUpdate() {
     saving.value = false
   }
 }
+
+async function saveHarness() {
+  harnessLoading.value = true
+  try {
+    const harness = {
+      total_token_budget: harnessForm.total_token_budget,
+      memory_budget_ratio: harnessForm.memory_budget_ratio,
+      compression_target_ratio: harnessForm.compression_target_ratio,
+    }
+    if (harnessForm.context_window_tokens) {
+      harness.context_window_tokens = harnessForm.context_window_tokens
+    }
+    await agentStore.update(route.params.id, {
+      persona: harnessForm.persona,
+      harness,
+    })
+    message.success('Harness 配置已保存')
+  } catch (e) {
+    message.error(e.message || '保存失败')
+  } finally {
+    harnessLoading.value = false
+  }
+}
+
+async function loadPromptPreview() {
+  promptPreviewLoading.value = true
+  try {
+    const data = await getAgentPromptPreview(route.params.id)
+    promptPreviewText.value = data.static_prompt
+    promptPreviewOpen.value = true
+  } catch (e) {
+    message.error('加载失败：' + (e.message || e))
+  } finally {
+    promptPreviewLoading.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -277,4 +396,18 @@ async function handleUpdate() {
 .add-skill-row:hover { background: #e6f4ff; border-color: #91caff; }
 .add-skill-name { font-size: 13px; font-weight: 600; color: #1677ff; }
 .add-skill-desc { font-size: 12px; color: #888; margin-top: 2px; }
+
+.harness-section { margin-bottom: 20px; }
+.harness-section:last-child { margin-bottom: 0; }
+.harness-label { font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px; }
+.harness-hint { font-size: 12px; color: #aaa; font-weight: 400; }
+.harness-textarea { font-family: monospace; font-size: 13px; }
+.harness-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.harness-field { display: flex; flex-direction: column; gap: 6px; }
+.harness-field-label { font-size: 12px; color: #555; }
+.prompt-preview-text {
+  font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  background: #f8f8f8; border-radius: 6px; padding: 12px; max-height: 60vh; overflow-y: auto;
+  border: 1px solid #f0f0f0; margin: 0;
+}
 </style>

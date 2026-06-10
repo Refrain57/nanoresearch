@@ -49,7 +49,8 @@ class Agent(Base):
     tools_config: Mapped[list] = mapped_column(JSONB, default=list)
     default_model: Mapped[str | None] = mapped_column(String)
     provider: Mapped[str | None] = mapped_column(String)
-    system_prompt: Mapped[str | None] = mapped_column(Text)
+    persona: Mapped[str | None] = mapped_column(Text)
+    harness: Mapped[dict] = mapped_column(JSONB, default=dict)
     max_iterations: Mapped[int] = mapped_column(Integer, default=40)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[str | None] = mapped_column(String, ForeignKey("users.uid"), nullable=True)
@@ -143,6 +144,7 @@ class KbDocument(Base):
     file_size: Mapped[int | None] = mapped_column(Integer)
     mime_type: Mapped[str | None] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="uploaded")  # uploaded|parsing|indexing|indexed|error
+    pdf_parser: Mapped[str] = mapped_column(String, default="marker")  # markitdown|marker|mineru
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_msg: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

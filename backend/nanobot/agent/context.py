@@ -8,6 +8,7 @@ import platform
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, detect_image_mime
@@ -105,29 +106,26 @@ class ContextBuilder:
         tool_names: list[str] | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         agent_id: str | None = None,
+        custom_persona: str | None = None,
+        memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
+        agents_registry: list[dict] | None = None,
     ) -> str:
-        """Build the system prompt from identity, memory, knowledge, bootstrap, tools, and skills.
-
-        Order: identity → bootstrap → tools → skills → memory → knowledge
-        Static parts first (cacheable), dynamic parts last (non-cacheable).
-
-        Args:
-            skill_names: List of skill names to include.
-            topic: Optional topic for knowledge search. If provided, relevant
-                claims from ChromaDB will be injected.
-            tool_names: Optional list of registered tool names for dynamic injection.
-            total_token_budget: Total token budget for memory + knowledge sections.
-        """
-        static = self._build_static_prefix(tool_names, skill_names=skill_names)
+        """Build the system prompt (single string, no cache blocks)."""
+        workspace_block = self._build_workspace_block(tool_names)
+        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry)
         dynamic = self._build_dynamic_suffix(
             skill_names=skill_names,
             topic=topic,
             total_token_budget=total_token_budget,
             agent_id=agent_id,
+            memory_budget_ratio=memory_budget_ratio,
         )
-        if static and dynamic:
-            return static + "\n\n---\n\n" + dynamic
-        return static or dynamic
+        parts = [p for p in [workspace_block, agent_block, dynamic] if p]
+        logger.debug(
+            "prompt parts (no-cache path): {}",
+            [{"part": i, "chars": len(p), "label": ["workspace", "agent", "dynamic"][i]} for i, p in enumerate(parts)]
+        )
+        return "\n\n---\n\n".join(parts)
 
     def build_system_prompt_blocks(
         self,
@@ -136,37 +134,58 @@ class ContextBuilder:
         tool_names: list[str] | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         agent_id: str | None = None,
+        custom_persona: str | None = None,
+        memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
+        agents_registry: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return system prompt as blocks with cache_control markers.
+        """Return system prompt as 3 blocks with cache_control markers.
 
-        Block 0 (static prefix) gets cache_control: ephemeral.
-        Block 1 (dynamic suffix) does not, so cache breakpoints at the
-        static/dynamic boundary and the static prefix stays cached across
-        turns even when memory or knowledge changes.
+        Block 0 (workspace-level): identity + bootstrap files + tools. Cached per workspace.
+        Block 1 (per-agent): persona + skills summary + agent registry. Cached per agent config.
+        Block 2 (dynamic suffix): memory + semantic recall + always-on skills. Not cached.
         """
-        static = self._build_static_prefix(tool_names, skill_names=skill_names)
+        blocks: list[dict[str, Any]] = []
+
+        workspace_block = self._build_workspace_block(tool_names)
+        if workspace_block:
+            blocks.append({
+                "type": "text",
+                "text": workspace_block,
+                "cache_control": {"type": "ephemeral"},
+            })
+
+        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry)
+        if agent_block:
+            blocks.append({
+                "type": "text",
+                "text": agent_block,
+                "cache_control": {"type": "ephemeral"},
+            })
+
         dynamic = self._build_dynamic_suffix(
             skill_names=skill_names,
             topic=topic,
             total_token_budget=total_token_budget,
             agent_id=agent_id,
+            memory_budget_ratio=memory_budget_ratio,
         )
-
-        blocks: list[dict[str, Any]] = []
-        if static:
-            blocks.append({
-                "type": "text",
-                "text": static,
-                "cache_control": {"type": "ephemeral"},
-            })
         if dynamic:
             blocks.append({"type": "text", "text": dynamic})
+
+        logger.debug(
+            "prompt blocks: {}",
+            [{"block": i, "chars": len(b["text"]), "cached": "cache_control" in b} for i, b in enumerate(blocks)]
+        )
         return blocks
 
-    def _build_static_prefix(self, tool_names: list[str] | None = None, skill_names: list[str] | None = None) -> str:
-        """Build the static prefix (rarely changes, cacheable).
+    def _build_workspace_block(
+        self,
+        tool_names: list[str] | None = None,
+    ) -> str:
+        """Block 1: workspace-level content shared across all agents.
 
-        Order: identity → bootstrap → tools → skills_summary
+        Order: identity (runtime/workspace/guidelines) → bootstrap files → tools
+        No persona or skills here — those are per-agent.
         """
         parts = [self._get_identity()]
 
@@ -176,6 +195,23 @@ class ContextBuilder:
 
         if tool_names:
             parts.append(self._build_tools_section(tool_names))
+
+        return "\n\n---\n\n".join(parts)
+
+    def _build_agent_block(
+        self,
+        skill_names: list[str] | None = None,
+        custom_persona: str | None = None,
+        agents_registry: list[dict] | None = None,
+    ) -> str:
+        """Block 2: per-agent content (cached per unique agent config).
+
+        Order: persona → skills summary → agent registry
+        """
+        parts: list[str] = []
+
+        if custom_persona and custom_persona.strip():
+            parts.append(f"# Persona\n\n{custom_persona.strip()}")
 
         if skill_names is not None and len(skill_names) == 0:
             parts.append("# Skills\n\nThis agent has no skills configured. Do NOT use read_file or list_dir to discover or load any skill files from the workspace. Do NOT describe, claim, or offer any skills beyond basic conversation and built-in tools.")
@@ -189,6 +225,37 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
 
+        registry = self._build_agent_registry(agents_registry)
+        if registry:
+            parts.append(registry)
+
+        return "\n\n---\n\n".join(parts)
+
+    def _build_agent_registry(self, agents_registry: list[dict] | None) -> str:
+        """Build a markdown section listing all agents in the workspace."""
+        if not agents_registry:
+            return ""
+        lines = ["# Agent Registry", "", "Other agents available in this workspace:"]
+        for a in agents_registry:
+            name = a.get("name", "")
+            desc = a.get("description", "")
+            aid = a.get("id", "")
+            line = f"- **{name}** (id: `{aid}`)"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _build_static_prefix(
+        self,
+        tool_names: list[str] | None = None,
+        skill_names: list[str] | None = None,
+        custom_persona: str | None = None,
+    ) -> str:
+        """Backward-compat: concatenate workspace + agent blocks as a single string."""
+        workspace_block = self._build_workspace_block(tool_names)
+        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry=None)
+        parts = [p for p in [workspace_block, agent_block] if p]
         return "\n\n---\n\n".join(parts)
 
     def _build_dynamic_suffix(
@@ -197,13 +264,14 @@ Skills with available="false" need dependencies installed first - you can try in
         topic: str | None = None,
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         agent_id: str | None = None,
+        memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
     ) -> str:
         """Build the dynamic suffix (may change per request, non-cacheable).
 
         Order: memory → history → always-on skills
         """
-        memory_budget = int(total_token_budget * MEMORY_BUDGET_RATIO)
-        knowledge_budget = int(total_token_budget * KNOWLEDGE_BUDGET_RATIO)
+        memory_budget = int(total_token_budget * memory_budget_ratio)
+        knowledge_budget = int(total_token_budget * (1.0 - memory_budget_ratio))
 
         parts: list[str] = []
 
@@ -312,12 +380,15 @@ Skills with available="false" need dependencies installed first - you can try in
         return "\n".join(lines)
 
     def _get_identity(self) -> str:
-        """Get the core identity section."""
+        """Get the workspace-level identity section (runtime, workspace path, guidelines).
+
+        Identity/persona declarations belong in SOUL.md or the agent's persona field.
+        This method only emits runtime context and operational guidelines.
+        """
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        platform_policy = ""
         if system == "Windows":
             platform_policy = """## Platform Policy (Windows)
 - You are running on Windows. Do not assume GNU tools like `grep`, `sed`, or `awk` exist.
@@ -330,11 +401,7 @@ Skills with available="false" need dependencies installed first - you can try in
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
-        return f"""# NanoResearch 🐈
-
-You are NanoResearch, a helpful AI research assistant.
-
-## Runtime
+        return f"""## Runtime
 {runtime}
 
 ## Workspace
@@ -344,7 +411,7 @@ Your workspace is at: {workspace_path}
 
 {platform_policy}
 
-## NanoResearch Guidelines
+## Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
 - Before modifying a file, read it first. Do not assume files or directories exist.
 - After writing or editing a file, re-read it if accuracy matters.
@@ -384,33 +451,24 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         use_cache_blocks: bool = False,
         agent_id: str | None = None,
+        custom_persona: str | None = None,
+        memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
+        agents_registry: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the complete message list for an LLM call.
-
-        Args:
-            history: List of previous messages in the conversation.
-            current_message: The current user message.
-            skill_names: Optional list of skill names to include.
-            media: Optional list of media file paths.
-            channel: The channel this message came from.
-            chat_id: The chat ID this message came from.
-            current_role: The role of the current message (default: "user").
-            topic: Optional topic for knowledge search. If provided and
-                knowledge_search is available, relevant claims/insights will
-                be injected into the system prompt.
-            tool_names: Optional list of registered tool names for dynamic injection.
-            total_token_budget: Total token budget for memory + knowledge sections.
-            use_cache_blocks: If True, return system prompt as blocks with cache_control.
-        """
+        """Build the complete message list for an LLM call."""
         user_content = self._build_user_content(current_message, media)
 
         if use_cache_blocks:
             system_content: str | list[dict[str, Any]] = self.build_system_prompt_blocks(
-                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget, agent_id=agent_id
+                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
+                agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
+                agents_registry=agents_registry,
             )
         else:
             system_content = self.build_system_prompt(
-                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget, agent_id=agent_id
+                skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
+                agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
+                agents_registry=agents_registry,
             )
 
         return [
