@@ -155,6 +155,9 @@ class AgentLoop:
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
+        # User-triggered badcase state (per session_key)
+        self._user_badcase_triggers: dict[str, tuple[str, str]] = {}
+        self._last_snapshot_per_session: dict[str, str] = {}
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -272,6 +275,16 @@ class AgentLoop:
         return strip_think(text) or None
 
     @staticmethod
+    def _jaccard_similarity(a: str, b: str) -> float:
+        """Word-level Jaccard similarity between two strings."""
+        import re as _re
+        tokens_a = set(_re.findall(r'\w+', a.lower()))
+        tokens_b = set(_re.findall(r'\w+', b.lower()))
+        if not tokens_a or not tokens_b:
+            return 0.0
+        return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+    @staticmethod
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
         def _fmt(tc):
@@ -297,6 +310,7 @@ class AgentLoop:
         user_input: str = "",
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
+        session_key: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -397,7 +411,7 @@ class AgentLoop:
         _tool_recordings = _sandbox.export_recordings() if _sandbox and _sandbox.recordings else None
 
         # Async snapshot save (non-blocking, best-effort)
-        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings)
+        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings, session_key=session_key)
 
         return result.final_content, result.tools_used, result.messages
 
@@ -541,22 +555,33 @@ class AgentLoop:
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
 
-    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None) -> None:
+    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None, session_key: str | None = None) -> None:
         """Fire-and-forget snapshot write, subject to sampling rate."""
         if self._eval_repo is None or self._uid is None:
             return
         is_failure = result.stop_reason in ("error", "tool_error", "consecutive_failures", "max_iterations")
-        # Failures always recorded; successes sampled
-        rate = float(os.environ.get("EVAL_SAMPLING_RATE", str(_EVAL_SAMPLING_RATE)))
-        if not is_failure and random.random() > rate:
-            return
+        # High-risk keyword check — these cases always snapshot regardless of sampling
+        _is_high_risk = False
+        try:
+            import json as _json
+            _high_risk_path = Path(__file__).resolve().parent.parent / "eval" / "high_risk_keywords.json"
+            if _high_risk_path.exists():
+                _keywords = _json.loads(_high_risk_path.read_text(encoding="utf-8"))
+                if isinstance(_keywords, list):
+                    _input_lower = user_input.lower()
+                    _is_high_risk = any(kw in _input_lower for kw in _keywords if isinstance(kw, str))
+        except Exception:
+            pass
+        # Failures always recorded; successes sampled (except high-risk)
+        if not is_failure and not _is_high_risk:
+            rate = float(os.environ.get("EVAL_SAMPLING_RATE", str(_EVAL_SAMPLING_RATE)))
+            if random.random() > rate:
+                return
 
         if result.stop_reason in ("error", "tool_error", "consecutive_failures"):
             status = "failed"
         elif result.stop_reason == "max_iterations":
             status = "max_iterations"
-        elif result.stop_reason == "timeout":
-            status = "timeout"
         else:
             status = "success"
 
@@ -575,12 +600,43 @@ class AgentLoop:
                     system_prompt_version="production",
                     tool_recordings=tool_recordings,
                 )
+
+                # User-triggered badcases (repeated question, abandoned, etc.)
+                if session_key is not None:
+                    user_trigger = self._user_badcase_triggers.pop(session_key, None)
+                    if user_trigger is not None:
+                        trigger, category = user_trigger
+                        await self._eval_repo.mark_badcase(snap_id, trigger, category)
+
+                    # Abandoned session detection: if the previous snapshot in this
+                    # session was not a success (user started a new turn before
+                    # resolution), retroactively flag it as abandoned.
+                    prev_snap_id_str = self._last_snapshot_per_session.get(session_key)
+                    if prev_snap_id_str is not None:
+                        try:
+                            prev_snap = await self._eval_repo.get_snapshot(
+                                _uuid_mod.UUID(prev_snap_id_str)
+                            )
+                            if prev_snap and not prev_snap.is_badcase and prev_snap.run_status not in ("success", None):
+                                await self._eval_repo.mark_badcase(
+                                    _uuid_mod.UUID(prev_snap_id_str),
+                                    trigger="user:abandoned",
+                                    category="user_abandoned",
+                                )
+                        except Exception:
+                            pass
+                    self._last_snapshot_per_session[session_key] = str(snap_id)
+
+                # Rule-based badcase detection
                 if os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "true").lower() == "true":
                     detector = BadcaseDetector(p95_tokens=None)
                     detection = detector.detect(snapshot_data)
-                    if detection is not None:
+                    if detection is not None and snap_id:
                         trigger, category = detection
-                        await self._eval_repo.mark_badcase(snap_id, trigger, category)
+                        # Don't overwrite user triggers
+                        snap = await self._eval_repo.get_snapshot(snap_id)
+                        if snap and not snap.is_badcase:
+                            await self._eval_repo.mark_badcase(snap_id, trigger, category)
             except Exception as _e:
                 logger.debug("Eval snapshot save failed (non-fatal): {}", _e)
 
@@ -637,6 +693,7 @@ class AgentLoop:
                 user_input=msg.content,
                 kb_map=kb_map,
                 run_id=run_id,
+                session_key=key,
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             await self.sessions.save(session)
@@ -649,6 +706,26 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = await self.sessions.get_or_create(key)
+
+        # B1.2: Repeated question detection via Jaccard similarity
+        # Compare current input against recent user messages (N=3, threshold=0.85)
+        recent_user_msgs: list[str] = []
+        for m in reversed(session.messages[-20:]):
+            if m.get("role") == "user":
+                text = m.get("content", "")
+                if isinstance(text, list):
+                    text = " ".join(
+                        b.get("text", "") for b in text if isinstance(b, dict)
+                    )
+                recent_user_msgs.append(text)
+                if len(recent_user_msgs) >= 3:
+                    break
+        current_lower = msg.content.strip().lower()
+        for prev_text in recent_user_msgs:
+            if current_lower and self._jaccard_similarity(current_lower, prev_text.lower()) > 0.85:
+                self._user_badcase_triggers[key] = ("user:repeated_question", "user_repeated_question")
+                logger.info("Repeated question detected for session {}", key)
+                break
 
         # Startup consolidation: check if there are unconsolidated messages from last session
         await self._check_pending_consolidation(session, agent_id=agent_id)
@@ -708,6 +785,7 @@ class AgentLoop:
             user_input=msg.content,
             kb_map=kb_map,
             run_id=run_id,
+            session_key=key,
         )
 
         if final_content is None:

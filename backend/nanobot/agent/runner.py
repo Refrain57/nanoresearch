@@ -6,7 +6,7 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -14,6 +14,9 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, ToolCallRequest
 from nanobot.utils.helpers import build_assistant_message
+
+if TYPE_CHECKING:
+    from nanobot.eval.snapshot import RunSnapshotCollector
 
 _DEFAULT_MAX_ITERATIONS_MESSAGE = (
     "I reached the maximum number of tool call iterations ({max_iterations}) "
@@ -39,6 +42,7 @@ class AgentRunSpec:
     concurrent_tools: bool = False
     fail_on_tool_error: bool = False
     max_consecutive_failures: int = 3  # P0: 连续失败上限，触发逃生通道
+    snapshot_collector: RunSnapshotCollector | None = None
 
 
 @dataclass(slots=True)
@@ -122,6 +126,9 @@ class AgentRunner:
                 )
             else:
                 response = await self.provider.chat_with_retry(**kwargs)
+
+            if spec.snapshot_collector is not None:
+                spec.snapshot_collector.on_llm_end(response.usage or {}, spec.model)
 
             raw_usage = response.usage or {}
             usage = {
@@ -285,11 +292,16 @@ class AgentRunner:
         spec: AgentRunSpec,
         tool_call: ToolCallRequest,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
+        collector = spec.snapshot_collector
+        if collector is not None:
+            collector.on_tool_start(tool_call.id, tool_call.name, tool_call.arguments)
         try:
             result = await spec.tools.execute(tool_call.name, tool_call.arguments)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            if collector is not None:
+                collector.on_tool_end(tool_call.id, f"Error: {type(exc).__name__}: {exc}")
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -299,6 +311,8 @@ class AgentRunner:
                 return f"Error: {type(exc).__name__}: {exc}", event, exc
             return f"Error: {type(exc).__name__}: {exc}", event, None
 
+        if collector is not None:
+            collector.on_tool_end(tool_call.id, result)
         detail = "" if result is None else str(result)
         detail = detail.replace("\n", " ").strip()
         if not detail:
