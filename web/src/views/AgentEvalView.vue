@@ -1021,7 +1021,7 @@
             >
               <a-table
                 :data-source="item.queries"
-                row-key="tool_name"
+                :row-key="(_r, i) => i"
                 size="small"
                 :pagination="false"
               >
@@ -1862,7 +1862,7 @@ onMounted(() => {
 }
 .dim-name { font-size: 12px; color: #555; margin-bottom: 6px; }
 .dim-score { font-size: 18px; font-weight: 700; margin-top: 4px; text-align: right; }
-.err-sample { font-size: 11px; color: #ff4d4f; background: #fff2f0; padding: 2px 6px; border-radius: 3px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.err-sample { font-size: 11px; color: #ff4d4f; background: #fff2f0; padding: 2px 6px; border-radius: 3px; margin-bottom: 2px; max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .parse-error-hint { margin-top: 16px; }
 .parse-error-hint pre { margin: 8px 0 0; }
 
