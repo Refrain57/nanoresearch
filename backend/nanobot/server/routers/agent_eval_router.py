@@ -678,8 +678,8 @@ async def classify_badcases_batch(
         processed = 0
         for snap in unclassified:
             try:
-                category = await classifier.classify(snap)
-                await repo.update_snapshot_semantic_category(snap.id, category)
+                result = await classifier.classify(snap)
+                await repo.update_snapshot_classification(snap.id, result)
                 processed += 1
                 _classify_tasks[task_id]["processed"] = processed
             except Exception as exc:
@@ -832,6 +832,13 @@ async def trigger_optimization(
     snapshots = [s for s in snapshots if s is not None and s.uid == uid]
     if not snapshots:
         raise HTTPException(400, "No valid snapshots provided")
+
+    # Gate: only prompt-rooted badcases benefit from prompt optimization.
+    # root_cause_auto is None means not yet classified — allow through to preserve existing behaviour.
+    prompt_snaps = [s for s in snapshots if s.root_cause_auto == "prompt" or s.root_cause_auto is None]
+    if not prompt_snaps:
+        raise HTTPException(400, "所选 badcase 均非 prompt 类根因，无需 prompt 优化")
+    snapshots = prompt_snaps
 
     golden_cases = await repo.list_test_cases(dataset_type="golden")
 
