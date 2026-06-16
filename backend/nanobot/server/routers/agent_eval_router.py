@@ -72,6 +72,7 @@ async def list_badcases(
     badcase_status: str | None = Query(None),
     badcase_category: str | None = Query(None),
     semantic_category: str | None = Query(None),
+    root_cause_auto: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     uid: str = Depends(get_current_user),
@@ -81,6 +82,7 @@ async def list_badcases(
         badcase_status=badcase_status,
         badcase_category=badcase_category,
         semantic_category=semantic_category,
+        root_cause_auto=root_cause_auto,
         page=page,
         page_size=page_size,
     )
@@ -452,6 +454,8 @@ def _snap_summary(r: Any) -> dict:
         "badcase_category": r.badcase_category,
         "badcase_status": r.badcase_status,
         "semantic_category": r.semantic_category,
+        "root_cause_auto": r.root_cause_auto,
+        "root_cause_auto_confidence": r.root_cause_auto_confidence,
         "passed": r.passed,
         "scores": r.scores,
         "final_response": r.final_response,
@@ -468,6 +472,7 @@ def _snap_detail(r: Any) -> dict:
         "llm_calls": r.llm_calls or [],
         "failed_dimensions": r.failed_dimensions,
         "root_cause": r.root_cause,
+        "root_cause_auto_reason": r.root_cause_auto_reason,
         "fix_notes": r.fix_notes,
         "annotated_by": r.annotated_by,
         "annotated_at": r.annotated_at.isoformat() if r.annotated_at else None,
@@ -891,3 +896,268 @@ async def update_optimization_status(
         raise HTTPException(400, "status must be 'approved' or 'rejected'")
     await repo.update_optimization_proposal_status(proposal_id, body.status)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Root-cause closed-loop: context / tool / user_input / model
+# ---------------------------------------------------------------------------
+
+class ContextDiagnosisRequest(BaseModel):
+    snapshot_ids: list[uuid.UUID] | None = None
+    top_k: int = 5
+
+
+@router.post("/badcases/context-diagnosis")
+async def context_diagnosis(
+    body: ContextDiagnosisRequest,
+    request: Request,
+    uid: str = Depends(get_current_user),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    """Re-run retrieval for context-rooted badcases; classify each as kb_gap or transient."""
+    from nanobot.eval.context_diagnoser import ContextDiagnoser
+    from nanobot.storage.repositories.agent_repo import AgentRepository
+    from nanobot.storage.database import get_session_factory
+
+    if body.snapshot_ids:
+        snapshots = [await repo.get_snapshot(sid) for sid in body.snapshot_ids]
+        snapshots = [s for s in snapshots if s is not None]
+    else:
+        snapshots, _ = await repo.list_badcases(root_cause_auto="context", page_size=20)
+
+    agent_repo = AgentRepository(get_session_factory())
+    diagnoser = ContextDiagnoser()
+    session_factory = request.app.state.session_factory
+
+    items = []
+    for snap in snapshots:
+        kb_list = []
+        if snap.agent_id is not None:
+            try:
+                kb_list = await agent_repo.list_bound_kbs(snap.agent_id)
+            except Exception:
+                pass
+        item = await diagnoser.diagnose(snap, kb_list, session_factory, top_k=body.top_k)
+        items.append(item)
+
+    summary = {
+        "kb_gap": sum(sum(1 for q in it["queries"] if q["verdict"] == "kb_gap") for it in items),
+        "transient": sum(sum(1 for q in it["queries"] if q["verdict"] == "transient") for it in items),
+        "unknown": sum(sum(1 for q in it["queries"] if q["verdict"] == "unknown") for it in items),
+    }
+    return {"summary": summary, "items": items}
+
+
+@router.get("/tool-error-stats")
+async def tool_error_stats(
+    days: int = Query(7, ge=1, le=365),
+    uid: str = Depends(get_current_user),
+):
+    """Aggregate tool error rates from agent_run_snapshots over the last N days."""
+    from collections import defaultdict
+    from sqlalchemy import text
+    from nanobot.storage.database import get_session_factory
+
+    factory = get_session_factory()
+    interval = f"{days} days"
+
+    async with factory() as session:
+        agg_rows = (await session.execute(text("""
+            SELECT
+                entry->>'name'                                              AS tool_name,
+                COUNT(*)                                                    AS total_calls,
+                SUM((entry->>'error' = 'true')::int)                       AS error_calls,
+                ROUND(AVG((entry->>'error' = 'true')::int)::numeric * 100, 1) AS error_rate_pct
+            FROM agent_run_snapshots,
+                 jsonb_array_elements(tool_call_chain) AS entry
+            WHERE timestamp > NOW() - CAST(:interval AS INTERVAL)
+              AND jsonb_typeof(tool_call_chain) = 'array'
+              AND jsonb_array_length(tool_call_chain) > 0
+            GROUP BY tool_name
+            ORDER BY error_rate_pct DESC
+        """), {"interval": interval})).fetchall()
+
+        sample_rows = (await session.execute(text("""
+            SELECT entry->>'name' AS tool_name, entry->>'result' AS result_text, timestamp
+            FROM agent_run_snapshots,
+                 jsonb_array_elements(tool_call_chain) AS entry
+            WHERE timestamp > NOW() - CAST(:interval AS INTERVAL)
+              AND entry->>'error' = 'true'
+            ORDER BY timestamp DESC
+            LIMIT 200
+        """), {"interval": interval})).fetchall()
+
+    samples_by_tool: dict[str, list[str]] = defaultdict(list)
+    for row in sample_rows:
+        tool = row.tool_name or ""
+        if len(samples_by_tool[tool]) < 3:
+            samples_by_tool[tool].append((row.result_text or "")[:200])
+
+    def _severity(rate: float) -> str:
+        if rate > 20:
+            return "red"
+        if rate > 5:
+            return "orange"
+        return "green"
+
+    tools = []
+    for row in agg_rows:
+        rate_pct = float(row.error_rate_pct or 0)
+        tools.append({
+            "tool_name": row.tool_name,
+            "total_calls": int(row.total_calls or 0),
+            "error_calls": int(row.error_calls or 0),
+            "error_rate": round(rate_pct / 100, 4),
+            "severity": _severity(rate_pct),
+            "sample_errors": samples_by_tool.get(row.tool_name or "", []),
+        })
+
+    return {"window_days": days, "tools": tools}
+
+
+class UserInputAnalysisRequest(BaseModel):
+    snapshot_ids: list[uuid.UUID] | None = None
+
+
+@router.post("/badcases/user-input-analysis")
+async def user_input_analysis(
+    body: UserInputAnalysisRequest,
+    request: Request,
+    uid: str = Depends(get_current_user),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    """LLM analysis of ambiguous user inputs; returns patterns and system-prompt suggestions."""
+    import re
+    import json as _json
+
+    state = request.app.state
+    channel_loop = getattr(state, "channel_loop", None)
+    if channel_loop is None:
+        raise HTTPException(503, "Agent loop not available")
+
+    if body.snapshot_ids:
+        snapshots = [await repo.get_snapshot(sid) for sid in body.snapshot_ids]
+        snapshots = [s for s in snapshots if s is not None]
+    else:
+        snapshots, _ = await repo.list_badcases(root_cause_auto="user_input", page_size=20)
+
+    seen: set[str] = set()
+    user_inputs: list[str] = []
+    for snap in snapshots:
+        ui = (snap.user_input or "")[:300]
+        if ui and ui not in seen:
+            seen.add(ui)
+            user_inputs.append(ui)
+            if len(user_inputs) >= 20:
+                break
+
+    if not user_inputs:
+        return {"analyzed_count": 0, "patterns": [], "prompt_suggestions": []}
+
+    system = (
+        "你是 Agent 系统优化专家。以下是一批因用户表达歧义导致失败的对话输入，"
+        "请先用 2-3 句分析共同模式，然后输出 JSON：\n"
+        '{"patterns": ["..."], "prompt_suggestions": [{"issue": "...", "suggestion": "..."}]}\n'
+        'suggestion 要具体，格式为"在 system prompt 加入：当用户 X 时，先追问 Y"'
+    )
+    user_msg = "用户输入列表：\n" + "\n".join(f"- {ui}" for ui in user_inputs)
+
+    try:
+        response = await channel_loop.provider.chat_with_retry(
+            messages=[{"role": "user", "content": user_msg}],
+            system=system,
+            max_tokens=1024,
+            temperature=0.3,
+        )
+        raw = (response.content or "").strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                data = _json.loads(match.group())
+                return {
+                    "analyzed_count": len(user_inputs),
+                    "patterns": data.get("patterns", []),
+                    "prompt_suggestions": data.get("prompt_suggestions", []),
+                }
+            except _json.JSONDecodeError:
+                pass
+        return {"error": "parse_failed", "raw": raw[:500]}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@router.get("/badcases/model-analysis")
+async def model_analysis(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    uid: str = Depends(get_current_user),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    """LLM analysis of model-capacity failures; returns pattern report and architecture recommendations."""
+    import re
+    import json as _json
+
+    state = request.app.state
+    channel_loop = getattr(state, "channel_loop", None)
+    if channel_loop is None:
+        raise HTTPException(503, "Agent loop not available")
+
+    snapshots, _ = await repo.list_badcases(root_cause_auto="model", page_size=limit)
+    if not snapshots:
+        return {
+            "analyzed_count": 0,
+            "token_stats": {"mean": 0, "max": 0},
+            "pattern_report": "",
+            "recommendations": [],
+        }
+
+    token_counts = [s.total_input_tokens for s in snapshots if s.total_input_tokens]
+    mean_tokens = round(sum(token_counts) / len(token_counts)) if token_counts else 0
+    max_tokens_val = max(token_counts) if token_counts else 0
+
+    records = []
+    for snap in snapshots[:20]:
+        llm_calls = snap.llm_calls or []
+        max_call_tokens = max((c.get("input_tokens", 0) for c in llm_calls), default=0)
+        records.append(
+            f"- 用户输入: {(snap.user_input or '')[:200]}\n"
+            f"  总输入token: {snap.total_input_tokens}, 工具调用: {snap.tool_call_count}, "
+            f"LLM调用: {snap.llm_call_count}, 最大单次token: {max_call_tokens}, "
+            f"运行状态: {snap.run_status}"
+        )
+
+    system = (
+        "以下是一批因模型能力边界失败的 Agent 运行记录（token 超限 / 复杂推理失败），"
+        "请先 2-3 句分析失败模式，然后输出 JSON（止步于决策依据，不做自动化）：\n"
+        '{"pattern_report": "...", "recommendations": [{"type": "...", "detail": "..."}]}\n'
+        "type 枚举：summarization_layer | context_window_limit | model_upgrade | prompt_compression | other"
+    )
+    user_msg = "Agent 运行记录：\n" + "\n\n".join(records)
+
+    try:
+        response = await channel_loop.provider.chat_with_retry(
+            messages=[{"role": "user", "content": user_msg}],
+            system=system,
+            max_tokens=1024,
+            temperature=0.3,
+        )
+        raw = (response.content or "").strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                data = _json.loads(match.group())
+                return {
+                    "analyzed_count": len(snapshots),
+                    "token_stats": {"mean": mean_tokens, "max": max_tokens_val},
+                    "pattern_report": data.get("pattern_report", ""),
+                    "recommendations": data.get("recommendations", []),
+                }
+            except _json.JSONDecodeError:
+                pass
+        return {
+            "error": "parse_failed",
+            "raw": raw[:500],
+            "token_stats": {"mean": mean_tokens, "max": max_tokens_val},
+        }
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
