@@ -80,7 +80,7 @@ class Session:
         out: list[dict[str, Any]] = []
         for message in sliced:
             entry: dict[str, Any] = {"role": message["role"], "content": message.get("content", "")}
-            for key in ("tool_calls", "tool_call_id", "name"):
+            for key in ("tool_calls", "tool_call_id", "name", "reasoning_content", "thinking_blocks"):
                 if key in message:
                     entry[key] = message[key]
             out.append(entry)
@@ -117,6 +117,7 @@ class SessionManager:
     """
     Async session manager backed by PostgreSQL.
     Falls back to JSONL when no session_factory is provided (e.g. tests).
+    Redis is used as a write-through cache layer (2 h TTL) when available.
     """
 
     def __init__(
@@ -133,20 +134,95 @@ class SessionManager:
         self._legacy_dir = get_legacy_sessions_dir()
 
     # ------------------------------------------------------------------
+    # Redis key helpers
+    # ------------------------------------------------------------------
+
+    def _redis_keys(self, key: str) -> tuple[str, str]:
+        """Return (msg_key, meta_key) for the given session key."""
+        from nanobot.bus.redis_keys import RedisKeys
+        ch, chat_id = key.split(":", 1)
+        uid = self._default_uid
+        return RedisKeys.session_msg(uid, ch, chat_id), RedisKeys.session_meta(uid, ch, chat_id)
+
+    async def _redis_load(self, key: str) -> Session | None:
+        """Try to load session from Redis. Returns None on miss or error."""
+        try:
+            from nanobot.bus.redis_client import get_redis
+            from nanobot.bus.redis_keys import RedisKeys
+            redis = get_redis()
+            msg_key, meta_key = self._redis_keys(key)
+            meta, raw_msgs = await redis.hgetall(meta_key), await redis.lrange(msg_key, 0, -1)
+            if not meta or not raw_msgs:
+                return None
+            messages = [json.loads(m) for m in raw_msgs]
+            created_at = datetime.fromisoformat(meta["created_at"]) if meta.get("created_at") else datetime.now()
+            updated_at = datetime.fromisoformat(meta["updated_at"]) if meta.get("updated_at") else datetime.now()
+            return Session(
+                key=key,
+                messages=messages,
+                created_at=created_at,
+                updated_at=updated_at,
+                metadata=json.loads(meta.get("metadata") or "{}"),
+                last_consolidated=int(meta.get("last_consolidated", 0)),
+            )
+        except Exception as e:
+            logger.debug("Redis session load miss for {}: {}", key, e)
+            return None
+
+    async def _redis_save(self, session: Session) -> None:
+        """Write session rolling window to Redis via MULTI/EXEC. Fire-and-forget on error."""
+        try:
+            from nanobot.bus.redis_client import get_redis
+            from nanobot.bus.redis_keys import RedisKeys
+            redis = get_redis()
+            msg_key, meta_key = self._redis_keys(session.key)
+            window = session.messages[session.last_consolidated:]
+            ts = datetime.now().isoformat()
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.delete(msg_key)
+                if window:
+                    pipe.rpush(msg_key, *[json.dumps(m, ensure_ascii=False) for m in window])
+                pipe.hset(meta_key, mapping={
+                    "updated_at": ts,
+                    "created_at": session.created_at.isoformat(),
+                    "metadata": json.dumps(session.metadata, ensure_ascii=False),
+                    "last_consolidated": "0",
+                })
+                pipe.expire(msg_key, RedisKeys.SESSION_TTL)
+                pipe.expire(meta_key, RedisKeys.SESSION_TTL)
+                await pipe.execute()
+        except Exception as e:
+            logger.warning("Redis session save failed (non-fatal): {}", e)
+
+    # ------------------------------------------------------------------
     # Public async interface
     # ------------------------------------------------------------------
 
     async def get_or_create(self, key: str) -> Session:
         if key in self._cache:
+            logger.bind(event="session_l1_hit", cache_layer="session_cache").debug(
+                "session L1 cache hit for {}", key
+            )
             return self._cache[key]
-        session = await self._load(key)
-        if session is None:
-            session = Session(key=key)
+        session = await self._redis_load(key)
+        if session is not None:
+            logger.bind(event="session_redis_hit", cache_layer="session_cache").debug(
+                "session Redis cache hit for {}", key
+            )
+        else:
+            logger.bind(event="session_cache_miss", cache_layer="session_cache").debug(
+                "session cache miss for {}", key
+            )
+            session = await self._load(key)
+            if session is None:
+                session = Session(key=key)
+            await self._redis_save(session)
         self._cache[key] = session
         return session
 
     async def save(self, session: Session) -> None:
         self._cache[session.key] = session
+        await self._redis_save(session)
         if self._factory is not None:
             await self._db_save(session)
         else:

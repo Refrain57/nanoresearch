@@ -10,6 +10,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from nanobot.server.middleware.auth import get_current_user
 from nanobot.server.routers.agent_router import router as agent_router
+from nanobot.server.routers.agent_eval_router import router as agent_eval_router
 from nanobot.server.routers.chat_router import router as chat_router
 from nanobot.server.routers.knowledge_router import router as knowledge_router
 from nanobot.server.routers.eval_router import router as eval_router
@@ -17,9 +18,16 @@ from nanobot.server.routers.settings_router import router as settings_router
 from nanobot.server.routers.workspace_router import router as workspace_router
 
 
-def create_app(channel_loop, session_factory, loop_config=None, channel_manager=None, rag_settings=None, allowed_models=None) -> FastAPI:
+def create_app(channel_loop, session_factory, loop_config=None, channel_manager=None, rag_settings=None, allowed_models=None, config=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # One-time migration: ensure settings.yaml api_keys exist in config.json
+        try:
+            from nanobot.config.migration import migrate_llm_keys
+            migrate_llm_keys(dry_run=False)
+        except Exception:
+            pass
+
         tasks = []
         # Dispose stale asyncpg connections from any previous process before accepting requests.
         # Without this, the first request after a restart fails on Windows (ProactorEventLoop
@@ -27,6 +35,27 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
         from nanobot.storage.database import _engine
         if _engine is not None:
             await _engine.dispose()
+
+        # Redis client — shared across all requests (Problem 7: decode_responses=True enforced)
+        from nanobot.bus.redis_client import get_redis
+        app.state.redis = get_redis()
+
+        # PendingReaper — background orphan cleanup, attached to this process's lifespan
+        from nanobot.bus.pending_reaper import PendingReaper
+        from nanobot.bus.redis_monitor import RedisMonitor
+        app.state.pending_reaper = PendingReaper()
+        await app.state.pending_reaper.start()
+
+        # RedisMonitor — eviction alerting (3-A) and memory sampling (3-B)
+        app.state.redis_monitor = RedisMonitor()
+        await app.state.redis_monitor.start()
+
+        # ARQ pool — enqueues agent jobs into the worker process
+        from arq import create_pool
+        from arq.connections import RedisSettings as ArqRedisSettings
+        from nanobot.bus.redis_client import REDIS_URL
+        app.state.arq_pool = await create_pool(ArqRedisSettings.from_dsn(REDIS_URL))
+
         if channel_manager:
             # Channels route inbound messages via bus → channel_loop.run() must be active
             tasks.append(asyncio.create_task(channel_loop.run()))
@@ -41,16 +70,26 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await app.state.pending_reaper.stop()
+        await app.state.redis_monitor.stop()
+        try:
+            await app.state.arq_pool.aclose()
+        except Exception:
+            pass
+        await app.state.redis.aclose()
 
     app = FastAPI(title="Nanobot API", version="2.0.0", lifespan=lifespan)
     app.state.channel_loop = channel_loop
-    app.state.web_loops = {}              # uid -> AgentLoop (per-user, lazily created)
+    app.state.web_loops = {}              # legacy placeholder — agent loops live in worker
     app.state.web_loops_lock = asyncio.Lock()
     app.state.loop_config = loop_config or {}
     app.state.session_factory = session_factory
-    app.state.run_queues = {}  # run_id (str) -> asyncio.Queue
+    app.state.arq_pool = None      # initialised in lifespan before first request
+    app.state.redis = None         # initialised in lifespan before first request
+    app.state.redis_monitor = None # initialised in lifespan before first request
     app.state.rag_settings = rag_settings  # loaded lazily if None
     app.state.allowed_models = allowed_models or []
+    app.state.config = config
 
     @app.post("/api/auth/token")
     async def login(form: OAuth2PasswordRequestForm = Depends()):
@@ -70,17 +109,22 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
 
     app.include_router(chat_router)
     app.include_router(agent_router)
+    app.include_router(agent_eval_router)
     app.include_router(knowledge_router)
     app.include_router(eval_router)
     app.include_router(settings_router)
     app.include_router(workspace_router)
 
-    # 生产静态文件服务（pnpm build 产物），放在所有路由之后
-    import os
+    # RAG 图片静态文件服务（必须在前端 "/" 挂载之前）
     from pathlib import Path
+    from fastapi.staticfiles import StaticFiles
+    rag_images_dir = Path.home() / ".nanoresearch" / "rag" / "images"
+    rag_images_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/rag-images", StaticFiles(directory=str(rag_images_dir)), name="rag-images")
+
+    # 生产静态文件服务（pnpm build 产物），放在所有路由之后
     dist = Path(__file__).parent.parent.parent.parent / "web" / "dist"
     if dist.exists():
-        from fastapi.staticfiles import StaticFiles
         app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
 
     return app

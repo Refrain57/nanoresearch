@@ -10,6 +10,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+# Atomically trim the session:msg list to start at the new compaction boundary,
+# then update updated_at in session:meta.
+# KEYS[1]=msg_key  KEYS[2]=meta_key
+# ARGV[1]=keep_from_idx (number of entries to drop from front)
+# ARGV[2]=ISO timestamp
+_LUA_LTRIM = """
+local keep = tonumber(ARGV[1])
+local len  = redis.call('LLEN', KEYS[1])
+if len > keep then
+    redis.call('LTRIM', KEYS[1], keep, -1)
+else
+    redis.call('DEL', KEYS[1])
+end
+redis.call('HSET', KEYS[2], 'updated_at', ARGV[2])
+return 1
+"""
+
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
@@ -257,6 +274,7 @@ class MemoryStore:
         messages: list[dict],
         provider: LLMProvider,
         model: str,
+        uid: str | None = None,
     ) -> bool:
         """Consolidate the provided message chunk into MEMORY.md."""
         if not messages:
@@ -304,28 +322,28 @@ Call save_memory with your updated memory following the exact format specified."
                     len(response.content or ""),
                     (response.content or "")[:200],
                 )
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, uid=uid)
 
             args = _normalize_save_memory_args(response.tool_calls[0].arguments)
             if args is None:
                 logger.warning("Memory consolidation: unexpected save_memory arguments")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, uid=uid)
 
             if "history_entry" not in args or "memory_update" not in args:
                 logger.warning("Memory consolidation: save_memory payload missing required fields")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, uid=uid)
 
             entry = args["history_entry"]
             update = args["memory_update"]
 
             if entry is None or update is None:
                 logger.warning("Memory consolidation: save_memory payload contains null required fields")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, uid=uid)
 
             entry = _ensure_text(entry).strip()
             if not entry:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, uid=uid)
 
             # Write to user_memory (only if knowledge_search is available)
             if self._knowledge_search:
@@ -336,7 +354,7 @@ Call save_memory with your updated memory following the exact format specified."
                     "confidence": 0.6,
                     "is_evergreen": False,
                     "created_at": datetime.now().isoformat(),
-                }])
+                }], uid=uid)
 
             update = _ensure_text(update)
             if update != current_memory:
@@ -347,18 +365,18 @@ Call save_memory with your updated memory following the exact format specified."
             return True
         except Exception:
             logger.exception("Memory consolidation failed")
-            return self._fail_or_raw_archive(messages)
+            return self._fail_or_raw_archive(messages, uid=uid)
 
-    def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
+    def _fail_or_raw_archive(self, messages: list[dict], uid: str | None = None) -> bool:
         """Increment failure count; after threshold, raw-archive messages and return True."""
         self._consecutive_failures += 1
         if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
             return False
-        self._raw_archive(messages)
+        self._raw_archive(messages, uid=uid)
         self._consecutive_failures = 0
         return True
 
-    def _raw_archive(self, messages: list[dict]) -> None:
+    def _raw_archive(self, messages: list[dict], uid: str | None = None) -> None:
         """Fallback: dump raw messages to user_memory without LLM summarization."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -374,7 +392,7 @@ Call save_memory with your updated memory following the exact format specified."
                 "confidence": 0.5,
                 "is_evergreen": False,
                 "created_at": datetime.now().isoformat(),
-            }])
+            }], uid=uid)
 
         logger.warning(
             "Memory consolidation degraded: raw-archived {} messages", len(messages)
@@ -424,13 +442,13 @@ class MemoryConsolidator:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
-    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None) -> bool:
+    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None, uid: str | None = None) -> bool:
         """Archive a selected message chunk into persistent memory."""
-        success = await self._get_store(agent_id).consolidate(messages, self.provider, self.model)
+        success = await self._get_store(agent_id).consolidate(messages, self.provider, self.model, uid=uid)
 
         # After successful consolidation, extract knowledge from conversation
         if success and self._knowledge_search:
-            await self._extract_conversation_knowledge(messages)
+            await self._extract_conversation_knowledge(messages, uid=uid)
 
             # Run structural lint (report only, no auto-fix)
             try:
@@ -446,7 +464,7 @@ class MemoryConsolidator:
 
         return success
 
-    async def _extract_conversation_knowledge(self, messages: list[dict[str, object]]) -> None:
+    async def _extract_conversation_knowledge(self, messages: list[dict[str, object]], uid: str | None = None) -> None:
         """Extract knowledge claims from conversation messages.
 
         This is called after consolidation to extract claims from agent statements.
@@ -461,7 +479,7 @@ class MemoryConsolidator:
                     knowledge_search=self._knowledge_search,
                 )
 
-            await self._knowledge_extractor.extract_from_messages(messages)
+            await self._knowledge_extractor.extract_from_messages(messages, uid=uid)
         except Exception as e:
             logger.warning(f"Conversation knowledge extraction failed: {e}")
 
@@ -518,16 +536,16 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
-    async def archive_messages(self, messages: list[dict[str, object]], agent_id: str | None = None) -> bool:
+    async def archive_messages(self, messages: list[dict[str, object]], agent_id: str | None = None, uid: str | None = None) -> bool:
         """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
         if not messages:
             return True
         for _ in range(MemoryStore._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
-            if await self.consolidate_messages(messages, agent_id=agent_id):
+            if await self.consolidate_messages(messages, agent_id=agent_id, uid=uid):
                 return True
         return True
 
-    async def maybe_consolidate_by_tokens(self, session: Session, agent_id: str | None = None) -> None:
+    async def maybe_consolidate_by_tokens(self, session: Session, agent_id: str | None = None, uid: str | None = None) -> None:
         """Loop: archive old messages until prompt fits within safe budget.
 
         The budget reserves space for completion tokens and a safety buffer
@@ -578,8 +596,9 @@ class MemoryConsolidator:
                     )
                     return
 
+                old_last_consolidated = session.last_consolidated
                 end_idx = boundary[0]
-                chunk = session.messages[session.last_consolidated:end_idx]
+                chunk = session.messages[old_last_consolidated:end_idx]
                 if not chunk:
                     return
 
@@ -592,8 +611,28 @@ class MemoryConsolidator:
                     source,
                     len(chunk),
                 )
-                if not await self.consolidate_messages(chunk, agent_id=agent_id):
+                if not await self.consolidate_messages(chunk, agent_id=agent_id, uid=uid):
                     return
+
+                # Lua LTRIM: atomically advance Redis list start to new boundary (fast-path).
+                # Failure here is non-fatal — sessions.save() will rewrite the correct window.
+                if uid is not None and ":" in session.key:
+                    try:
+                        from nanobot.bus.redis_client import get_redis
+                        from nanobot.bus.redis_keys import RedisKeys
+                        ch, chat_id = session.key.split(":", 1)
+                        _redis = get_redis()
+                        keep_from_idx = end_idx - old_last_consolidated
+                        await _redis.eval(
+                            _LUA_LTRIM, 2,
+                            RedisKeys.session_msg(uid, ch, chat_id),
+                            RedisKeys.session_meta(uid, ch, chat_id),
+                            str(keep_from_idx),
+                            datetime.utcnow().isoformat(),
+                        )
+                    except Exception as _lua_err:
+                        logger.warning("Lua LTRIM failed (non-fatal): {}", _lua_err)
+
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
 

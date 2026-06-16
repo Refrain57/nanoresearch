@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.bus.redis_client import pending_key
 from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 
@@ -60,25 +62,39 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        run_id: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        origin = {"channel": origin_channel, "chat_id": origin_chat_id, "run_id": run_id}
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, session_key)
         )
         self._running_tasks[task_id] = bg_task
+
+        # Problem 8: track pending tasks in Redis so multi-instance cancel/wait works
         if session_key:
-            self._session_tasks.setdefault(session_key, set()).add(task_id)
+            try:
+                from nanobot.bus.redis_client import get_redis, pending_key
+                # Store timestamp in member so PendingReaper can judge age
+                # without relying on OBJECT IDLETIME (reset by Phase 3 MEMORY USAGE).
+                await get_redis().sadd(pending_key(session_key), f"{task_id}:{int(time.time())}")
+            except Exception as _e:
+                logger.warning("Redis SADD pending failed (non-fatal): {}", _e)
+                # Fall back to in-process tracking
+                self._session_tasks.setdefault(session_key, set()).add(task_id)
 
         def _cleanup(_: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)
+            # Redis SREM is handled in _announce_result / _run_subagent except block
+            # to guarantee result is written to stream before pending count drops to 0.
+            # Only clean up in-process fallback tracking here.
             if session_key and (ids := self._session_tasks.get(session_key)):
                 ids.discard(task_id)
                 if not ids:
-                    del self._session_tasks[session_key]
+                    self._session_tasks.pop(session_key, None)
 
         bg_task.add_done_callback(_cleanup)
 
@@ -90,7 +106,8 @@ class SubagentManager:
         task_id: str,
         task: str,
         label: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
+        session_key: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -138,6 +155,18 @@ class SubagentManager:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
 
+                async def after_iteration(self, context: AgentHookContext) -> None:
+                    # Problem 3: honour client disconnect between tool iterations
+                    if session_key:
+                        try:
+                            from nanobot.bus.redis_client import get_redis, cancel_key
+                            if await get_redis().exists(cancel_key(session_key)):
+                                raise asyncio.CancelledError("client disconnected")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            pass  # Redis unavailable — continue task
+
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=messages,
                 tools=tools,
@@ -150,33 +179,43 @@ class SubagentManager:
             ))
             if result.stop_reason == "tool_error":
                 await self._announce_result(
-                    task_id,
-                    label,
-                    task,
-                    self._format_partial_progress(result),
-                    origin,
-                    "error",
+                    task_id, label, task, self._format_partial_progress(result),
+                    origin, "error", session_key,
                 )
                 return
             if result.stop_reason == "error":
                 await self._announce_result(
-                    task_id,
-                    label,
-                    task,
+                    task_id, label, task,
                     result.error or "Error: subagent execution failed.",
-                    origin,
-                    "error",
+                    origin, "error", session_key,
                 )
                 return
             final_result = result.final_content or "Task completed but no final response was generated."
 
             logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            await self._announce_result(task_id, label, task, final_result, origin, "ok", session_key)
+
+        except asyncio.CancelledError:
+            # Crash-safety: ensure pending count drops even on cancellation (Problem 8)
+            if session_key:
+                try:
+                    from nanobot.bus.redis_client import get_redis, pending_key
+                    await self._remove_pending_member(get_redis(), session_key, task_id)
+                except Exception:
+                    pass
+            raise
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            # Crash-safety SREM before _announce_result in case announce itself fails
+            if session_key:
+                try:
+                    from nanobot.bus.redis_client import get_redis, pending_key
+                    await self._remove_pending_member(get_redis(), session_key, task_id)
+                except Exception:
+                    pass
+            await self._announce_result(task_id, label, task, error_msg, origin, "error", session_key)
 
     async def _announce_result(
         self,
@@ -184,29 +223,65 @@ class SubagentManager:
         label: str,
         task: str,
         result: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
         status: str,
+        session_key: str | None = None,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
-        status_text = "completed successfully" if status == "ok" else "failed"
+        """Announce the subagent result.
 
+        Web channel: write to Redis Stream (run_events when run_id present, else
+        chat_events) so the SSE reader delivers it. Other channels: inject as
+        system message into the bus.
+        """
+        if origin["channel"] == "web":
+            try:
+                from nanobot.bus.redis_client import get_redis
+                from nanobot.bus.redis_keys import RedisKeys
+                from nanobot.bus.stream import xadd_event
+                redis = get_redis()
+                stream_key = (
+                    RedisKeys.run_events(origin["run_id"])
+                    if origin.get("run_id")
+                    else RedisKeys.chat_events(origin["chat_id"])
+                )
+                await xadd_event(redis, stream_key, {
+                    "type": "subagent_result",
+                    "task_id": task_id,
+                    "label": label,
+                    "status": status,
+                    "content": result,
+                })
+                # SREM after xadd so the SSE reader observes the event before pending drops to 0
+                if session_key:
+                    await self._remove_pending_member(redis, session_key, task_id)
+            except Exception as _e:
+                logger.error("Subagent [{}] failed to write result to Redis stream: {}", task_id, _e)
+            logger.debug("Subagent [{}] wrote result to stream {}", task_id, origin.get("run_id") or origin["chat_id"])
+            return
+
+        # Non-web channels: inject as system message to trigger main agent (unchanged)
+        status_text = "completed successfully" if status == "ok" else "failed"
         announce_content = f"""[Subagent '{label}' {status_text}]
 
 Task: {task}
 
 Result:
 {result}"""
-
-        # Inject as system message to trigger main agent
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
         )
-
         await self.bus.publish_inbound(msg)
-        logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+        # Problem 8: SREM for non-web path too
+        if session_key:
+            try:
+                from nanobot.bus.redis_client import get_redis, pending_key
+                await self._remove_pending_member(get_redis(), session_key, task_id)
+            except Exception:
+                pass
+        logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"])
 
     @staticmethod
     def _format_partial_progress(result) -> str:
@@ -228,7 +303,21 @@ Result:
             lines.append("Failure:")
             lines.append(f"- {result.error}")
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
-    
+
+    @staticmethod
+    async def _remove_pending_member(redis, session_key: str, task_id: str) -> None:
+        """Remove a pending member by task_id prefix from the timestamped set.
+
+        Members are stored as '{task_id}:{unix_ts}' (see spawn SADD).
+        SMEMBERS + prefix match is O(n) but pending sets are typically small.
+        """
+        key = pending_key(session_key)
+        members = await redis.smembers(key)
+        for member in members:
+            if member == task_id or member.startswith(task_id + ":"):
+                await redis.srem(key, member)
+                return
+
     def _build_subagent_prompt(self) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.skills import SkillsLoader

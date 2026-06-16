@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import os
+import random
+import re
 import time
+import uuid as _uuid_mod
 from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
+
+# Eval config — read once at import time so tests can override via os.environ
+_EVAL_SAMPLING_RATE = float(os.environ.get("EVAL_SAMPLING_RATE", "0.2"))
+_EVAL_BADCASE_DETECTION = os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "false").lower() == "true"
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.hook import AgentHook, AgentHookContext
@@ -74,6 +80,8 @@ class AgentLoop:
         research_config: ResearchConfig | None = None,
         knowledge_search: Any = None,
         rag_store: Any = None,
+        uid: str | None = None,
+        session_factory: Any = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ResearchConfig, WebSearchConfig
 
@@ -95,7 +103,7 @@ class AgentLoop:
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
 
-        self.context = ContextBuilder(workspace, timezone=timezone, knowledge_search=knowledge_search)
+        self.context = ContextBuilder(workspace, timezone=timezone, knowledge_search=knowledge_search, uid=uid)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
@@ -117,6 +125,16 @@ class AgentLoop:
             knowledge_search=knowledge_search,
             rag_store=rag_store,
         )
+
+        self._uid = uid
+        self._session_factory = session_factory
+        self._eval_repo = None
+        if session_factory is not None:
+            try:
+                from nanobot.storage.repositories.agent_eval_repo import AgentEvalRepository
+                self._eval_repo = AgentEvalRepository(session_factory)
+            except Exception as _e:
+                logger.warning("Agent eval repo unavailable: {}", _e)
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
@@ -142,6 +160,7 @@ class AgentLoop:
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
             max_completion_tokens=provider.generation.max_tokens,
+            knowledge_search=knowledge_search,
         )
         self._register_default_tools()
         self.commands = CommandRouter()
@@ -184,6 +203,12 @@ class AgentLoop:
                     rag_store=self.rag_store,
                 )
             )
+        if self._session_factory is not None:
+            try:
+                from nanobot.agent.tools.graph_retrieval import RetrieveByEntityTool
+                self.tools.register(RetrieveByEntityTool(session_factory=self._session_factory))
+            except Exception as _e:
+                logger.warning("RetrieveByEntityTool unavailable: {}", _e)
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -207,14 +232,20 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, kb_map: dict[str, str] | None = None, run_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
         session_key = f"{channel}:{chat_id}"
+        _kb_map = kb_map or {}
 
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    if name == "message":
+                        tool.set_context(channel, chat_id, message_id)
+                    elif name == "spawn":
+                        tool.set_context(channel, chat_id, run_id=run_id)
+                    else:
+                        tool.set_context(channel, chat_id)
 
         # Set session_key for MCP tools (for query rewriting)
         for tool_name in self.tools.tool_names:
@@ -222,6 +253,8 @@ class AgentLoop:
                 tool = self.tools.get(tool_name)
                 if tool and hasattr(tool, "set_session_key"):
                     tool.set_session_key(session_key)
+                if tool and hasattr(tool, "set_kb_map"):
+                    tool.set_kb_map(_kb_map)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -254,6 +287,9 @@ class AgentLoop:
         chat_id: str = "direct",
         message_id: str | None = None,
         max_iterations_override: int | None = None,
+        user_input: str = "",
+        kb_map: dict[str, str] | None = None,
+        run_id: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -263,10 +299,13 @@ class AgentLoop:
         ``resuming=False`` means this is the final response.
         """
         loop_self = self
+        from nanobot.eval.snapshot import RunSnapshotCollector
+        _collector = RunSnapshotCollector()
 
         class _LoopHook(AgentHook):
             def __init__(self) -> None:
                 self._stream_buf = ""
+                self._first_token_fired = False
 
             def wants_streaming(self) -> bool:
                 return on_stream is not None
@@ -279,6 +318,9 @@ class AgentLoop:
                 new_clean = strip_think(self._stream_buf)
                 incremental = new_clean[len(prev_clean):]
                 if incremental and on_stream:
+                    if not self._first_token_fired:
+                        _collector.on_first_token()
+                        self._first_token_fired = True
                     await on_stream(incremental)
 
             async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
@@ -287,8 +329,8 @@ class AgentLoop:
                 self._stream_buf = ""
 
             async def before_execute_tools(self, context: AgentHookContext) -> None:
-                # Set session_key BEFORE tool execution
-                loop_self._set_tool_context(channel, chat_id, message_id)
+                # Set session_key and kb_map BEFORE tool execution
+                loop_self._set_tool_context(channel, chat_id, message_id, kb_map=kb_map, run_id=run_id)
 
                 if on_progress:
                     if not on_stream:
@@ -305,6 +347,8 @@ class AgentLoop:
                 if on_tool_call and context.tool_calls:
                     for tc, result in zip(context.tool_calls, context.tool_results or []):
                         result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                        if tc.name.startswith("retrieve_"):
+                            logger.debug("retrieve tool result sample: {}", result_str[:500])
                         is_error = result_str.startswith("Error:") if isinstance(result_str, str) else False
                         await on_tool_call({
                             "name": tc.name,
@@ -324,6 +368,7 @@ class AgentLoop:
             hook=_LoopHook(),
             error_message="Sorry, I encountered an error calling the AI model.",
             concurrent_tools=True,
+            snapshot_collector=_collector,
         ))
         self._last_usage = result.usage
         record_cache_stats(result.usage)
@@ -331,6 +376,10 @@ class AgentLoop:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
+
+        # Async snapshot save (non-blocking, best-effort)
+        self._maybe_save_snapshot(_collector, result, user_input)
+
         return result.final_content, result.tools_used, result.messages
 
     async def run(self) -> None:
@@ -463,7 +512,7 @@ class AgentLoop:
         )
 
         pending = session.messages[session.last_consolidated:]
-        success = await self.memory_consolidator.consolidate_messages(pending, agent_id=agent_id)
+        success = await self.memory_consolidator.consolidate_messages(pending, agent_id=agent_id, uid=self._uid)
 
         if success:
             session.last_consolidated = len(session.messages)
@@ -472,6 +521,47 @@ class AgentLoop:
             logger.info("Startup consolidation complete for {} messages", pending_count)
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
+
+    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str) -> None:
+        """Fire-and-forget snapshot write, subject to sampling rate."""
+        if self._eval_repo is None or self._uid is None:
+            return
+        is_failure = result.stop_reason in ("error", "tool_error", "consecutive_failures")
+        # Failures always recorded; successes sampled
+        rate = float(os.environ.get("EVAL_SAMPLING_RATE", str(_EVAL_SAMPLING_RATE)))
+        if not is_failure and random.random() > rate:
+            return
+
+        if result.stop_reason in ("error", "tool_error", "consecutive_failures"):
+            status = "failed"
+        elif result.stop_reason == "max_iterations":
+            status = "max_iterations"
+        elif result.stop_reason == "timeout":
+            status = "timeout"
+        else:
+            status = "success"
+
+        snapshot_data = collector.build(
+            run_id=str(_uuid_mod.uuid4()),
+            user_input=user_input,
+            final_response=result.final_content,
+            status=status,
+        )
+
+        async def _save() -> None:
+            try:
+                from nanobot.eval.badcase_detector import BadcaseDetector
+                snap_id = await self._eval_repo.save_snapshot(snapshot_data, self._uid)
+                if os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "false").lower() == "true":
+                    detector = BadcaseDetector(p95_tokens=None)
+                    detection = detector.detect(snapshot_data)
+                    if detection is not None:
+                        trigger, category = detection
+                        await self._eval_repo.mark_badcase(snap_id, trigger, category)
+            except Exception as _e:
+                logger.debug("Eval snapshot save failed (non-fatal): {}", _e)
+
+        self._schedule_background(_save())
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -492,6 +582,9 @@ class AgentLoop:
         custom_persona: str | None = None,
         harness: dict | None = None,
         agents_registry: list[dict] | None = None,
+        kb_bindings: list[dict] | None = None,
+        kb_map: dict[str, str] | None = None,
+        run_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -501,8 +594,8 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = await self.sessions.get_or_create(key)
-            await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id)
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
@@ -513,14 +606,18 @@ class AgentLoop:
                 tool_names=self.tools.tool_names,
                 use_cache_blocks=self._use_cache_blocks,
                 agent_id=agent_id,
+                kb_bindings=kb_bindings,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
+                user_input=msg.content,
+                kb_map=kb_map,
+                run_id=run_id,
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             await self.sessions.save(session)
-            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id))
+            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -539,9 +636,9 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return result
 
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id)
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -562,6 +659,7 @@ class AgentLoop:
             skill_names=skill_names,
             agent_id=agent_id,
             custom_persona=custom_persona,
+            kb_bindings=kb_bindings,
             total_token_budget=_total_token_budget,
             memory_budget_ratio=_memory_budget_ratio,
             agents_registry=agents_registry,
@@ -584,6 +682,9 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
             max_iterations_override=(agent_override or {}).get("max_iterations"),
+            user_input=msg.content,
+            kb_map=kb_map,
+            run_id=run_id,
         )
 
         if final_content is None:
@@ -591,7 +692,7 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         await self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id))
+        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -686,6 +787,9 @@ class AgentLoop:
         custom_persona: str | None = None,
         harness: dict | None = None,
         agents_registry: list[dict] | None = None,
+        kb_bindings: list[dict] | None = None,
+        kb_map: dict[str, str] | None = None,
+        run_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -699,4 +803,7 @@ class AgentLoop:
             custom_persona=custom_persona,
             harness=harness,
             agents_registry=agents_registry,
+            kb_bindings=kb_bindings,
+            kb_map=kb_map,
+            run_id=run_id,
         )

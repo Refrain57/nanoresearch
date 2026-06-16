@@ -442,6 +442,70 @@ def _make_provider(config: Config):
     return provider
 
 
+async def build_loop_config(config: str | None = None, workspace: str | None = None) -> dict:
+    """Build the shared AgentLoop configuration dict.
+
+    Used by the ARQ worker startup to materialize the same runtime resources
+    (bus, provider, cron, knowledge_search, rag_store, session_factory) that
+    the web server constructs inline in `serve()`.
+    """
+    from nanobot.bus.queue import MessageBus
+    from nanobot.cron.service import CronService
+    from nanobot.storage.database import (
+        check_schema_migrations,
+        get_session_factory,
+        init_engine,
+    )
+
+    cfg = _load_runtime_config(config, workspace)
+    sync_workspace_templates(cfg.workspace_path)
+
+    init_engine()
+    await check_schema_migrations()
+    factory = get_session_factory()
+
+    bus = MessageBus()
+    provider = _make_provider(cfg)
+    cron_store_path = cfg.workspace_path / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
+
+    knowledge_search = None
+    rag_store = None
+    rag_settings_obj = None
+    if cfg.tools.research.enabled:
+        try:
+            from nanobot.rag.core.settings import load_settings
+            from nanobot.research.knowledge_search import KnowledgeSearch
+            from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
+            rag_settings_obj = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(rag_settings_obj)
+            rag_store = ChromaStore(settings=rag_settings_obj, collection_name="research_chunks")
+        except Exception as e:
+            console.print(f"[yellow]Warning: knowledge search unavailable: {e}[/yellow]")
+
+    return dict(
+        bus=bus,
+        provider=provider,
+        base_workspace=cfg.workspace_path,
+        model=cfg.agents.defaults.model,
+        max_iterations=cfg.agents.defaults.max_tool_iterations,
+        context_window_tokens=cfg.agents.defaults.context_window_tokens,
+        web_search_config=cfg.tools.web.search,
+        web_proxy=cfg.tools.web.proxy or None,
+        exec_config=cfg.tools.exec,
+        cron_service=cron,
+        mcp_servers=cfg.tools.mcp_servers,
+        channels_config=cfg.channels,
+        timezone=cfg.agents.defaults.timezone,
+        research_config=cfg.tools.research,
+        knowledge_search=knowledge_search,
+        rag_store=rag_store,
+        config=cfg,
+        rag_settings=rag_settings_obj,
+        session_factory=factory,
+    )
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import load_config, set_config_path
@@ -459,6 +523,14 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
     _warn_deprecated_config_keys(config_path)
     if workspace:
         loaded.agents.defaults.workspace = workspace
+
+    # One-time migration: ensure settings.yaml api_keys exist in config.json
+    try:
+        from nanobot.config.migration import migrate_llm_keys
+        migrate_llm_keys(dry_run=False)
+    except Exception as exc:
+        logger.debug(f"LLM key migration skipped: {exc}")
+
     return loaded
 
 
@@ -1212,6 +1284,45 @@ def status():
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
 
 
+@app.command()
+def migrate(
+    apply_write: bool = typer.Option(False, "--apply", help="Actually write changes (default: dry-run only)"),
+):
+    """Migrate LLM api_keys from settings.yaml into config.json.
+
+    Back in the day, api_keys lived in both settings.yaml and config.json \u2014 a
+    maintenance hazard.  This one-time command copies any keys still only in
+    settings.yaml over to config.json so you can safely remove them from
+    settings.yaml later.
+    """
+    from nanobot.config.migration import migrate_llm_keys
+
+    report = migrate_llm_keys(dry_run=not apply_write)
+    console.print("\n[bold]Migration Report[/bold]")
+
+    if report["migrated"]:
+        console.print(f"\n[green]Migrated {len(report['migrated'])} key(s):[/green]")
+        for item in report["migrated"]:
+            console.print(f"  {item['section']} \u2192 config.json.providers.{item['provider']}  ({item['key_hint']})")
+    else:
+        console.print("\n[dim]No keys needed migration.[/dim]")
+
+    if report["skipped_already_exists"]:
+        console.print(f"\n[blue]Skipped ({len(report['skipped_already_exists'])} already in config.json):[/blue]")
+        for item in report["skipped_already_exists"]:
+            console.print(f"  {item['section']} \u2192 config.json.providers.{item['provider']}")
+
+    if report["skipped_no_provider"]:
+        console.print(f"\n[yellow]Skipped ({len(report['skipped_no_provider'])} no matching provider):[/yellow]")
+        for item in report["skipped_no_provider"]:
+            console.print(f"  {item['section']} \u2192 unknown provider {item['provider']!r}")
+
+    if report["errors"]:
+        console.print(f"\n[red]Errors ({len(report['errors'])}):[/red]")
+        for item in report["errors"]:
+            console.print(f"  {item['section']}: {item['message']}")
+
+
 # ============================================================================
 # API Server
 # ============================================================================
@@ -1236,6 +1347,13 @@ def serve(
     from nanobot.session.manager import SessionManager
     from nanobot.storage.database import init_engine, get_session_factory, check_schema_migrations
     from nanobot.server.main import create_app
+
+    # Load .env before anything reads os.environ (e.g. JWT_SECRET_KEY, DATABASE_URL)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env", override=False)
+    except ImportError:
+        pass
 
     cfg = _load_runtime_config(config, workspace)
     sync_workspace_templates(cfg.workspace_path)
@@ -1321,6 +1439,7 @@ def serve(
         channel_manager=channel_manager,
         rag_settings=settings if cfg.tools.research.enabled else None,
         allowed_models=cfg.agents.allowed_models or [],
+        config=cfg,
     )
 
     console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
