@@ -1068,14 +1068,14 @@
             <a-descriptions-item label="分析输入数">{{ uiAnalysisResult.analyzed_count }}</a-descriptions-item>
           </a-descriptions>
 
-          <template v-if="uiAnalysisResult.patterns">
+          <template v-if="uiAnalysisResult.patterns && uiAnalysisResult.patterns.length">
             <div class="section-title">共同模式</div>
             <ul style="padding-left:18px;margin-bottom:16px">
               <li v-for="(p, i) in uiAnalysisResult.patterns" :key="i" style="margin-bottom:4px">{{ p }}</li>
             </ul>
           </template>
 
-          <template v-if="uiAnalysisResult.prompt_suggestions">
+          <template v-if="uiAnalysisResult.prompt_suggestions && uiAnalysisResult.prompt_suggestions.length">
             <div class="section-title">Prompt 改进建议</div>
             <a-collapse accordion>
               <a-collapse-panel
@@ -1119,7 +1119,7 @@
             <div class="input-box" style="margin-bottom:16px">{{ modelAnalysisResult.pattern_report }}</div>
           </template>
 
-          <template v-if="modelAnalysisResult.recommendations">
+          <template v-if="modelAnalysisResult.recommendations && modelAnalysisResult.recommendations.length">
             <div class="section-title">建议</div>
             <a-collapse accordion>
               <a-collapse-panel
@@ -1610,9 +1610,9 @@ async function fetchToolHealth() {
 
 // ── Context diagnosis ────────────────────────────────────────────────────────
 async function openContextDiag() {
+  ctxDiagResult.value = null
   ctxDiagOpen.value = true
   ctxDiagLoading.value = true
-  ctxDiagResult.value = null
   try {
     ctxDiagResult.value = await contextDiagnosis({ snapshot_ids: null, top_k: 5 })
   } catch (e) {
@@ -1625,9 +1625,9 @@ async function openContextDiag() {
 
 // ── User-input analysis ──────────────────────────────────────────────────────
 async function openUserInputAnalysis() {
+  uiAnalysisResult.value = null
   uiAnalysisOpen.value = true
   uiAnalysisLoading.value = true
-  uiAnalysisResult.value = null
   try {
     uiAnalysisResult.value = await userInputAnalysis({ snapshot_ids: null })
   } catch (e) {
@@ -1640,9 +1640,9 @@ async function openUserInputAnalysis() {
 
 // ── Model analysis ───────────────────────────────────────────────────────────
 async function openModelAnalysis() {
+  modelAnalysisResult.value = null
   modelAnalysisOpen.value = true
   modelAnalysisLoading.value = true
-  modelAnalysisResult.value = null
   try {
     modelAnalysisResult.value = await getModelAnalysis(20)
   } catch (e) {
