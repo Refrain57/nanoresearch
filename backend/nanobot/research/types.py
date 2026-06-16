@@ -271,7 +271,7 @@ class ResearchResult:
     iterations: int = 0
     total_sources: int = 0
     quality_score: float = 0.0  # derived from metrics.overall
-    knowledge_result: KnowledgeProcessResult | None = None  # knowledge write result
+    report_file_path: str | None = None  # path to saved MD report file
     execution_log: ExecutionLog | None = None  # 白盒化：执行过程详情
 
     def to_dict(self) -> dict[str, Any]:
@@ -301,103 +301,12 @@ class ResearchConfig:
     default_depth: str = "normal"  # quick / normal / deep
     enable_self_evaluation: bool = True
     evaluation_threshold: float = 6.0  # trigger retry if overall score < threshold
+    # Iteration control
+    coverage_decline_threshold: float = 0.05  # stop if coverage drops by this much vs previous iteration
+    max_new_sub_questions_per_iteration: int = 3  # cap LLM-added sub-questions per refinement round
+    accumulated_results_cap: int = 50  # max results (by score) passed to synthesizer across all iterations
     # Rerank settings
     rerank_enabled: bool = True
     rerank_provider: str = "cross_encoder"  # none | cross_encoder | llm
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_k: int = 10
-
-
-# ============== Knowledge Loop Types ==============
-
-@dataclass
-class Claim:
-    """An atomic fact extracted from research."""
-    claim: str
-    type: str  # factual | interpretation | method | insight
-    is_evergreen: bool
-    source_urls: list[str]
-    confidence: float
-    evidence_ids: list[str] = field(default_factory=list)  # RAG chunk IDs
-    created_at: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "claim": self.claim,
-            "type": self.type,
-            "is_evergreen": self.is_evergreen,
-            "source_urls": self.source_urls,
-            "confidence": self.confidence,
-            "evidence_ids": self.evidence_ids,
-            "created_at": self.created_at.isoformat(),
-        }
-
-
-@dataclass
-class Insight:
-    """A transferable insight extracted from multiple claims."""
-    insight: str
-    applicable_domains: list[str]
-    confidence: float
-    is_evergreen: bool
-    supporting_claim_ids: list[str] = field(default_factory=list)  # 来源 claims IDs
-    maturity: str = "candidate"  # candidate | confirmed
-    created_at: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "insight": self.insight,
-            "supporting_claim_ids": self.supporting_claim_ids,
-            "applicable_domains": self.applicable_domains,
-            "confidence": self.confidence,
-            "is_evergreen": self.is_evergreen,
-            "maturity": self.maturity,
-            "created_at": self.created_at.isoformat(),
-        }
-
-
-@dataclass
-class KnowledgeProcessResult:
-    """Result of knowledge processing."""
-    claims_written: int
-    insights_written: int
-    duplicates_skipped: int
-    conflicts_detected: int
-
-
-@dataclass
-class BatchRefineResult:
-    """Result of batch insight refinement."""
-    processed: int
-    confirmed: int
-
-
-@dataclass
-class Correction:
-    """Record of a correction when new research contradicts existing knowledge.
-
-    Used for tracking how knowledge evolves over time and maintaining
-    correction history for transparency.
-    """
-    old_value: str  # The existing claim/insight that was contradicted
-    new_value: str  # The new claim/insight that contradicts it
-    old_confidence: float  # Confidence of the old claim
-    new_confidence: float  # Confidence of the new claim
-    source_url: str  # URL of the source that caused the correction
-    reason: str  # Explanation of why this is a correction
-    correction_type: str  # "claim" or "insight"
-    related_claim_id: str = ""  # ID of the related claim in storage
-    created_at: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "old_value": self.old_value,
-            "new_value": self.new_value,
-            "old_confidence": self.old_confidence,
-            "new_confidence": self.new_confidence,
-            "source_url": self.source_url,
-            "reason": self.reason,
-            "correction_type": self.correction_type,
-            "related_claim_id": self.related_claim_id,
-            "created_at": self.created_at.isoformat(),
-        }

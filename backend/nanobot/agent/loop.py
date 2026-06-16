@@ -17,7 +17,7 @@ from loguru import logger
 
 # Eval config — read once at import time so tests can override via os.environ
 _EVAL_SAMPLING_RATE = float(os.environ.get("EVAL_SAMPLING_RATE", "0.2"))
-_EVAL_BADCASE_DETECTION = os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "false").lower() == "true"
+_EVAL_BADCASE_DETECTION = os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "true").lower() == "true"
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.hook import AgentHook, AgentHookContext
@@ -82,6 +82,7 @@ class AgentLoop:
         rag_store: Any = None,
         uid: str | None = None,
         session_factory: Any = None,
+        rag_settings: Any = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ResearchConfig, WebSearchConfig
 
@@ -100,6 +101,7 @@ class AgentLoop:
         self.research_config = research_config or ResearchConfig()
         self.knowledge_search = knowledge_search
         self.rag_store = rag_store
+        self.rag_settings = rag_settings
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
 
@@ -124,6 +126,8 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
             knowledge_search=knowledge_search,
             rag_store=rag_store,
+            settings=rag_settings,
+            uid=uid,
         )
 
         self._uid = uid
@@ -201,6 +205,9 @@ class AgentLoop:
                     config=self.research_config,
                     knowledge_search=self.knowledge_search,
                     rag_store=self.rag_store,
+                    settings=self.rag_settings,
+                    uid=self._uid,
+                    workspace=self.workspace,
                 )
             )
         if self._session_factory is not None:
@@ -360,9 +367,18 @@ class AgentLoop:
             def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
                 return loop_self._strip_think(content)
 
+        # Wrap tools with sandbox recording for eval snapshot collection
+        if self._eval_repo is not None and self._uid is not None:
+            from nanobot.eval.sandbox import SandboxedToolRegistry
+            _sandbox = SandboxedToolRegistry(self.tools, mode="record")
+            _tools_for_run = _sandbox
+        else:
+            _sandbox = None
+            _tools_for_run = self.tools
+
         result = await self.runner.run(AgentRunSpec(
             initial_messages=initial_messages,
-            tools=self.tools,
+            tools=_tools_for_run,
             model=self.model,
             max_iterations=max_iterations_override or self.max_iterations,
             hook=_LoopHook(),
@@ -377,8 +393,11 @@ class AgentLoop:
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
 
+        # Export tool recordings from sandbox (if recording was active)
+        _tool_recordings = _sandbox.export_recordings() if _sandbox and _sandbox.recordings else None
+
         # Async snapshot save (non-blocking, best-effort)
-        self._maybe_save_snapshot(_collector, result, user_input)
+        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings)
 
         return result.final_content, result.tools_used, result.messages
 
@@ -522,11 +541,11 @@ class AgentLoop:
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
 
-    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str) -> None:
+    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None) -> None:
         """Fire-and-forget snapshot write, subject to sampling rate."""
         if self._eval_repo is None or self._uid is None:
             return
-        is_failure = result.stop_reason in ("error", "tool_error", "consecutive_failures")
+        is_failure = result.stop_reason in ("error", "tool_error", "consecutive_failures", "max_iterations")
         # Failures always recorded; successes sampled
         rate = float(os.environ.get("EVAL_SAMPLING_RATE", str(_EVAL_SAMPLING_RATE)))
         if not is_failure and random.random() > rate:
@@ -551,8 +570,12 @@ class AgentLoop:
         async def _save() -> None:
             try:
                 from nanobot.eval.badcase_detector import BadcaseDetector
-                snap_id = await self._eval_repo.save_snapshot(snapshot_data, self._uid)
-                if os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "false").lower() == "true":
+                snap_id = await self._eval_repo.save_snapshot(
+                    snapshot_data, self._uid,
+                    system_prompt_version="production",
+                    tool_recordings=tool_recordings,
+                )
+                if os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "true").lower() == "true":
                     detector = BadcaseDetector(p95_tokens=None)
                     detection = detector.detect(snapshot_data)
                     if detection is not None:

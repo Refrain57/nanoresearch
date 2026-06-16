@@ -11,8 +11,39 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
+
 from nanobot.rag.core.types import Document
 from nanobot.rag.libs.loader.base_loader import BaseLoader
+
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Parse YAML frontmatter from markdown text.
+
+    Returns (frontmatter_dict, remaining_text). If no frontmatter or
+    parse failure, returns ({}, original_text).
+    """
+    if not text.startswith("---"):
+        return {}, text
+
+    end_idx = text.find("---", 3)
+    if end_idx == -1:
+        return {}, text
+
+    frontmatter_text = text[3:end_idx].strip()
+    remaining = text[end_idx + 3 :].lstrip("\n\r")
+
+    if not frontmatter_text:
+        return {}, remaining
+
+    try:
+        data = yaml.safe_load(frontmatter_text)
+        if isinstance(data, dict):
+            return data, remaining
+    except yaml.YAMLError:
+        pass
+
+    return {}, text
 
 
 class MarkdownLoader(BaseLoader):
@@ -59,17 +90,22 @@ class MarkdownLoader(BaseLoader):
         if not text_content.strip():
             raise ValueError(f"Empty Markdown file: {path}")
 
+        # Parse YAML frontmatter
+        frontmatter, text_content = _parse_frontmatter(text_content)
+
         # Compute document hash for unique ID
         doc_hash = self._compute_file_hash(path)
         doc_id = f"doc_{doc_hash[:16]}"
 
-        # Initialize metadata
-        metadata: Dict[str, Any] = {
+        # Initialize metadata with frontmatter fields (system fields override)
+        metadata: Dict[str, Any] = {**frontmatter}
+        # System fields always take priority
+        metadata.update({
             "source_path": str(path),
             "doc_type": "markdown",
             "doc_hash": doc_hash,
             "file_name": path.name,
-        }
+        })
 
         # Extract title from first H1 heading
         title = self._extract_title(text_content)

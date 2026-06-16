@@ -613,19 +613,20 @@ def gateway(
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # Create knowledge search and rag store for research knowledge loop
+    # Create knowledge search, rag store, and RAG settings for Agent research
     knowledge_search = None
     rag_store = None
+    rag_settings = None
     if config.tools.research.enabled:
         try:
             from nanobot.rag.core.settings import load_settings
             from nanobot.research.knowledge_search import KnowledgeSearch
             from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
-            settings = load_settings()
-            knowledge_search = KnowledgeSearch.from_settings(settings)
+            rag_settings = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(rag_settings)
             # Create RAG store for chunks (separate collection)
             rag_store = ChromaStore(
-                settings=settings,
+                settings=rag_settings,
                 collection_name="research_chunks",
             )
         except Exception as e:
@@ -651,6 +652,7 @@ def gateway(
         research_config=config.tools.research,
         knowledge_search=knowledge_search,
         rag_store=rag_store,
+        rag_settings=rag_settings,
     )
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
@@ -862,16 +864,17 @@ def agent(
     # Create knowledge search and rag store for research knowledge loop
     knowledge_search = None
     rag_store = None
+    rag_settings = None
     if config.tools.research.enabled:
         try:
             from nanobot.rag.core.settings import load_settings
             from nanobot.research.knowledge_search import KnowledgeSearch
             from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
-            settings = load_settings()
-            knowledge_search = KnowledgeSearch.from_settings(settings)
+            rag_settings = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(rag_settings)
             # Create RAG store for chunks (separate collection)
             rag_store = ChromaStore(
-                settings=settings,
+                settings=rag_settings,
                 collection_name="research_chunks",
             )
         except Exception as e:
@@ -900,6 +903,7 @@ def agent(
         research_config=config.tools.research,
         knowledge_search=knowledge_search,
         rag_store=rag_store,
+        rag_settings=rag_settings,
     )
 
     # Shared reference for progress callbacks
@@ -1375,14 +1379,15 @@ def serve(
 
     knowledge_search = None
     rag_store = None
+    rag_settings = None
     if cfg.tools.research.enabled:
         try:
             from nanobot.rag.core.settings import load_settings
             from nanobot.research.knowledge_search import KnowledgeSearch
             from nanobot.rag.libs.vector_store.chroma_store import ChromaStore
-            settings = load_settings()
-            knowledge_search = KnowledgeSearch.from_settings(settings)
-            rag_store = ChromaStore(settings=settings, collection_name="research_chunks")
+            rag_settings = load_settings()
+            knowledge_search = KnowledgeSearch.from_settings(rag_settings)
+            rag_store = ChromaStore(settings=rag_settings, collection_name="research_chunks")
         except Exception as e:
             console.print(f"[yellow]Warning: knowledge search unavailable: {e}[/yellow]")
 
@@ -1407,6 +1412,7 @@ def serve(
         research_config=cfg.tools.research,
         knowledge_search=knowledge_search,
         rag_store=rag_store,
+        rag_settings=rag_settings,
     )
 
     # Shared config for per-uid web API loops (workspace and session_manager set per user)
@@ -1427,6 +1433,7 @@ def serve(
         research_config=cfg.tools.research,
         knowledge_search=knowledge_search,
         rag_store=rag_store,
+        rag_settings=rag_settings,
     )
 
     channel_manager = ChannelManager(cfg, bus)
@@ -1437,7 +1444,7 @@ def serve(
         channel_loop, factory,
         loop_config=loop_config,
         channel_manager=channel_manager,
-        rag_settings=settings if cfg.tools.research.enabled else None,
+        rag_settings=rag_settings if cfg.tools.research.enabled else None,
         allowed_models=cfg.agents.allowed_models or [],
         config=cfg,
     )

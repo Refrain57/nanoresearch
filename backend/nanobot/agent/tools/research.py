@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -19,11 +20,9 @@ class ResearchTool(Tool):
 
     name = "research"
     description = (
-        "启动自主网络研究任务（耗时 10-30min）。"
-        "适用于需要大量新信息支撑的深度研究场景。"
-        "调用前请先判断：如果知识库（research_claims/research_insights）已有相关结论，"
-        "直接使用 RAG 检索即可，无需启动完整研究流程。"
-        "重要：这是耗时任务，必须通过 spawn 工具后台执行。"
+        "启动自主网络研究任务，用于获取外部最新信息。"
+        "适用于用户提出的调研类、分析类问题。"
+        "耗时 10-30min，必须通过 spawn 工具后台执行。"
         "支持 action: start/status/list。"
     )
     parameters = {
@@ -61,21 +60,11 @@ class ResearchTool(Tool):
         config: ResearchConfig | None = None,
         knowledge_search: Any = None,
         rag_store: Any = None,
+        *,
+        settings: Any = None,
+        uid: str | None = None,
+        workspace: Path | None = None,
     ) -> None:
-        # Create knowledge processor if knowledge_search is available
-        knowledge_processor = None
-        if knowledge_search:
-            from nanobot.research.knowledge_processor import KnowledgeProcessor
-            from nanobot.research.insight_tracker import InsightTracker
-            tracker = InsightTracker()
-            knowledge_processor = KnowledgeProcessor(
-                provider=provider,
-                model=model,
-                knowledge_search=knowledge_search,
-                tracker=tracker,
-                rag_store=rag_store,
-            )
-
         self._runner = ResearchRunner(
             provider=provider,
             model=model,
@@ -83,8 +72,10 @@ class ResearchTool(Tool):
             web_fetch_tool=web_fetch_tool,
             config=config,
             knowledge_search=knowledge_search,
-            knowledge_processor=knowledge_processor,
             rag_store=rag_store,
+            settings=settings,
+            uid=uid,
+            workspace=workspace,
         )
         self._results: dict[str, ResearchResult] = {}
 
@@ -116,16 +107,8 @@ class ResearchTool(Tool):
                 f"",
             ]
 
-            # Include knowledge write result if available
-            if result.knowledge_result:
-                kr = result.knowledge_result
-                summary.append(f"**知识写入**: {kr.claims_written} claims, {kr.insights_written} insights")
-                if kr.duplicates_skipped > 0:
-                    summary.append(f"**去重跳过**: {kr.duplicates_skipped} 条")
-                if kr.conflicts_detected > 0:
-                    summary.append(f"**冲突检测**: {kr.conflicts_detected} 条")
-            else:
-                summary.append(f"**知识写入**: 未配置知识处理器")
+            if result.report_file_path:
+                summary.append(f"**报告文件**: `{result.report_file_path}`")
 
             summary.append("")
             summary.append("---")

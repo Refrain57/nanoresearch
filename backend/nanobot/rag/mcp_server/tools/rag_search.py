@@ -88,62 +88,24 @@ class RAGSearchTool:
 
     @property
     def name(self) -> str:
-        return "rag_search"
+        return "kb_search"
 
     @property
     def description(self) -> str:
-        return """统一的 RAG 检索入口，用于从知识库中检索相关信息。
+        return """查询用户上传的知识库文档和历史研究报告。
 
-## 何时使用
-- 需要从文档库中查找信息时
-- 需要进行多轮检索以获取完整信息时
-- 需要对比、分析多个主题时
+研究报告在生成后会自动入库，因此可以通过此工具搜索到之前的研究成果。
+当用户问到可能和历史研究相关的问题时（如"之前研究过什么"、"上次关于 X 的结论"），优先使用此工具查询。
 
-## 功能特点
+根据查询复杂度自动选择检索路径：简单查询直接检索，复杂查询启动多轮内部检索循环。
 
-1. **智能查询分类**
-   - 简单查询：直接执行混合检索，快速返回
-   - 复杂查询：启动内部循环，多轮检索验证
+若需要自己控制每一跳检索（如多跳推理），请用 kb_retrieve。
 
-2. **自动验证**
-   - 检索结果自动验证充分性
-   - 结果不足时自动补充检索
-
-3. **引用构建**
-   - 自动构建结构化引用
-   - 便于追溯信息来源
-
-## 参数说明
-
-- query: 用户查询（必填）
-- collection: 检索集合名称（默认 "default"）
-- context: 外部上下文，用于解析指代词（可选）
-- max_iterations: 最大迭代次数（默认 5）
-
-## 返回格式
-
-返回 JSON 格式结果，包含：
-- success: 是否成功
-- chunks: 检索到的文档片段
-- citations: 引用信息
-- summary: 检索摘要
-- iterations: 实际迭代次数
-
-## 示例
-
-```python
-# 简单查询
-rag_search(query="PGSR 的核心思想是什么？")
-
-# 带上下文的查询
-rag_search(
-    query="它的性能如何？",
-    context="用户之前在讨论 PGSR 方法"
-)
-
-# 复杂对比查询
-rag_search(query="PGSR 和 SuGaR 的性能对比")
-```"""
+参数：
+- query: 查询内容（必填）
+- kb_id: 知识库 ID（可选，有多个绑定知识库时指定；只有一个时自动使用）
+- context: 外部上下文，用于解析"它""这个"等指代词（可选）
+- max_iterations: 内部最大检索轮数（默认 5）"""
 
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -154,11 +116,6 @@ rag_search(query="PGSR 和 SuGaR 的性能对比")
                     "type": "string",
                     "description": "用户查询",
                 },
-                "collection": {
-                    "type": "string",
-                    "default": "default",
-                    "description": "检索集合名称",
-                },
                 "context": {
                     "type": "string",
                     "description": "外部上下文，用于解析指代词（如'它'、'这个'）",
@@ -167,6 +124,10 @@ rag_search(query="PGSR 和 SuGaR 的性能对比")
                     "type": "integer",
                     "default": 5,
                     "description": "最大迭代次数（复杂查询时使用）",
+                },
+                "kb_id": {
+                    "type": "string",
+                    "description": "知识库 ID，不传时自动搜索默认知识库",
                 },
             },
             "required": ["query"],
@@ -252,8 +213,28 @@ rag_search(query="PGSR 和 SuGaR 的性能对比")
 
             # Get fused results from the round
             fused_chunks = manager.fuse(round_id=round_id, strategy="rrf", top_k=10)
-
             _log(f"Got {len(fused_chunks)} fused chunks")
+
+            # Auto-expand neighbors for high-confidence hits (score >= 0.85).
+            # When a chunk scores this high it's a genuine hit; the data we need
+            # (e.g. a table) is likely in the adjacent chunk.  This removes the
+            # dependency on classify_complexity for structural coverage.
+            high_score = [c for c in fused_chunks if c.get("score", 0) >= 0.85]
+            if high_score:
+                try:
+                    from nanobot.rag.internal_loop.tools import InternalTools
+                    neighbor_chunks = await InternalTools().expand_with_neighbors(
+                        fused_chunks=high_score,
+                        collection=collection,
+                    )
+                    if neighbor_chunks:
+                        existing_ids = {c.get("chunk_id") for c in fused_chunks}
+                        new_neighbors = [c for c in neighbor_chunks if c.get("chunk_id") not in existing_ids]
+                        fused_chunks = fused_chunks + new_neighbors
+                        _log(f"Auto-expanded {len(new_neighbors)} neighbor chunks (high-score={len(high_score)})")
+                except Exception as e:
+                    _log(f"Neighbor expansion skipped: {e}")
+
             return build_json_response({
                 "success": True,
                 "chunks": fused_chunks,
@@ -320,8 +301,13 @@ async def rag_search_handler(
     collection: str = "default",
     context: Optional[str] = None,
     max_iterations: int = 5,
+    kb_id: Optional[str] = None,
 ) -> "MCPToolResponse":
-    """Handler for rag_search MCP tool."""
+    """Handler for rag_search MCP tool.
+
+    Note: 'collection' is injected by the main process (mcp.py) and
+    should NOT be passed by the Agent. The Agent should use 'kb_id' instead.
+    """
     tool = RAGSearchTool()
     return await tool.execute(
         query=query,
@@ -344,4 +330,4 @@ def register_tools(protocol_handler: Any) -> None:
         input_schema=tool.input_schema,
         handler=rag_search_handler,
     )
-    _log(f"Registered RAG tool: {tool.name}")
+    _log(f"Registered MCP tool: {tool.name}")

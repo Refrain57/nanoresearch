@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from loguru import logger
@@ -19,8 +22,8 @@ from nanobot.research.types import (
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
-    from nanobot.research.knowledge_processor import KnowledgeProcessor
     from nanobot.research.knowledge_search import KnowledgeSearch
+
 
 # Import sub-components lazily to avoid circular imports
 _PLANNER: type | None = None
@@ -28,25 +31,22 @@ _SEARCHER: type | None = None
 _SYNTHESIZER: type | None = None
 _REFINER: type | None = None
 _REPORTER: type | None = None
-_KNOWLEDGE_PROCESSOR: type | None = None
 
 
 def _lazy_imports() -> None:
-    global _PLANNER, _SEARCHER, _SYNTHESIZER, _REFINER, _REPORTER, _KNOWLEDGE_PROCESSOR
+    global _PLANNER, _SEARCHER, _SYNTHESIZER, _REFINER, _REPORTER
     if _PLANNER is None:
         from nanobot.research.planner import ResearchPlanner
         from nanobot.research.searcher import SearchOrchestrator
         from nanobot.research.synthesizer import InformationSynthesizer
         from nanobot.research.refiner import ResearchRefiner
         from nanobot.research.reporter import ReportGenerator
-        from nanobot.research.knowledge_processor import KnowledgeProcessor
 
         _PLANNER = ResearchPlanner
         _SEARCHER = SearchOrchestrator
         _SYNTHESIZER = InformationSynthesizer
         _REFINER = ResearchRefiner
         _REPORTER = ReportGenerator
-        _KNOWLEDGE_PROCESSOR = KnowledgeProcessor
 
 
 class ResearchRunner:
@@ -70,8 +70,11 @@ class ResearchRunner:
         web_fetch_tool: Any,
         config: ResearchConfig | None = None,
         knowledge_search: KnowledgeSearch | None = None,
-        knowledge_processor: KnowledgeProcessor | None = None,
         rag_store: Any = None,  # ChromaStore for user uploaded documents
+        *,
+        settings: Any = None,  # RAG Settings for auto-ingest + HybridSearch
+        uid: str | None = None,
+        workspace: Path | None = None,
     ) -> None:
         _lazy_imports()
         self.provider = provider
@@ -84,10 +87,12 @@ class ResearchRunner:
         self.refiner = _REFINER(provider, model)
         self.reporter = _REPORTER(provider, model)
 
-        # Knowledge loop components (optional)
         self.knowledge_search = knowledge_search
-        self.knowledge_processor = knowledge_processor
-        self.rag_store = rag_store  # User uploaded documents
+        self.rag_store = rag_store
+        self.settings = settings
+        self.uid = uid
+        self.workspace = workspace
+        self._hs: Any = None  # lazy HybridSearch
 
         self._results: dict[str, ResearchResult] = {}
 
@@ -132,6 +137,13 @@ class ResearchRunner:
             default_depth=self.config.default_depth,
             enable_self_evaluation=self.config.enable_self_evaluation,
             evaluation_threshold=self.config.evaluation_threshold,
+            coverage_decline_threshold=self.config.coverage_decline_threshold,
+            max_new_sub_questions_per_iteration=self.config.max_new_sub_questions_per_iteration,
+            accumulated_results_cap=self.config.accumulated_results_cap,
+            rerank_enabled=self.config.rerank_enabled,
+            rerank_provider=self.config.rerank_provider,
+            rerank_model=self.config.rerank_model,
+            rerank_top_k=self.config.rerank_top_k,
         )
         # Also update searcher's search_count to match
         self.searcher.search_count = max_sources
@@ -158,6 +170,10 @@ class ResearchRunner:
         )
 
         try:
+            # Reset per-run searcher state so cross-iteration dedup doesn't bleed across topics
+            self.searcher._global_seen_urls = set()
+            self.searcher._failed_domains = {}
+
             # Phase 0: Pre-query existing knowledge
             existing_context = ""
             if self.knowledge_search:
@@ -193,25 +209,35 @@ class ResearchRunner:
             logger.info("ResearchRunner[{}]: plan created with {} sub-questions", rid, len(plan.sub_questions))
 
             synthesis = None
+            prev_coverage: float | None = None
+            accumulated_results: list = []  # cross-iteration result pool (Bug 2A)
 
             # Phase 2-4: Search + Synthesize + Iterate
             for iteration in range(max_iterations):
                 result.status = ResearchStatus.SEARCHING
                 logger.info("ResearchRunner[{}]: iteration {} — searching", rid, iteration)
 
-                # 收集本轮搜索的关键词
+                # 收集本轮搜索的关键词（仅 pending 子问题，与 searcher 的过滤对齐）
                 keywords_searched = []
                 for sq in plan.sub_questions:
-                    keywords_searched.extend(sq.keywords)
+                    if sq.status == "pending":
+                        keywords_searched.extend(sq.keywords)
 
                 search_results, rerank_details = await self.searcher.search(plan)
                 result.total_sources += len(search_results)
                 logger.info(
-                    "ResearchRunner[{}]: iteration {} — found {} results (total {})",
+                    "ResearchRunner[{}]: iteration {} — found {} new results (total {})",
                     rid, iteration, len(search_results), result.total_sources,
                 )
 
-                # 构建本轮���代日志
+                # Accumulate results across iterations; keep top-N by final_score (Bug 2A)
+                accumulated_results.extend(search_results)
+                if len(accumulated_results) > adjusted_config.accumulated_results_cap:
+                    accumulated_results = sorted(
+                        accumulated_results, key=lambda r: r.final_score, reverse=True
+                    )[:adjusted_config.accumulated_results_cap]
+
+                # 构建本轮迭代日志
                 iteration_log = SearchIterationLog(
                     iteration=iteration,
                     sub_questions_searched=keywords_searched,
@@ -221,25 +247,27 @@ class ResearchRunner:
                 )
 
                 result.status = ResearchStatus.SYNTHESIZING
-                logger.info("ResearchRunner[{}]: iteration {} — synthesizing", rid, iteration)
-                synthesis = await self.synthesizer.synthesize(search_results, plan)
+                logger.info("ResearchRunner[{}]: iteration {} — synthesizing {} accumulated results", rid, iteration, len(accumulated_results))
+                synthesis = await self.synthesizer.synthesize(accumulated_results, plan)
 
                 # 记录本轮覆盖度
                 iteration_log.coverage_score = synthesis.coverage_score
 
-                # Check if we should continue iterating
-                if not self.refiner.should_continue(synthesis, iteration, adjusted_config):
+                # Check if we should continue iterating (pass prev_coverage for trend detection)
+                if not self.refiner.should_continue(synthesis, iteration, adjusted_config, prev_coverage=prev_coverage):
+                    stop_reason = "coverage_threshold" if synthesis.coverage_score >= adjusted_config.min_coverage_threshold else "coverage_declining"
                     logger.info(
                         "ResearchRunner[{}]: stopping after {} iterations, coverage={:.2f}",
                         rid, iteration + 1, synthesis.coverage_score,
                     )
                     iteration_log.stopped = True
-                    iteration_log.stop_reason = "coverage_threshold"
+                    iteration_log.stop_reason = stop_reason
                     execution_log.iterations.append(iteration_log)
                     execution_log.final_coverage_score = synthesis.coverage_score
-                    execution_log.stop_reason = "coverage_threshold"
+                    execution_log.stop_reason = stop_reason
                     break
 
+                prev_coverage = synthesis.coverage_score
                 iteration_log.stopped = False
                 execution_log.iterations.append(iteration_log)
 
@@ -252,6 +280,7 @@ class ResearchRunner:
                     iteration_log.stopped = True
                     iteration_log.stop_reason = "no_gaps"
                     execution_log.stop_reason = "no_gaps"
+                    execution_log.final_coverage_score = synthesis.coverage_score
                     break
 
                 plan = updated_plan
@@ -266,7 +295,7 @@ class ResearchRunner:
             # Phase 5: Generate report
             result.status = ResearchStatus.COMPLETED
             if synthesis is None:
-                synthesis = await self.synthesizer.synthesize([], plan)
+                synthesis = await self.synthesizer.synthesize(accumulated_results or [], plan)
 
             result.synthesis = synthesis
             result.report = await self.reporter.generate(topic, synthesis, plan)
@@ -294,30 +323,16 @@ class ResearchRunner:
                 rid, result.iterations, result.total_sources, result.quality_score,
             )
 
-            # Phase 7: Process result into knowledge base
-            if self.knowledge_processor:
+            # Phase 7: Save report as MD file (auto-ingested into RAG pipeline)
+            if result.report:
                 try:
-                    knowledge_result = await self.knowledge_processor.process(result)
-                    logger.info(
-                        "ResearchRunner[{}]: knowledge processed - {} claims, {} insights",
-                        rid, knowledge_result.claims_written, knowledge_result.insights_written,
-                    )
-                    # Store knowledge result in the research result for visibility
-                    result.knowledge_result = knowledge_result
-                    # 记录到执行日志
-                    execution_log.knowledge_write = {
-                        "claims": knowledge_result.claims_written,
-                        "insights": knowledge_result.insights_written,
-                        "duplicates": knowledge_result.duplicates_skipped,
-                        "conflicts": knowledge_result.conflicts_detected,
-                    }
+                    file_path = self._save_report_md(rid, topic, result.report, result.quality_score)
+                    result.report_file_path = str(file_path)
+                    logger.info("ResearchRunner[{}]: report saved to {}", rid, file_path)
+                    # Phase 7b: Auto-ingest into RAG (fire-and-forget)
+                    asyncio.create_task(self._auto_ingest(str(file_path)))
                 except Exception as e:
-                    # Re-raise so the failure is visible to the caller
-                    logger.error(
-                        "ResearchRunner[{}]: knowledge processing failed: {}",
-                        rid, e,
-                    )
-                    raise
+                    logger.warning("ResearchRunner[{}]: failed to save report MD: {}", rid, e)
 
             # 绑定执行日志到结果（白盒化）
             result.execution_log = execution_log
@@ -339,111 +354,121 @@ class ResearchRunner:
 
     # ============== Knowledge Loop Methods ==============
 
-    async def _get_existing_knowledge(
-        self, topic: str, token_budget: int = 1500
-    ) -> str:
-        """Pre-query existing knowledge for a topic with token budget management.
+    @property
+    def _hybrid_search(self) -> Any | None:
+        """Lazy-initialized HybridSearch from settings."""
+        if self._hs is None and self.settings is not None:
+            try:
+                from nanobot.rag.core.query_engine.hybrid_search import create_hybrid_search
+                self._hs = create_hybrid_search(self.settings)
+            except Exception as e:
+                logger.warning("Failed to create HybridSearch: {}", e)
+        return self._hs
 
-        Searches both claims and insights, formats them for the planner,
-        and truncates to fit within the token budget.
-
-        Args:
-            topic: The research topic.
-            token_budget: Maximum tokens to use for knowledge context (default 1500).
-
-        Returns:
-            Formatted context string with existing knowledge, or empty string.
-        """
-        if not self.knowledge_search:
+    async def _get_existing_knowledge(self, topic: str, token_budget: int = 1500) -> str:
+        """Retrieve relevant existing research reports from RAG."""
+        hs = self._hybrid_search
+        if not hs:
             return ""
 
         try:
-            claims, insights = await self.knowledge_search.search_all(topic)
-
-            context = ""
-            tokens_used = 0
-
-            # Helper function to estimate tokens (rough: chars / 2)
-            def estimate_tokens(text: str) -> int:
-                return len(text) // 2
-
-            # Helper function to check budget
-            def can_add(text: str) -> bool:
-                return tokens_used + estimate_tokens(text) < token_budget
-
-            # Add insights first (higher priority for guiding research)
-            # Sort by confidence, confirmed insights first
-            if insights:
-                # Sort: confirmed first (maturity="confirmed"), then by confidence
-                sorted_insights = sorted(
-                    insights,
-                    key=lambda x: (
-                        0 if x.get("metadata", {}).get("maturity") == "confirmed" else 1,
-                        -x.get("metadata", {}).get("confidence", 0),
-                    )
-                )
-
-                context += "## 已有相关规律 (Insights)\n"
-                context += "以下是从过往研究中提炼的跨域规律：\n"
-
-                for i in sorted_insights:
-                    text = i.get("text", i.get("metadata", {}).get("text", ""))
-                    if not text:
-                        continue
-
-                    maturity = i.get("metadata", {}).get("maturity", "candidate")
-                    maturity_tag = "✓" if maturity == "confirmed" else "?"
-                    confidence = i.get("metadata", {}).get("confidence", 0.5)
-                    line = f"- [{maturity_tag}] {text} (置信度: {confidence:.0%})\n"
-
-                    if can_add(line):
-                        context += line
-                        tokens_used += estimate_tokens(line)
-                    else:
-                        # Budget exhausted
-                        context += "- [更多规律...] (预算限制)\n"
-                        break
-
-                context += "\n"
-
-            # Add claims
-            # Sort by confidence (high confidence first)
-            if claims:
-                sorted_claims = sorted(
-                    claims,
-                    key=lambda x: -x.get("metadata", {}).get("confidence", 0),
-                )
-
-                context += "## 已知相关事实 (Claims)\n"
-                context += "以下是过往研究中的具体发现：\n"
-
-                for c in sorted_claims:
-                    text = c.get("text", c.get("metadata", {}).get("text", ""))
-                    if not text:
-                        continue
-
-                    confidence = c.get("metadata", {}).get("confidence", 0.5)
-                    line = f"- {text} (置信度: {confidence:.0%})\n"
-
-                    if can_add(line):
-                        context += line
-                        tokens_used += estimate_tokens(line)
-                    else:
-                        # Budget exhausted
-                        context += "- [更多事实...] (预算限制)\n"
-                        break
-
-            # Log token usage
-            logger.info(
-                f"ResearchRunner: knowledge context uses ~{tokens_used * 2} chars, "
-                f"~{tokens_used} tokens (budget: {token_budget})"
+            filters: dict = {"source": "research"}
+            if self.uid:
+                filters["uid"] = self.uid
+            results = await hs.async_search(
+                query=topic,
+                top_k=5,
+                filters=filters,
             )
+            if not results:
+                return ""
 
-            return context
+            # Group by document for readable formatting
+            doc_groups: dict[str, list[tuple[float, str]]] = {}
+            for r in results:
+                src = r.metadata.get("source_path", "unknown")
+                doc_groups.setdefault(src, []).append((r.score, r.text))
+
+            parts: list[str] = []
+            token_used = 0
+            for src, snippets in doc_groups.items():
+                head = f"### 来自 {Path(src).name}\n"
+                body_parts: list[str] = []
+                for score, text in snippets:
+                    line = f"[relevance={score:.2f}] {text.strip()}"
+                    estimated = len(line) // 4
+                    if token_used + estimated > token_budget:
+                        break
+                    body_parts.append(line)
+                    token_used += estimated
+
+                if body_parts:
+                    parts.append(head + "\n" + "\n".join(body_parts) + "\n")
+
+            return "\n".join(parts) if parts else ""
 
         except Exception as e:
-            logger.warning(f"ResearchRunner: failed to get existing knowledge: {e}")
+            logger.warning("_get_existing_knowledge failed: {}", e)
             return ""
+
+    def _save_report_md(
+        self, rid: str, topic: str, report: str, quality_score: float
+    ) -> Path:
+        """Save the research report as an MD file for optional user-confirmed ingest.
+
+        The file includes YAML front-matter with source=research so the ingestion
+        pipeline can tag it correctly in the KB document list.
+        """
+        notes_dir = (
+            self.workspace / "research_notes"
+            if self.workspace
+            else Path("~/.nanoresearch/research_notes").expanduser()
+        )
+        notes_dir.mkdir(parents=True, exist_ok=True)
+
+        slug = re.sub(r"[^\w\u4e00-\u9fff]+", "_", topic)[:40]
+        filename = f"{rid}_{slug}.md"
+        file_path = notes_dir / filename
+
+        uid_line = f"uid: {self.uid}\n" if self.uid else ""
+        content = f"""---
+title: {topic}
+research_id: {rid}
+source: research
+{uid_line}quality_score: {quality_score:.1f}
+created_at: {datetime.now().isoformat()}
+---
+
+# {topic}
+
+{report}
+"""
+        file_path.write_text(content, encoding="utf-8")
+        return file_path
+
+    async def _auto_ingest(self, file_path: str) -> None:
+        """Background-ingest the research report MD into the RAG pipeline."""
+        if not self.settings:
+            return
+        try:
+            from nanobot.rag.ingestion.pipeline import IngestionPipeline
+
+            loop = asyncio.get_running_loop()
+            collection = self.settings.vector_store.collection_name
+            pipeline = IngestionPipeline(
+                self.settings,
+                collection=collection,
+                force=False,
+            )
+            result = await loop.run_in_executor(
+                None, lambda: pipeline.run(file_path)
+            )
+            if result.success:
+                logger.info("Auto-ingest OK: {} -> {} chunks", file_path, result.chunk_count)
+            else:
+                logger.warning("Auto-ingest failed: {}", result.error)
+        except Exception as e:
+            logger.warning("Auto-ingest error: {}", e)
 
     async def _get_document_context(self, topic: str, top_k: int = 10) -> str:
         """Query user-uploaded documents from document_store (default collection).
@@ -462,7 +487,7 @@ class ResearchRunner:
             # Get embedding from knowledge_search
             if not self.knowledge_search:
                 return ""
-            vector = self.knowledge_search._embed(topic)
+            vector = self.knowledge_search.dense_encoder.embed([topic])[0]
 
             # Query default collection (user uploaded documents)
             results = self.rag_store.query(

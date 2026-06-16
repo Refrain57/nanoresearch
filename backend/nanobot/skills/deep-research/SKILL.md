@@ -15,7 +15,7 @@ description: 调用 research Tool 进行系统性网络研究。当用户需要�
 - 综合：提取结构化发现
 - 迭代：根据覆盖度自动决定是否继续搜索
 - 报告：生成带引用的研究报告
-- 知识写入：提取 claims/insights 到知识库
+- 知识沉淀：自动保存研究报告到知识库，后续研究可复用
 
 ---
 
@@ -85,13 +85,8 @@ description: 调用 research Tool 进行系统性网络研究。当用户需要�
         "search_results_count": 12,
         "coverage_score": 0.65
       }
-    ],
-    "knowledge_write": {
-      "claims": 5,
-      "insights": 2
-    }
+    ]
   }
-}
 ```
 
 ---
@@ -185,12 +180,9 @@ stop_reason = "max_iterations" 且 final_coverage_score < 0.7
 → 覆盖不足，建议用 depth="deep" 重跑
 ```
 
-### 3. 利用 knowledge_write
+### 3. 利用报告中引用的来源
 
-```
-knowledge_write.claims = 5
-→ 研究结果已写入知识库，后续可复用
-```
+研究报告中的引用来源可直接用于验证和溯源。
 
 ---
 
@@ -232,5 +224,5 @@ research(action="start", topic="AI 医疗诊断技术", depth="deep")
 - iterations: 3-5
 - total_sources: 30-50
 - report: 详细报告 + 引用
-- knowledge_write: 多条 claims/insights
 ```
+
