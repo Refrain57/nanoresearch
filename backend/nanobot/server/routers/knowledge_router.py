@@ -7,7 +7,7 @@ import os
 import tempfile
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 
 from nanobot.server.middleware.auth import get_current_user
@@ -30,6 +30,33 @@ def _rag_settings(request: Request):
     return settings
 
 
+async def _resolve_rag_settings(uid: str, request: Request, role=None):
+    """Unified replacement for _overlay_user_keys and _entity_extract_settings."""
+    from nanobot.providers.model_factory import ModelFactory, ModelRole
+    from nanobot.storage.repositories.user_settings_repo import UserSettingsRepository
+
+    if role is None:
+        role = ModelRole.INGESTION_LLM
+
+    base = _rag_settings(request)
+    config = getattr(request.app.state, "config", None)
+    try:
+        user_cfg = await UserSettingsRepository(request.app.state.session_factory).get(uid)
+        user_model = user_cfg.model if user_cfg else None
+        user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
+    except Exception:
+        user_model, user_providers = None, []
+
+    spec = ModelFactory.resolve(
+        role,
+        config=config,
+        rag_settings=base,
+        user_model=user_model,
+        user_providers=user_providers,
+    )
+    return ModelFactory.patch_settings(base, role, spec)
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -45,6 +72,7 @@ class KbUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     embedding_model: str | None = None
+    enable_graph_expansion: bool | None = None
 
 
 class QueryTestRequest(BaseModel):
@@ -99,8 +127,13 @@ async def delete_knowledge(kb_id: str, request: Request, uid: str = Depends(get_
 @router.get("/api/knowledge/{kb_id}/documents")
 async def list_documents(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
     await _get_kb_or_404(kb_id, uid, request)
-    docs = await _kb_repo(request).list_documents(uuid.UUID(kb_id))
-    return [_doc_to_dict(d) for d in docs]
+    repo = _kb_repo(request)
+    kb_uuid = uuid.UUID(kb_id)
+    docs, img_counts = await asyncio.gather(
+        repo.list_documents(kb_uuid),
+        repo.count_images_per_doc(kb_uuid),
+    )
+    return [_doc_to_dict(d, image_count=img_counts.get(d.id, 0)) for d in docs]
 
 
 @router.post("/api/knowledge/{kb_id}/documents", status_code=202)
@@ -108,6 +141,7 @@ async def upload_document(
     kb_id: str,
     request: Request,
     file: UploadFile = File(...),
+    pdf_parser: str = Form("mineru"),
     uid: str = Depends(get_current_user),
 ):
     kb = await _get_kb_or_404(kb_id, uid, request)
@@ -128,10 +162,19 @@ async def upload_document(
         file_path=tmp_path,
         file_size=len(content),
         mime_type=file.content_type,
+        pdf_parser=pdf_parser,
     )
 
-    asyncio.create_task(
-        _ingest_document(request, uuid.UUID(kb_id), doc.id, tmp_path, kb.chroma_collection or str(kb_id), original_filename=file.filename or "upload", chunk_strategy=kb.chunk_strategy or "auto")
+    await request.app.state.arq_pool.enqueue_job(
+        "ingest_document_task",
+        kb_id=kb_id,
+        doc_id=str(doc.id),
+        file_path=tmp_path,
+        chroma_collection=kb.chroma_collection or kb_id,
+        original_filename=file.filename or "upload",
+        chunk_strategy=kb.chunk_strategy or "auto",
+        pdf_parser=pdf_parser,
+        uid=uid,
     )
     return _doc_to_dict(doc)
 
@@ -149,10 +192,17 @@ async def delete_document(
     if doc is None or str(doc.kb_id) != kb_id:
         raise HTTPException(status_code=404, detail="文档不存在")
 
+    doc_delta = -1 if doc.status == "indexed" else 0
     chunk_delta = -(doc.chunk_count or 0)
     await repo.delete_chunks_by_doc(uuid.UUID(doc_id))
     await repo.delete_document(uuid.UUID(doc_id))
-    await repo.increment_counts(uuid.UUID(kb_id), doc_delta=-1, chunk_delta=chunk_delta)
+    await repo.increment_counts(uuid.UUID(kb_id), doc_delta=doc_delta, chunk_delta=chunk_delta)
+
+    if doc.file_path and os.path.exists(doc.file_path):
+        try:
+            os.unlink(doc.file_path)
+        except Exception:
+            pass
 
     # Best-effort: delete from ChromaDB
     try:
@@ -179,6 +229,120 @@ async def delete_document(
             )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# RAG image proxy — short-lived ticket auth
+# ---------------------------------------------------------------------------
+
+import secrets as _secrets
+import time as _time
+from threading import Lock as _Lock
+
+_image_tickets: dict[str, tuple[str, float]] = {}  # ticket -> (uid, expires_at)
+_tickets_lock = _Lock()
+
+
+def _issue_image_ticket(uid: str) -> str:
+    ticket = _secrets.token_urlsafe(32)
+    expires_at = _time.time() + 60
+    with _tickets_lock:
+        now = _time.time()
+        expired = [k for k, (_, exp) in _image_tickets.items() if exp < now]
+        for k in expired:
+            del _image_tickets[k]
+        _image_tickets[ticket] = (uid, expires_at)
+    return ticket
+
+
+def _validate_image_ticket(ticket: str) -> str:
+    """Validate ticket and return the associated uid."""
+    with _tickets_lock:
+        entry = _image_tickets.get(ticket)
+        if not entry:
+            raise HTTPException(status_code=401, detail="Invalid or expired ticket")
+        uid, expires_at = entry
+        if _time.time() > expires_at:
+            del _image_tickets[ticket]
+            raise HTTPException(status_code=401, detail="Ticket expired")
+        return uid
+
+
+@router.post("/api/rag/image-ticket")
+async def create_image_ticket(uid: str = Depends(get_current_user)):
+    """Issue a 60-second image access ticket. Frontend uses this instead of JWT in img URLs."""
+    return {"ticket": _issue_image_ticket(uid)}
+
+
+@router.get("/api/rag/images")
+async def serve_rag_image(path: str, ticket: str, request: Request):
+    from fastapi.responses import FileResponse
+    import mimetypes
+    from pathlib import Path as _Path
+    from sqlalchemy import select as _select
+
+    uid = _validate_image_ticket(ticket)
+
+    base_dir = _Path(os.path.expanduser("~/.nanoresearch/rag/images")).resolve()
+    try:
+        candidate = _Path(path.replace("\\", "/")).resolve()
+        rel = candidate.relative_to(base_dir)  # raises ValueError if outside
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    # rel.parts[0] is the collection name, which is "{uid}_{kb_id}"
+    # Verify in DB that this KB belongs to the requesting user.
+    collection_name = rel.parts[0] if rel.parts else ""
+    if not collection_name:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    from nanobot.storage.models import KnowledgeBase as _KB
+    async with request.app.state.session_factory() as db:
+        result = await db.execute(
+            _select(_KB).where(_KB.chroma_collection == collection_name)
+        )
+        kb = result.scalar_one_or_none()
+
+    if kb is None or kb.uid != uid:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    media_type, _ = mimetypes.guess_type(str(candidate))
+    return FileResponse(str(candidate), media_type=media_type or "image/jpeg")
+
+
+# ---------------------------------------------------------------------------
+# Document file download
+# ---------------------------------------------------------------------------
+
+@router.get("/api/knowledge/{kb_id}/documents/{doc_id}/file")
+async def get_document_file(
+    kb_id: str,
+    doc_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    from fastapi.responses import FileResponse
+    import mimetypes
+    await _get_kb_or_404(kb_id, uid, request)
+    doc = await _kb_repo(request).get_document(uuid.UUID(doc_id))
+    if doc is None or str(doc.kb_id) != kb_id:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if not doc.file_path or not os.path.exists(doc.file_path):
+        raise HTTPException(status_code=404, detail="源文件不存在（文档需重新上传以启用预览）")
+    media_type = doc.mime_type
+    if not media_type:
+        guessed, _ = mimetypes.guess_type(doc.filename or "")
+        media_type = guessed or "application/octet-stream"
+    return FileResponse(
+        doc.file_path,
+        media_type=media_type,
+        headers={"Content-Disposition": f"inline; filename=\"{doc.filename}\""},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +413,17 @@ async def test_query(
             dense_retriever=dense,
             sparse_retriever=sparse,
             fusion=fusion,
-            config=HybridSearchConfig(fusion_top_k=body.top_k, enable_dense=body.enable_dense, enable_sparse=body.enable_sparse),
+            config=HybridSearchConfig(
+                fusion_top_k=body.top_k,
+                enable_dense=body.enable_dense,
+                enable_sparse=body.enable_sparse,
+                enable_graph_expansion=kb.enable_graph_expansion,
+            ),
+            session_factory=request.app.state.session_factory,
+            kb_id=kb.id,
         )
 
-        result = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: hybrid.search(body.query, top_k=body.top_k, return_details=True)
-        )
+        result = await hybrid.async_search(body.query, top_k=body.top_k, return_details=True)
 
         # Look up full chunk content from PG using chroma_ids
         chroma_ids = [r.chunk_id for r in result.results]
@@ -270,6 +439,8 @@ async def test_query(
                     "sparse_score": r.sparse_score,
                     "text": chunk_map[r.chunk_id].content if r.chunk_id in chunk_map else r.text,
                     "metadata": chunk_map[r.chunk_id].chunk_metadata if r.chunk_id in chunk_map else r.metadata,
+                    "graph_via_entity": r.metadata.get("graph_via_entity"),
+                    "is_graph_neighbor": r.metadata.get("is_graph_neighbor", False),
                 }
                 for r in result.results
             ],
@@ -307,12 +478,13 @@ def _kb_to_dict(kb) -> dict:
         "status": kb.status,
         "doc_count": kb.doc_count,
         "chunk_count": kb.chunk_count,
+        "enable_graph_expansion": kb.enable_graph_expansion,
         "created_at": kb.created_at.isoformat() if kb.created_at else None,
         "updated_at": kb.updated_at.isoformat() if kb.updated_at else None,
     }
 
 
-def _doc_to_dict(doc) -> dict:
+def _doc_to_dict(doc, image_count: int = 0) -> dict:
     return {
         "id": str(doc.id),
         "kb_id": str(doc.kb_id),
@@ -321,6 +493,7 @@ def _doc_to_dict(doc) -> dict:
         "mime_type": doc.mime_type,
         "status": doc.status,
         "chunk_count": doc.chunk_count,
+        "image_count": image_count,
         "error_msg": doc.error_msg,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
     }
@@ -340,75 +513,180 @@ def _chunk_to_dict(chunk) -> dict:
     }
 
 
-async def _ingest_document(request: Request, kb_id: uuid.UUID, doc_id: uuid.UUID, file_path: str, chroma_collection: str = "", original_filename: str = "", chunk_strategy: str = "auto") -> None:
-    """Background task: run IngestionPipeline and persist chunks to DB."""
-    repo = KnowledgeRepository(request.app.state.session_factory)
-    settings = _rag_settings(request)
-    collection = chroma_collection or str(kb_id)
-
-    await repo.update_document_status(doc_id, "parsing")
-    try:
-        from nanobot.rag.ingestion.pipeline import IngestionPipeline
-
-        pipeline = IngestionPipeline(settings, collection=collection, force=True, chunk_strategy_override=chunk_strategy)
-        result = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: pipeline.run(file_path)
-        )
 
 
-        if not result.success:
-            await repo.update_document_status(doc_id, "error", error_msg=result.error or "ingestion failed")
-            return
+# ---------------------------------------------------------------------------
+# Graph endpoints
+# ---------------------------------------------------------------------------
 
-        # Fetch chunks from ChromaDB and persist to PostgreSQL
-        await repo.update_document_status(doc_id, "indexing")
+def _graph_repo(request: Request):
+    from nanobot.storage.repositories.graph_repo import GraphRepository
+    return GraphRepository(request.app.state.session_factory)
+
+
+
+
+async def _extract_and_persist(chunk_rows, settings, session_factory) -> None:
+    """Run EntityExtractor on KbChunk list, then persist to KG tables."""
+    import asyncio as _asyncio
+    from nanobot.rag.core.types import Chunk
+    from nanobot.rag.ingestion.transform.entity_extractor import EntityExtractor
+    from nanobot.rag.ingestion.graph.persist import persist_chunk_entities
+
+    if not chunk_rows:
+        return
+
+    chunks = []
+    for row in chunk_rows:
+        meta = dict(row.chunk_metadata or {})
+        meta.setdefault("source_path", getattr(row, "document_id", None) or str(row.id))
         try:
-            from nanobot.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
-            vector_store = VectorStoreFactory.create(settings, collection_name=collection)
+            chunks.append(Chunk(id=str(row.id), text=row.content, metadata=meta))
+        except Exception as _ce:
+            import sys as _sys
+            print(f"[KG] Skipping chunk {row.id}: {_ce}", file=_sys.stderr)
 
-            # Retrieve the chunks that were just stored using vector IDs from result
-            chunk_rows: list[KbChunk] = []
-            for idx, vector_id in enumerate(result.vector_ids):
+    extractor = EntityExtractor(settings)
+    loop = _asyncio.get_running_loop()
+    extracted = await loop.run_in_executor(None, lambda: extractor.transform(chunks))
+
+    extracted_map = {c.id: c for c in extracted}
+    for row in chunk_rows:
+        ec = extracted_map.get(str(row.id))
+        if ec:
+            row.chunk_metadata = {
+                **(row.chunk_metadata or {}),
+                "_kg_entities": ec.metadata.get("_kg_entities", []),
+                "_kg_relations": ec.metadata.get("_kg_relations", []),
+            }
+
+    await persist_chunk_entities(chunk_rows, session_factory)
+
+
+@router.post("/api/knowledge/{kb_id}/graph/build", status_code=202)
+async def build_graph(
+    kb_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Rebuild the knowledge graph for all indexed chunks in the KB.
+
+    After completion, enable_graph_expansion is automatically set to true.
+    """
+    kb = await _get_kb_or_404(kb_id, uid, request)
+    repo = _kb_repo(request)
+    from nanobot.providers.model_factory import ModelRole
+    settings = await _resolve_rag_settings(uid, request, ModelRole.INGESTION_LLM)
+
+    async def _run_build():
+        import sys
+
+        kb_uuid = uuid.UUID(kb_id)
+        graph_repo = _graph_repo(request)
+
+        try:
+            await graph_repo.delete_by_kb(kb_uuid)
+        except Exception as e:
+            print(f"[KG BUILD] Failed to clear existing graph: {e}", file=sys.stderr)
+
+        PAGE_SIZE = 200
+        NUM_WORKERS = 3
+        queue: asyncio.Queue = asyncio.Queue()
+        total_processed = 0
+
+        async def producer():
+            try:
+                total = await repo.count_chunks_by_kb(kb_uuid)
+                print(f"[KG BUILD] KB {kb_id}: {total} chunks, {NUM_WORKERS} workers", flush=True)
+                for offset in range(0, total, PAGE_SIZE):
+                    await queue.put(offset)
+            finally:
+                # Always send sentinels so workers are never left waiting
+                for _ in range(NUM_WORKERS):
+                    await queue.put(None)
+
+        async def worker():
+            nonlocal total_processed
+            while True:
+                offset = await queue.get()
+                if offset is None:
+                    break
                 try:
-                    items = vector_store.get_by_ids([vector_id])
-                    if items:
-                        item = items[0]
-                        text = item.get("text", item.get("document", ""))
-                        meta = dict(item.get("metadata") or {})
-                        if original_filename:
-                            meta["source_path"] = original_filename
-                        chunk_rows.append(KbChunk(
-                            kb_id=kb_id,
-                            document_id=doc_id,
-                            chroma_id=vector_id,
-                            chunk_index=idx,
-                            content=text,
-                            token_count=meta.get("token_count"),
-                            char_start=meta.get("char_start"),
-                            char_end=meta.get("char_end"),
-                            chunk_metadata=meta,
-                        ))
-                except Exception:
-                    pass
+                    chunks = await repo.list_chunks_by_kb(kb_uuid, limit=PAGE_SIZE, offset=offset)
+                    if chunks:
+                        await _extract_and_persist(chunks, settings, request.app.state.session_factory)
+                        total_processed += len(chunks)
+                except Exception as e:
+                    print(f"[KG BUILD] Error at offset {offset}: {e}", file=sys.stderr)
 
-            if chunk_rows:
-                await repo.create_chunks(chunk_rows)
+        await asyncio.gather(producer(), *[worker() for _ in range(NUM_WORKERS)])
+        await repo.update(kb_uuid, enable_graph_expansion=True)
+        print(f"[KG BUILD] Completed for KB {kb_id}: {total_processed} chunks processed.", flush=True)
 
-        except Exception:
-            # Chunks from ChromaDB fetch failed; still mark indexed with result count
-            pass
+    asyncio.create_task(_run_build())
+    return {"status": "building", "kb_id": kb_id}
 
-        chunk_count = result.chunk_count
-        await repo.update_document_status(doc_id, "indexed", chunk_count=chunk_count)
-        await repo.increment_counts(kb_id, doc_delta=1, chunk_delta=chunk_count)
 
-    except Exception as exc:
-        import traceback, sys
-        print(f"[INGEST ERROR] doc={doc_id}: {exc}", flush=True, file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        await repo.update_document_status(doc_id, "error", error_msg=str(exc))
-    finally:
+@router.get("/api/knowledge/{kb_id}/graph/stats")
+async def get_graph_stats(
+    kb_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Return entity count, triple count, and top-20 most-mentioned entities."""
+    await _get_kb_or_404(kb_id, uid, request)
+    graph_repo = _graph_repo(request)
+    stats = await graph_repo.get_stats(uuid.UUID(kb_id))
+    return stats
+
+
+@router.post("/api/knowledge/{kb_id}/documents/{doc_id}/graph/build", status_code=202)
+async def build_doc_graph(
+    kb_id: str,
+    doc_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Run entity extraction on a single document's chunks and persist to KG tables."""
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _kb_repo(request)
+    doc = await repo.get_document(uuid.UUID(doc_id))
+    if doc is None or str(doc.kb_id) != kb_id:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    from nanobot.providers.model_factory import ModelRole
+    settings = await _resolve_rag_settings(uid, request, ModelRole.INGESTION_LLM)
+
+    async def _run():
+        import sys
+        graph_repo = _graph_repo(request)
+        doc_uuid = uuid.UUID(doc_id)
         try:
-            os.unlink(file_path)
-        except Exception:
-            pass
+            await graph_repo.delete_by_doc(doc_uuid)
+            chunks = await repo.list_chunks_by_doc(doc_uuid)
+            if chunks:
+                await _extract_and_persist(chunks, settings, request.app.state.session_factory)
+            print(f"[KG DOC BUILD] doc={doc_id} done, {len(chunks)} chunks", flush=True)
+        except Exception as e:
+            print(f"[KG DOC BUILD] doc={doc_id} error: {e}", file=sys.stderr)
+
+    asyncio.create_task(_run())
+    return {"status": "building", "doc_id": doc_id}
+
+
+@router.get("/api/knowledge/{kb_id}/documents/{doc_id}/graph/entities")
+async def get_doc_entities(
+    kb_id: str,
+    doc_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Return entities extracted from a specific document."""
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _kb_repo(request)
+    doc = await repo.get_document(uuid.UUID(doc_id))
+    if doc is None or str(doc.kb_id) != kb_id:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    graph_repo = _graph_repo(request)
+    entities = await graph_repo.get_entities_by_doc(uuid.UUID(doc_id))
+    return {"doc_id": doc_id, "entities": entities}

@@ -146,6 +146,12 @@ class KnowledgeRepository:
                 kb.chunk_count = max(0, kb.chunk_count + chunk_delta)
                 kb.updated_at = datetime.now(timezone.utc)
                 await db.commit()
+        try:
+            from nanobot.bus.redis_client import get_redis
+            from nanobot.bus.redis_keys import RedisKeys
+            await get_redis().delete(RedisKeys.kb_meta(str(kb_id)))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # KbDocument CRUD

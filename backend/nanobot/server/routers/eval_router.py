@@ -34,6 +34,32 @@ def _rag_settings(request: Request):
     return settings
 
 
+async def _resolve_eval_spec(uid: str, request: Request, role, model_override=None):
+    """Resolve a ModelSpec for an eval role using ModelFactory."""
+    from nanobot.providers.model_factory import ModelFactory
+    from nanobot.storage.repositories.user_settings_repo import UserSettingsRepository
+
+    config = getattr(request.app.state, "config", None)
+    rag_settings = _rag_settings(request)
+    try:
+        user_cfg = await UserSettingsRepository(request.app.state.session_factory).get(uid)
+        user_model = user_cfg.model if user_cfg else None
+        user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
+        user_extra = (user_cfg.extra or {}) if user_cfg else {}
+    except Exception:
+        user_model, user_providers, user_extra = None, [], {}
+
+    return ModelFactory.resolve(
+        role,
+        config=config,
+        rag_settings=rag_settings,
+        user_model=user_model,
+        user_providers=user_providers,
+        model_override=model_override,
+        user_extra=user_extra,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -50,6 +76,24 @@ class RagasRunCreate(BaseModel):
     top_k: int = 5
     generator_model: str | None = None  # falls back to settings.eval.generator_model
     evaluator_model: str | None = None  # falls back to settings.eval.evaluator_model
+
+
+class AgentRunCreate(BaseModel):
+    dataset_id: str
+    name: str | None = None
+    top_k: int = 5
+    evaluator_model: str | None = None
+    embedding_model: str | None = None
+
+
+class DatasetGenerateRequest(BaseModel):
+    name: str | None = None
+    n_questions: int = 20
+    simple_ratio: float = 0.3
+    multi_context_ratio: float = 0.5
+    reasoning_ratio: float = 0.2
+    generator_model: str | None = None
+    embeddings_model: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +130,47 @@ async def upload_dataset(
     return _dataset_to_dict(ds)
 
 
+@router.post("/api/eval/{kb_id}/datasets/generate", status_code=202)
+async def generate_dataset(
+    kb_id: str,
+    body: DatasetGenerateRequest,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Generate a RAGAS testset (multi-hop + single-hop) in the background."""
+    from nanobot.providers.model_factory import ModelRole
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _eval_repo(request)
+    settings = _rag_settings(request)
+
+    gen_spec = await _resolve_eval_spec(uid, request, ModelRole.EVAL_GENERATOR, body.generator_model)
+    emb_spec = await _resolve_eval_spec(uid, request, ModelRole.EMBEDDING)
+
+    embeddings_model = (
+        body.embeddings_model
+        or emb_spec.model
+        or "text-embedding-v3"
+    )
+
+    ds_name = body.name or f"自动生成 {datetime.now(timezone.utc).strftime('%m-%d %H:%M')}"
+    ds = await repo.create_dataset(uuid.UUID(kb_id), ds_name)
+
+    import os
+    gen_api_key = gen_spec.api_key or os.environ.get("OPENAI_API_KEY", "sk-placeholder")
+    gen_base_url = gen_spec.base_url or "https://api.openai.com/v1"
+    emb_api_key = emb_spec.api_key or gen_api_key
+    emb_base_url = emb_spec.base_url or gen_base_url
+
+    asyncio.create_task(
+        _run_dataset_generation(
+            request, ds.id, uuid.UUID(kb_id), body,
+            gen_spec.model, embeddings_model, gen_api_key, gen_base_url,
+            emb_api_key, emb_base_url,
+        )
+    )
+    return _dataset_to_dict(ds)
+
+
 @router.delete("/api/eval/datasets/{dataset_id}", status_code=204)
 async def delete_dataset(dataset_id: str, request: Request, uid: str = Depends(get_current_user)):
     repo = _eval_repo(request)
@@ -101,6 +186,59 @@ async def delete_dataset(dataset_id: str, request: Request, uid: str = Depends(g
 # ---------------------------------------------------------------------------
 # Eval Runs
 # ---------------------------------------------------------------------------
+
+@router.post("/api/eval/{kb_id}/runs/agent", status_code=202)
+async def create_agent_run(
+    kb_id: str,
+    request: Request,
+    body: AgentRunCreate,
+    uid: str = Depends(get_current_user),
+):
+    """Start an Agentic RAG eval run — agent answers each question; eval_contexts
+    are collected from retrieve_* tool calls via on_tool_call callback."""
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _eval_repo(request)
+
+    ds = await repo.get_dataset(uuid.UUID(body.dataset_id))
+    if ds is None or str(ds.kb_id) != kb_id:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+
+    from nanobot.providers.model_factory import ModelRole
+    eval_spec = await _resolve_eval_spec(uid, request, ModelRole.EVAL_EVALUATOR, body.evaluator_model)
+    emb_spec = await _resolve_eval_spec(uid, request, ModelRole.EMBEDDING)
+
+    settings = _rag_settings(request)
+    embedding_model = (
+        body.embedding_model
+        or emb_spec.model
+        or getattr(getattr(settings, "embedding", None), "model", None)
+        or "text-embedding-v3"
+    )
+
+    import os
+    eval_api_key = eval_spec.api_key or os.environ.get("OPENAI_API_KEY", "sk-placeholder")
+    eval_base_url = eval_spec.base_url or "https://api.openai.com/v1"
+
+    run = await repo.create_run(
+        kb_id=uuid.UUID(kb_id),
+        dataset_id=uuid.UUID(body.dataset_id),
+        name=body.name or f"Agent {datetime.now(timezone.utc).strftime('%m-%d %H:%M')}",
+        retrieval_config={
+            "top_k": body.top_k,
+            "evaluator_model": eval_spec.model,
+            "embedding_model": embedding_model,
+        },
+        eval_type="agent",
+    )
+
+    asyncio.create_task(
+        _run_agent_eval(
+            request, run.id, uuid.UUID(kb_id), uid, body.top_k,
+            eval_spec.model, embedding_model, eval_api_key, eval_base_url,
+        )
+    )
+    return _run_to_dict(run)
+
 
 @router.get("/api/eval/{kb_id}/runs")
 async def list_runs(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
@@ -149,29 +287,21 @@ async def create_ragas_run(
     if ds is None or str(ds.kb_id) != kb_id:
         raise HTTPException(status_code=404, detail="数据集不存在")
 
-    from nanobot.storage.repositories.user_settings_repo import UserSettingsRepository
-    user_cfg = await UserSettingsRepository(request.app.state.session_factory).get(uid)
-    user_extra = (user_cfg.extra if user_cfg else None) or {}
+    from nanobot.providers.model_factory import ModelRole
+    gen_spec = await _resolve_eval_spec(uid, request, ModelRole.EVAL_GENERATOR, body.generator_model)
+    eval_spec = await _resolve_eval_spec(uid, request, ModelRole.EVAL_EVALUATOR, body.evaluator_model)
+    emb_spec = await _resolve_eval_spec(uid, request, ModelRole.EMBEDDING)
 
     settings = _rag_settings(request)
-    eval_cfg = getattr(settings, "eval", None) or {}
-    generator_model = (
-        body.generator_model
-        or user_extra.get("ragas_generator_model")
-        or getattr(eval_cfg, "generator_model", None)
-        or "qwen-plus"
-    )
-    evaluator_model = (
-        body.evaluator_model
-        or user_extra.get("ragas_evaluator_model")
-        or getattr(eval_cfg, "evaluator_model", None)
-        or "qwen-max"
-    )
     embedding_model = (
-        user_extra.get("ragas_embedding_model")
+        emb_spec.model
         or getattr(getattr(settings, "embedding", None), "model", None)
         or "text-embedding-v3"
     )
+
+    import os
+    eval_api_key = eval_spec.api_key or os.environ.get("OPENAI_API_KEY", "sk-placeholder")
+    eval_base_url = eval_spec.base_url or gen_spec.base_url or "https://api.openai.com/v1"
 
     run = await repo.create_run(
         kb_id=uuid.UUID(kb_id),
@@ -179,8 +309,8 @@ async def create_ragas_run(
         name=body.name or f"RAGAS {datetime.now(timezone.utc).strftime('%m-%d %H:%M')}",
         retrieval_config={
             "top_k": body.top_k,
-            "generator_model": generator_model,
-            "evaluator_model": evaluator_model,
+            "generator_model": gen_spec.model,
+            "evaluator_model": eval_spec.model,
             "embedding_model": embedding_model,
         },
         eval_type="ragas",
@@ -189,7 +319,7 @@ async def create_ragas_run(
     asyncio.create_task(
         _run_ragas_evaluation(
             request, run.id, uuid.UUID(kb_id), body.top_k,
-            generator_model, evaluator_model, embedding_model,
+            gen_spec.model, eval_spec.model, embedding_model, eval_api_key, eval_base_url,
         )
     )
     return _run_to_dict(run)
@@ -271,7 +401,193 @@ def _run_item_to_dict(item) -> dict:
         "generated_answer": item.generated_answer,
         "retrieved_contexts": item.retrieved_contexts,
         "metrics": item.item_metrics,
+        "question_type": item.question_type,
     }
+
+
+async def _run_dataset_generation(
+    request: Request,
+    dataset_id: uuid.UUID,
+    kb_id: uuid.UUID,
+    body: DatasetGenerateRequest,
+    generator_model: str,
+    embeddings_model: str,
+    api_key: str = "sk-placeholder",
+    base_url: str = "https://api.openai.com/v1",
+    emb_api_key: str | None = None,
+    emb_base_url: str | None = None,
+) -> None:
+    """Background task: generate RAGAS testset from KB chunks."""
+    repo = _eval_repo(request)
+    kb_repo = _kb_repo(request)
+    try:
+        # Load all KB chunks as LangChain Documents (chunk_id in metadata for gold lookup)
+        chunks = await kb_repo.list_chunks_by_kb(kb_id, limit=2000)
+        if not chunks:
+            await repo.delete_dataset(dataset_id)
+            return
+
+        from langchain_core.documents import Document as LCDocument
+        lc_docs = [
+            LCDocument(
+                page_content=c.content,
+                metadata={"chunk_id": str(c.id), "source": (c.chunk_metadata or {}).get("source_path", str(c.id))}
+            )
+            for c in chunks if c.content and c.content.strip()
+        ]
+
+        # Normalize ratios before entering the thread
+        s, m, r = body.simple_ratio, body.multi_context_ratio, body.reasoning_ratio
+        total = s + m + r
+        if total <= 0:
+            s, m, r = 0.4, 0.4, 0.2
+            total = 1.0
+        simple_w = s / total
+        multi_abs_w = (m / 2) / total
+        multi_spec_w = (m / 2) / total
+
+        _emb_api_key = emb_api_key or api_key
+        _emb_base_url = emb_base_url or base_url
+        _n_questions = body.n_questions
+
+        def _run_generation_in_thread() -> object:
+            # All ragas/openai objects must be created inside the thread because
+            # ragas uses asyncio.run() internally, which creates a new event loop.
+            # AsyncOpenAI clients bound to the caller's loop would fail here.
+            import logging as _logging
+            from openai import AsyncOpenAI
+            from ragas.llms import llm_factory
+            from ragas.embeddings.base import embedding_factory
+            from ragas.testset import TestsetGenerator
+            from ragas.testset.synthesizers import (
+                SingleHopSpecificQuerySynthesizer,
+                MultiHopAbstractQuerySynthesizer,
+                MultiHopSpecificQuerySynthesizer,
+            )
+            from ragas.testset.transforms import default_transforms_for_prechunked
+            from ragas.testset.transforms.extractors.llm_based import ThemesExtractor
+            from ragas.run_config import RunConfig
+
+            gen_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+            emb_client = AsyncOpenAI(base_url=_emb_base_url, api_key=_emb_api_key)
+            gen_llm = llm_factory(generator_model, client=gen_client, max_tokens=8192)
+            gen_emb = embedding_factory("openai", model=embeddings_model, client=emb_client, interface="modern")
+
+            _transforms = default_transforms_for_prechunked(llm=gen_llm, embedding_model=gen_emb)
+            # Monkey-patch extract() on existing ThemesExtractor instances so all
+            # their configuration (property_name, prompt, max_num_themes…) is preserved.
+            # Failed nodes return [] so synthesizers skip them; counter tracks how many.
+            import types as _types
+            _themes_skip_count = [0]
+            _themes_total_count = [0]
+
+            def _patch_transforms(obj):
+                if not hasattr(obj, "transformations"):
+                    return
+                for t in obj.transformations:
+                    if isinstance(t, ThemesExtractor):
+                        _orig = t.extract.__func__
+
+                        async def _safe_extract(self, node, _orig=_orig):
+                            _themes_total_count[0] += 1
+                            try:
+                                return await _orig(self, node)
+                            except Exception as _e:
+                                _themes_skip_count[0] += 1
+                                _logging.getLogger(__name__).warning(
+                                    "ThemesExtractor skipped node %s (%s: %s)",
+                                    getattr(node, "id", "?"), type(_e).__name__, _e,
+                                )
+                                return self.property_name, []
+
+                        t.extract = _types.MethodType(_safe_extract, t)
+                    _patch_transforms(t)
+
+            _patch_transforms(_transforms)
+
+            class _ChunkIdsMixin:
+                async def _generate_sample(self, scenario, callbacks):
+                    sample = await super()._generate_sample(scenario, callbacks)
+                    chunk_ids = [
+                        n.properties.get("document_metadata", {}).get("chunk_id")
+                        for n in scenario.nodes
+                        if n.properties.get("document_metadata", {}).get("chunk_id")
+                    ]
+                    sample.reference_context_ids = chunk_ids
+                    return sample
+
+            class _SingleHopSpecificWithIds(_ChunkIdsMixin, SingleHopSpecificQuerySynthesizer):
+                pass
+
+            class _MultiHopAbstractWithIds(_ChunkIdsMixin, MultiHopAbstractQuerySynthesizer):
+                pass
+
+            class _MultiHopSpecificWithIds(_ChunkIdsMixin, MultiHopSpecificQuerySynthesizer):
+                pass
+
+            generator = TestsetGenerator(llm=gen_llm, embedding_model=gen_emb)
+            distributions = {
+                _SingleHopSpecificWithIds: simple_w,
+                _MultiHopAbstractWithIds: multi_abs_w,
+                _MultiHopSpecificWithIds: multi_spec_w,
+            }
+            # deepseek ~60 RPM → max_workers=8 safe; retries handle transient 429s
+            run_cfg = RunConfig(max_workers=10, max_retries=5, max_wait=60, timeout=120)
+            result = generator.generate_with_chunks(
+                lc_docs,
+                testset_size=_n_questions,
+                transforms=_transforms,
+                query_distribution=distributions,
+                run_config=run_cfg,
+            )
+            skipped = _themes_skip_count[0]
+            total = _themes_total_count[0]
+            if skipped:
+                _logging.getLogger(__name__).warning(
+                    "[ThemesExtractor] %d/%d nodes skipped due to token limit; "
+                    "these nodes have no themes and will be excluded from synthesizer candidates. "
+                    "Generated %d samples (target=%d).",
+                    skipped, total, len(result.samples), _n_questions,
+                )
+            return result
+
+        dataset = await asyncio.get_running_loop().run_in_executor(None, _run_generation_in_thread)
+
+        # Convert RAGAS dataset to eval items
+        # dataset.samples is List[TestsetSample]; actual fields live on .eval_sample
+        items = []
+        for sample in dataset.samples:
+            es = sample.eval_sample
+            query = getattr(es, "user_input", None) or ""
+            reference = getattr(es, "reference", None) or ""
+
+            # reference_context_ids populated by _ChunkIdsMixin._generate_sample
+            gold_chunk_ids = list(
+                filter(None, getattr(es, "reference_context_ids", None) or [])
+            )
+
+            if "Multi" in (getattr(sample, "synthesizer_name", "") or ""):
+                q_type = "multi_context"
+            else:
+                q_type = "single_hop"
+
+            items.append({
+                "query": query,
+                "gold_answer": reference,
+                "gold_chunk_ids": gold_chunk_ids,
+                "question_type": q_type,
+            })
+
+        await repo.add_items(dataset_id, items)
+
+    except Exception as exc:
+        import sys, traceback
+        print(f"[DatasetGenerate] failed: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        try:
+            await repo.delete_dataset(dataset_id)
+        except Exception:
+            pass
 
 
 def _build_hybrid_search(settings, chroma_col: str, top_k: int):
@@ -338,7 +654,7 @@ async def _run_quick_evaluation(request: Request, run_id: uuid.UUID, kb_id: uuid
         for idx, item in enumerate(items):
             try:
                 search_result = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda q=item.query: hybrid.search(q, top_k=top_k)
+                    None, lambda q=item.query: hybrid.search(q, top_k=top_k, return_details=True)
                 )
                 retrieved = search_result.results
                 retrieved_ids = [r.chunk_id for r in retrieved]
@@ -360,6 +676,7 @@ async def _run_quick_evaluation(request: Request, run_id: uuid.UUID, kb_id: uuid
                 "gold_answer": item.gold_answer,
                 "retrieved_contexts": retrieved_ids,
                 "metrics": item_metrics,
+                "question_type": item.question_type,
             })
 
             for k, v in item_metrics.items():
@@ -400,6 +717,8 @@ async def _run_ragas_evaluation(
     generator_model: str,
     evaluator_model: str,
     embedding_model: str = "text-embedding-v3",
+    api_key: str = "sk-placeholder",
+    base_url: str = "https://api.openai.com/v1",
 ) -> None:
     repo = _eval_repo(request)
     kb_repo = _kb_repo(request)
@@ -422,14 +741,11 @@ async def _run_ragas_evaluation(
         )
 
         # Generator LLM (answers) + Evaluator LLM (judges) kept separate to avoid self-eval bias
-        import os
         from openai import AsyncOpenAI
         from ragas.llms import llm_factory
         from ragas.embeddings.base import embedding_factory
         from ragas.metrics.collections import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
 
-        base_url = settings.llm.base_url or "https://api.openai.com/v1"
-        api_key = settings.llm.api_key or os.environ.get("OPENAI_API_KEY", "sk-placeholder")
         emb_model = embedding_model
 
         shared_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
@@ -485,35 +801,10 @@ async def _run_ragas_evaluation(
             item_metrics: dict[str, float] = {}
             for metric in metrics:
                 try:
+                    score_val = await metric.single_turn_ascore(sample)
                     mn = metric.name
-                    if mn == "faithfulness":
-                        raw = await metric.ascore(
-                            user_input=sample.user_input,
-                            response=sample.response,
-                            retrieved_contexts=sample.retrieved_contexts,
-                        )
-                    elif mn == "answer_relevancy":
-                        raw = await metric.ascore(
-                            user_input=sample.user_input,
-                            response=sample.response,
-                        )
-                    elif mn == "context_precision":
-                        raw = await metric.ascore(
-                            user_input=sample.user_input,
-                            reference=sample.reference,
-                            retrieved_contexts=sample.retrieved_contexts,
-                        )
-                    elif mn == "context_recall":
-                        raw = await metric.ascore(
-                            user_input=sample.user_input,
-                            retrieved_contexts=sample.retrieved_contexts,
-                            reference=sample.reference,
-                        )
-                    else:
-                        continue
-                    score_val = float(raw.score) if hasattr(raw, "score") else float(raw)
-                    item_metrics[mn] = score_val
-                    metric_sums[mn] = metric_sums.get(mn, 0.0) + score_val
+                    item_metrics[mn] = float(score_val)
+                    metric_sums[mn] = metric_sums.get(mn, 0.0) + float(score_val)
                     metric_counts[mn] = metric_counts.get(mn, 0) + 1
                 except Exception:
                     pass
@@ -524,11 +815,150 @@ async def _run_ragas_evaluation(
                 "generated_answer": generated_answer,
                 "retrieved_contexts": contexts,
                 "metrics": item_metrics,
+                "question_type": item.question_type,
             })
             await repo.update_run(run_id, completed_items=idx + 1)
 
         agg_metrics = {k: metric_sums[k] / metric_counts[k] for k in metric_sums}
         overall = sum(agg_metrics.values()) / len(agg_metrics) if agg_metrics else None
+
+        await repo.add_run_items(run_id, run_items)
+        await repo.update_run(
+            run_id,
+            status="completed",
+            metrics=agg_metrics,
+            overall_score=overall,
+            finished_at=datetime.now(timezone.utc),
+        )
+
+    except Exception as exc:
+        await repo.update_run(
+            run_id, status="failed",
+            error_message=str(exc),
+            finished_at=datetime.now(timezone.utc),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Agent eval background task — uses on_tool_call to harvest retrieve_* contexts
+# ---------------------------------------------------------------------------
+
+async def _run_agent_eval(
+    request: Request,
+    run_id: uuid.UUID,
+    kb_id: uuid.UUID,
+    uid: str,
+    top_k: int,
+    evaluator_model: str,
+    embedding_model: str,
+    api_key: str = "sk-placeholder",
+    base_url: str = "https://api.openai.com/v1",
+) -> None:
+    repo = _eval_repo(request)
+
+    await repo.update_run(run_id, status="running", started_at=datetime.now(timezone.utc))
+    try:
+        run = await repo.get_run(run_id)
+        if run is None:
+            return
+
+        dataset_items = await repo.list_items(run.dataset_id)
+        await repo.update_run(run_id, total_items=len(dataset_items))
+
+        # Get (or lazily create) the user's agent loop
+        from nanobot.server.routers.chat_router import _get_web_loop
+        agent_loop = await _get_web_loop(uid, request.app.state)
+
+        # RAGAS evaluator setup
+        from openai import AsyncOpenAI
+        from ragas.llms import llm_factory
+        from ragas.embeddings.base import embedding_factory
+        from ragas.metrics.collections import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
+
+        shared_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        evaluator_llm = llm_factory(evaluator_model, client=shared_client, max_tokens=8192)
+        eval_embedding = embedding_factory("openai", model=embedding_model, client=shared_client, interface="modern")
+        ragas_metrics = [
+            Faithfulness(llm=evaluator_llm),
+            AnswerRelevancy(llm=evaluator_llm, embeddings=eval_embedding),
+            ContextPrecision(llm=evaluator_llm),
+            ContextRecall(llm=evaluator_llm),
+        ]
+
+        run_items: list[dict] = []
+        metric_sums: dict[str, float] = {}
+        metric_counts: dict[str, int] = {}
+
+        for idx, item in enumerate(dataset_items):
+            tool_events: list[dict] = []
+
+            async def collect_tool_event(event: dict, _events: list = tool_events) -> None:
+                _events.append(event)
+
+            # Isolated session per eval item — avoids history contamination
+            session_key = f"eval:{run_id}:{idx}"
+            outbound = await agent_loop.process_direct(
+                item.query,
+                session_key=session_key,
+                channel="eval",
+                chat_id=str(run_id),
+                on_tool_call=collect_tool_event,
+            )
+            generated_answer = (outbound.content if outbound else "") or ""
+
+            # Collect eval_contexts from retrieve_* tool outputs
+            eval_contexts: list[str] = []
+            for ev in tool_events:
+                if ev.get("name", "").startswith("retrieve_"):
+                    output = ev.get("output", "")
+                    if output and not output.startswith("错误"):
+                        eval_contexts.append(output[:2000])
+
+            # Hop-level metrics
+            tool_names = [ev["name"] for ev in tool_events]
+            hops = sum(1 for n in tool_names if n.startswith("retrieve_"))
+            entity_calls = sum(1 for n in tool_names if n == "retrieve_by_entity")
+            entity_hit_rate = entity_calls / hops if hops > 0 else 0.0
+
+            # RAGAS scoring
+            from ragas.dataset_schema import SingleTurnSample
+            sample = SingleTurnSample(
+                user_input=item.query,
+                response=generated_answer,
+                retrieved_contexts=eval_contexts,
+                reference=item.gold_answer or "",
+            )
+            item_metrics: dict = {
+                "_hops": hops,
+                "_tools_used": tool_names,
+                "_entity_tool_hit_rate": entity_hit_rate,
+            }
+            for metric in ragas_metrics:
+                try:
+                    score_val = await metric.single_turn_ascore(sample)
+                    mn = metric.name
+                    item_metrics[mn] = float(score_val)
+                    metric_sums[mn] = metric_sums.get(mn, 0.0) + float(score_val)
+                    metric_counts[mn] = metric_counts.get(mn, 0) + 1
+                except Exception:
+                    pass
+
+            run_items.append({
+                "query": item.query,
+                "gold_answer": item.gold_answer,
+                "generated_answer": generated_answer,
+                "retrieved_contexts": eval_contexts,
+                "metrics": item_metrics,
+                "question_type": item.question_type,
+            })
+            await repo.update_run(run_id, completed_items=idx + 1)
+
+        agg_metrics = {k: metric_sums[k] / metric_counts[k] for k in metric_sums}
+        if run_items:
+            all_hops = [it["metrics"].get("_hops", 0) for it in run_items]
+            agg_metrics["_avg_hops"] = sum(all_hops) / len(all_hops)
+        non_private = {k: v for k, v in agg_metrics.items() if not k.startswith("_")}
+        overall = sum(non_private.values()) / len(non_private) if non_private else None
 
         await repo.add_run_items(run_id, run_items)
         await repo.update_run(
