@@ -356,6 +356,8 @@ class AgentRunSnapshot(Base):
     root_cause_auto: Mapped[str | None] = mapped_column(String(32), nullable=True)
     root_cause_auto_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
     root_cause_auto_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Phase 0: structured context assembly decisions (ids + numbers + query text, no injected full text)
+    context_trace: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class AgentTestCase(Base):
@@ -375,6 +377,10 @@ class AgentTestCase(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Flywheel fields
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)  # active | pending_review | rejected
+    generated_from_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"), nullable=True)
+    generation_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class JudgeCalibrationLog(Base):

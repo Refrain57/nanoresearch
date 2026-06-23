@@ -311,6 +311,7 @@ class AgentLoop:
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
         session_key: str | None = None,
+        context_trace: dict | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -411,7 +412,7 @@ class AgentLoop:
         _tool_recordings = _sandbox.export_recordings() if _sandbox and _sandbox.recordings else None
 
         # Async snapshot save (non-blocking, best-effort)
-        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings, session_key=session_key)
+        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings, session_key=session_key, context_trace=context_trace)
 
         return result.final_content, result.tools_used, result.messages
 
@@ -555,7 +556,7 @@ class AgentLoop:
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
 
-    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None, session_key: str | None = None) -> None:
+    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None, session_key: str | None = None, context_trace: dict | None = None) -> None:
         """Fire-and-forget snapshot write, subject to sampling rate."""
         if self._eval_repo is None or self._uid is None:
             return
@@ -590,6 +591,7 @@ class AgentLoop:
             user_input=user_input,
             final_response=result.final_content,
             status=status,
+            context_trace=context_trace if context_trace else None,
         )
 
         async def _save() -> None:
@@ -630,9 +632,9 @@ class AgentLoop:
                 # Rule-based badcase detection
                 if os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "true").lower() == "true":
                     detector = BadcaseDetector(p95_tokens=None)
-                    detection = detector.detect(snapshot_data)
-                    if detection is not None and snap_id:
-                        trigger, category = detection
+                    detections = detector.detect(snapshot_data)
+                    if detections and snap_id:
+                        trigger, category = detections[0]
                         # Don't overwrite user triggers
                         snap = await self._eval_repo.get_snapshot(snap_id)
                         if snap and not snap.is_badcase:
@@ -677,6 +679,7 @@ class AgentLoop:
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id)
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            _sys_ctx_trace: dict = {}
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
@@ -686,6 +689,7 @@ class AgentLoop:
                 use_cache_blocks=self._use_cache_blocks,
                 agent_id=agent_id,
                 kb_bindings=kb_bindings,
+                _trace_out=_sys_ctx_trace,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
@@ -694,6 +698,7 @@ class AgentLoop:
                 kb_map=kb_map,
                 run_id=run_id,
                 session_key=key,
+                context_trace=_sys_ctx_trace,
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             await self.sessions.save(session)
@@ -748,6 +753,8 @@ class AgentLoop:
         _memory_budget_ratio = _harness.get("memory_budget_ratio", 0.6)
 
         history = session.get_history(max_messages=0)
+        # Capture context assembly decisions once at run start; not updated on subsequent turns.
+        _ctx_trace: dict = {}
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -763,6 +770,7 @@ class AgentLoop:
             total_token_budget=_total_token_budget,
             memory_budget_ratio=_memory_budget_ratio,
             agents_registry=agents_registry,
+            _trace_out=_ctx_trace,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -786,6 +794,7 @@ class AgentLoop:
             kb_map=kb_map,
             run_id=run_id,
             session_key=key,
+            context_trace=_ctx_trace,
         )
 
         if final_content is None:

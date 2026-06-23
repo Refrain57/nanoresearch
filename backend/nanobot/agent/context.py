@@ -33,16 +33,20 @@ class ContextBuilder:
         workspace: Path,
         timezone: str | None = None,
         knowledge_search: KnowledgeSearch | None = None,
+        uid: str | None = None,
     ):
         self.workspace = workspace
         self.timezone = timezone
         self.skills = SkillsLoader(workspace)
         self.knowledge_search = knowledge_search
+        self._uid = uid
 
     def build_history_context(
         self,
         query: str,
         token_budget: int = 500,
+        uid: str | None = None,
+        _ids_out: list | None = None,
     ) -> str:
         """Build history context from user_memory for a given query.
 
@@ -51,6 +55,8 @@ class ContextBuilder:
         Args:
             query: The query to search for.
             token_budget: Maximum tokens for history context.
+            uid: If provided, only return memories belonging to this user.
+            _ids_out: If provided, Chroma document IDs of retrieved fragments are appended.
 
         Returns:
             Formatted history context string, or empty string if no results.
@@ -59,10 +65,15 @@ class ContextBuilder:
             return ""
 
         try:
-            # Search user_memory collection
+            # Search user_memory collection (filter by uid if available)
             memories = self.knowledge_search.search_user_memory_sync(
-                query, top_k=5, apply_decay=True
+                query, top_k=5, apply_decay=True, uid=uid,
             )
+
+            if memories and _ids_out is not None:
+                _ids_out.extend(
+                    m["id"] for m in memories if m.get("id")  # str — Chroma document ID
+                )
 
             if not memories:
                 return ""
@@ -109,17 +120,23 @@ class ContextBuilder:
         custom_persona: str | None = None,
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
+        kb_bindings: list[dict] | None = None,
+        _trace_out: dict | None = None,
     ) -> str:
         """Build the system prompt (single string, no cache blocks)."""
         workspace_block = self._build_workspace_block(tool_names)
-        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry)
+        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry, kb_bindings=kb_bindings)
         dynamic = self._build_dynamic_suffix(
             skill_names=skill_names,
             topic=topic,
             total_token_budget=total_token_budget,
             agent_id=agent_id,
             memory_budget_ratio=memory_budget_ratio,
+            _trace_out=_trace_out,
         )
+        if _trace_out is not None:
+            _trace_out["skill_names"] = list(skill_names) if skill_names is not None else None  # list[str] | None — names only
+            _trace_out["persona_active"] = bool(custom_persona and custom_persona.strip())        # bool
         parts = [p for p in [workspace_block, agent_block, dynamic] if p]
         logger.debug(
             "prompt parts (no-cache path): {}",
@@ -137,11 +154,13 @@ class ContextBuilder:
         custom_persona: str | None = None,
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
+        kb_bindings: list[dict] | None = None,
+        _trace_out: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Return system prompt as 3 blocks with cache_control markers.
 
         Block 0 (workspace-level): identity + bootstrap files + tools. Cached per workspace.
-        Block 1 (per-agent): persona + skills summary + agent registry. Cached per agent config.
+        Block 1 (per-agent): persona + skills summary + agent registry + KB bindings. Cached per agent config.
         Block 2 (dynamic suffix): memory + semantic recall + always-on skills. Not cached.
         """
         blocks: list[dict[str, Any]] = []
@@ -154,7 +173,7 @@ class ContextBuilder:
                 "cache_control": {"type": "ephemeral"},
             })
 
-        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry)
+        agent_block = self._build_agent_block(skill_names, custom_persona, agents_registry, kb_bindings=kb_bindings)
         if agent_block:
             blocks.append({
                 "type": "text",
@@ -168,9 +187,14 @@ class ContextBuilder:
             total_token_budget=total_token_budget,
             agent_id=agent_id,
             memory_budget_ratio=memory_budget_ratio,
+            _trace_out=_trace_out,
         )
         if dynamic:
             blocks.append({"type": "text", "text": dynamic})
+
+        if _trace_out is not None:
+            _trace_out["skill_names"] = list(skill_names) if skill_names is not None else None  # list[str] | None — names only
+            _trace_out["persona_active"] = bool(custom_persona and custom_persona.strip())        # bool
 
         logger.debug(
             "prompt blocks: {}",
@@ -195,6 +219,15 @@ class ContextBuilder:
 
         if tool_names:
             parts.append(self._build_tools_section(tool_names))
+            if "retrieve_by_entity" in tool_names:
+                parts.append(
+                    "## 多跳检索策略\n"
+                    "当检索结果不足以完整回答问题时：\n"
+                    "1. 识别已检索内容中的关键实体/概念\n"
+                    "2. 使用 `retrieve_by_entity` 追踪该实体在其他文档中的论述\n"
+                    "3. 综合多次检索结果后再生成最终答案\n"
+                    "信息不足时优先通过工具补充上下文，不要直接猜测。"
+                )
 
         return "\n\n---\n\n".join(parts)
 
@@ -203,10 +236,11 @@ class ContextBuilder:
         skill_names: list[str] | None = None,
         custom_persona: str | None = None,
         agents_registry: list[dict] | None = None,
+        kb_bindings: list[dict] | None = None,
     ) -> str:
         """Block 2: per-agent content (cached per unique agent config).
 
-        Order: persona → skills summary → agent registry
+        Order: persona → skills summary → agent registry → KB bindings
         """
         parts: list[str] = []
 
@@ -228,6 +262,24 @@ Skills with available="false" need dependencies installed first - you can try in
         registry = self._build_agent_registry(agents_registry)
         if registry:
             parts.append(registry)
+
+        if kb_bindings:
+            kb_lines = ["## Available Knowledge Bases", ""]
+            for kb in kb_bindings:
+                name = kb.get("name", "")
+                desc = kb.get("description", "")
+                kid = kb.get("id", "")
+                line = f"- **{name}**"
+                if desc:
+                    line += f"：{desc}"
+                line += f"（ID: `{kid}`）"
+                kb_lines.append(line)
+            kb_lines.extend([
+                "",
+                "To search a specific knowledge base, use `rag_search` with its `kb_id` parameter.",
+                "If you don't know which KB to use, pick the one whose description best matches the user's question.",
+            ])
+            parts.append("\n".join(kb_lines))
 
         return "\n\n---\n\n".join(parts)
 
@@ -265,6 +317,7 @@ Skills with available="false" need dependencies installed first - you can try in
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         agent_id: str | None = None,
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
+        _trace_out: dict | None = None,
     ) -> str:
         """Build the dynamic suffix (may change per request, non-cacheable).
 
@@ -274,28 +327,50 @@ Skills with available="false" need dependencies installed first - you can try in
         knowledge_budget = int(total_token_budget * (1.0 - memory_budget_ratio))
 
         parts: list[str] = []
+        _injected_memory_chars = 0
+        _injected_history_chars = 0
+        # Only allocate ID list when caller wants trace (avoids list alloc on hot path)
+        _fragment_ids: list[str] | None = [] if _trace_out is not None else None
 
         # 1. 稳定事实 (MEMORY.md)
         memory = MemoryStore(self.workspace, agent_id=agent_id).get_memory_context()
         if memory:
             memory = self._truncate_to_budget(memory, memory_budget)
             if memory:
+                _injected_memory_chars = len(memory)  # int — chars of content after truncation (no full text stored)
                 parts.append(f"<memory>\n{memory}\n</memory>")
 
-        # 2. 对话历史 (按需召回)
+        # 2. 对话历史 (按需召回，按 uid 隔离)
         if topic:
-            history_context = self.build_history_context(topic, token_budget=knowledge_budget)
+            history_context = self.build_history_context(
+                topic, token_budget=knowledge_budget, uid=self._uid,
+                _ids_out=_fragment_ids,
+            )
             if history_context:
+                _injected_history_chars = len(history_context)  # int — chars of content after truncation (no full text stored)
                 parts.append(f"<history>\n{history_context}\n</history>")
 
+        _always_skill_names: list[str] = []
         always_skills = self.skills.get_always_skills()
         if always_skills:
             if skill_names is not None:
                 always_skills = [s for s in always_skills if s in skill_names]
             if always_skills:
+                _always_skill_names = list(always_skills)  # list[str] — skill names only
                 always_content = self.skills.load_skills_for_context(always_skills)
                 if always_content:
                     parts.append(f"# Active Skills\n\n{always_content}")
+
+        if _trace_out is not None:
+            _trace_out.update({
+                "history_query": topic,                              # str | None — query text sent to user_memory search
+                "memory_budget_tokens": memory_budget,               # int — allocated token budget for MEMORY.md
+                "knowledge_budget_tokens": knowledge_budget,         # int — allocated token budget for history context
+                "memory_actual_chars": _injected_memory_chars,       # int — chars injected after truncation (0 if none)
+                "history_actual_chars": _injected_history_chars,     # int — chars injected after truncation (0 if none)
+                "memory_fragment_ids": _fragment_ids or [],          # list[str] — Chroma document IDs, no content
+                "always_skill_names": _always_skill_names,           # list[str] — always-on skill names only
+            })
 
         return "\n\n---\n\n".join(parts)
 
@@ -360,7 +435,7 @@ Skills with available="false" need dependencies installed first - you can try in
                 categories["Scheduling"].append(name)
             elif name == "research":
                 categories["Research"].append(name)
-            elif name.startswith("mcp_rag"):
+            elif name.startswith("mcp_rag") or name == "retrieve_by_entity":
                 categories["RAG"].append(name)
             elif name == "spawn":
                 # Skip internal tools not meant for direct user access
@@ -454,6 +529,8 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         custom_persona: str | None = None,
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
+        kb_bindings: list[dict] | None = None,
+        _trace_out: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         user_content = self._build_user_content(current_message, media)
@@ -462,13 +539,15 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
             system_content: str | list[dict[str, Any]] = self.build_system_prompt_blocks(
                 skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
                 agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
-                agents_registry=agents_registry,
+                agents_registry=agents_registry, kb_bindings=kb_bindings,
+                _trace_out=_trace_out,
             )
         else:
             system_content = self.build_system_prompt(
                 skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
                 agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
-                agents_registry=agents_registry,
+                agents_registry=agents_registry, kb_bindings=kb_bindings,
+                _trace_out=_trace_out,
             )
 
         return [

@@ -24,6 +24,8 @@ class RunSnapshotData:
     tool_call_count: int
     llm_call_count: int
     retry_count: int
+    # Phase 0: context assembly decisions captured at run start (ids + numbers + query text, no injected full text)
+    context_trace: dict | None = None
 
 
 class RunSnapshotCollector:
@@ -92,6 +94,7 @@ class RunSnapshotCollector:
         user_input: str,
         final_response: str | None,
         status: str,
+        context_trace: dict | None = None,
     ) -> RunSnapshotData:
         total_ms = round((time.monotonic() - self._start_time) * 1000, 2)
         ttft_ms = (
@@ -113,4 +116,5 @@ class RunSnapshotCollector:
             tool_call_count=len(self._tool_calls),
             llm_call_count=len(self._llm_calls),
             retry_count=self._retry_count,
+            context_trace=context_trace,
         )

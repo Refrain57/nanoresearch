@@ -28,6 +28,22 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _migrate_snapshot_scores(snap: AgentRunSnapshot) -> AgentRunSnapshot:
+    """Rename legacy 'hallucination' key to 'faithfulness_score' in scores JSONB.
+
+    Historical snapshots stored the Judge's hallucination dimension under the key
+    'hallucination'. New snapshots use 'faithfulness_score'. This mapping is applied
+    at read time so callers always see 'faithfulness_score'.
+    """
+    if snap.scores and isinstance(snap.scores, dict):
+        if "hallucination" in snap.scores and "faithfulness_score" not in snap.scores:
+            snap.scores = {
+                **{k: v for k, v in snap.scores.items() if k != "hallucination"},
+                "faithfulness_score": snap.scores["hallucination"],
+            }
+    return snap
+
+
 class AgentEvalRepository:
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self._factory = session_factory
@@ -67,6 +83,7 @@ class AgentEvalRepository:
             llm_calls=data.llm_calls,
             final_response=data.final_response,
             tool_recordings=json.loads(tool_recordings) if tool_recordings else None,
+            context_trace=data.context_trace,
         )
         async with self._factory() as session:
             session.add(snap)
@@ -75,7 +92,8 @@ class AgentEvalRepository:
 
     async def get_snapshot(self, snapshot_id: uuid.UUID) -> AgentRunSnapshot | None:
         async with self._factory() as session:
-            return await session.get(AgentRunSnapshot, snapshot_id)
+            snap = await session.get(AgentRunSnapshot, snapshot_id)
+            return _migrate_snapshot_scores(snap) if snap else None
 
     async def list_snapshots(
         self,
@@ -100,13 +118,14 @@ class AgentEvalRepository:
 
             rows_q = base.order_by(desc(AgentRunSnapshot.timestamp)).offset((page - 1) * page_size).limit(page_size)
             rows = (await session.execute(rows_q)).scalars().all()
-            return list(rows), total
+            return [_migrate_snapshot_scores(r) for r in rows], total
 
     async def list_badcases(
         self,
         badcase_status: str | None = None,
         badcase_category: str | None = None,
         semantic_category: str | None = None,
+        root_cause_auto: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[AgentRunSnapshot], int]:
@@ -119,13 +138,15 @@ class AgentEvalRepository:
                 base = base.where(AgentRunSnapshot.badcase_category == badcase_category)
             if semantic_category is not None:
                 base = base.where(AgentRunSnapshot.semantic_category == semantic_category)
+            if root_cause_auto is not None:
+                base = base.where(AgentRunSnapshot.root_cause_auto == root_cause_auto)
 
             count_q = select(func.count()).select_from(base.subquery())
             total = (await session.execute(count_q)).scalar_one()
 
             rows_q = base.order_by(desc(AgentRunSnapshot.timestamp)).offset((page - 1) * page_size).limit(page_size)
             rows = (await session.execute(rows_q)).scalars().all()
-            return list(rows), total
+            return [_migrate_snapshot_scores(r) for r in rows], total
 
     async def mark_badcase(
         self,
@@ -150,7 +171,7 @@ class AgentEvalRepository:
         self,
         snapshot_id: uuid.UUID,
         scores: dict[str, float],
-        passed: bool,
+        passed: bool | None,
         failed_dims: list[str],
         judge_metadata: dict | None = None,
     ) -> None:
@@ -210,6 +231,9 @@ class AgentEvalRepository:
         expected_keywords: list[str] | None = None,
         token_budget: int | None = None,
         human_score: float | None = None,
+        status: str = "active",
+        generated_from_snapshot_id: uuid.UUID | None = None,
+        generation_reason: str | None = None,
     ) -> AgentTestCase:
         tc = AgentTestCase(
             dataset_type=dataset_type,
@@ -222,6 +246,9 @@ class AgentEvalRepository:
             expected_keywords=expected_keywords,
             token_budget=token_budget,
             human_score=human_score,
+            status=status,
+            generated_from_snapshot_id=generated_from_snapshot_id,
+            generation_reason=generation_reason,
         )
         async with self._factory() as session:
             session.add(tc)
@@ -240,6 +267,7 @@ class AgentEvalRepository:
                 q = q.where(AgentTestCase.dataset_type == dataset_type)
             if active_only:
                 q = q.where(AgentTestCase.is_active == True)  # noqa: E712
+                q = q.where(AgentTestCase.status == "active")
             q = q.order_by(desc(AgentTestCase.created_at))
             return list((await session.execute(q)).scalars().all())
 
@@ -256,6 +284,38 @@ class AgentEvalRepository:
                 update(AgentTestCase)
                 .where(AgentTestCase.id == test_case_id)
                 .values(last_reviewed_at=_utcnow())
+            )
+            await session.commit()
+
+    async def list_pending_cases(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[AgentTestCase], int]:
+        from sqlalchemy import func
+        async with self._factory() as session:
+            base = select(AgentTestCase).where(AgentTestCase.status == "pending_review")
+            count_q = select(func.count()).select_from(base.subquery())
+            total = (await session.execute(count_q)).scalar_one()
+            rows_q = base.order_by(desc(AgentTestCase.created_at)).offset((page - 1) * page_size).limit(page_size)
+            rows = (await session.execute(rows_q)).scalars().all()
+            return list(rows), total
+
+    async def approve_pending_case(self, test_case_id: uuid.UUID) -> None:
+        async with self._factory() as session:
+            await session.execute(
+                update(AgentTestCase)
+                .where(AgentTestCase.id == test_case_id)
+                .values(status="active", is_active=True)
+            )
+            await session.commit()
+
+    async def reject_pending_case(self, test_case_id: uuid.UUID) -> None:
+        async with self._factory() as session:
+            await session.execute(
+                update(AgentTestCase)
+                .where(AgentTestCase.id == test_case_id)
+                .values(status="rejected", is_active=False)
             )
             await session.commit()
 
@@ -365,7 +425,8 @@ class AgentEvalRepository:
                 .where(AgentRunSnapshot.eval_run_id == eval_run_id)
                 .order_by(AgentRunSnapshot.timestamp)
             )
-            return list((await session.execute(q)).scalars().all())
+            rows = (await session.execute(q)).scalars().all()
+            return [_migrate_snapshot_scores(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Badcase semantic classification

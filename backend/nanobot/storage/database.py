@@ -66,6 +66,30 @@ async def check_schema_migrations() -> None:
         ("knowledge_bases", "chunk_strategy"),
         ("agents", "harness"),
         ("agents", "persona"),
+        # KG tables (migrate_add_kg_tables.py)
+        ("knowledge_bases", "enable_graph_expansion"),
+        ("kg_entities", "id"),
+        ("kg_entity_mentions", "id"),
+        ("kg_triples", "id"),
+        ("kg_triple_mentions", "id"),
+        # Agent evaluation tables
+        ("agent_run_snapshots", "id"),
+        ("agent_test_cases", "id"),
+        ("agent_eval_runs", "id"),
+        ("agent_run_snapshots", "eval_run_id"),
+        # question_type for eval dataset items and run items
+        ("eval_dataset_items", "question_type"),
+        ("eval_run_items", "question_type"),
+        # Agent eval v2 (migrate_agent_eval_v2.py)
+        ("agent_run_snapshots", "tool_recordings"),
+        ("agent_run_snapshots", "semantic_category"),
+        ("agent_run_snapshots", "judge_metadata"),
+        ("agent_eval_runs", "baseline_eval_run_id"),
+        ("agent_eval_runs", "has_regression"),
+        ("judge_calibration_logs", "id"),
+        ("optimization_proposals", "id"),
+        # Phase 0: context trace (migrate_phase0_context_trace.sql)
+        ("agent_run_snapshots", "context_trace"),
     ]
     missing = []
     async with _engine.connect() as conn:
