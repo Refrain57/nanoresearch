@@ -272,12 +272,23 @@ async def trigger_eval_run(
         judge = LLMJudge(provider=channel_loop.provider, model=body.judge_model)
         judge_model_resolved = judge._model
 
+    embedding_fn = None
+    try:
+        from nanobot.rag.libs.embedding.embedding_factory import EmbeddingFactory
+        from nanobot.rag.core.settings import load_settings
+        _settings = load_settings()
+        _embedding_model = EmbeddingFactory.create(_settings)
+        embedding_fn = lambda texts: _embedding_model.embed(texts)  # noqa: E731
+    except Exception:
+        pass  # semantic matching degrades gracefully to string-only
+
     runner = TestRunner(
         provider=channel_loop.provider,
         tools=channel_loop.tools,
         repo=repo,
         model=getattr(channel_loop, "model", None),
         judge=judge,
+        embedding_fn=embedding_fn,
     )
 
     config = EvalRunConfig(
@@ -434,6 +445,32 @@ async def get_trends(
 # Serializers
 # ---------------------------------------------------------------------------
 
+def _fmt_context_trace(ct: Any) -> dict | None:
+    """Extract human-readable evidence from context_trace JSONB."""
+    if not ct:
+        return None
+    # JSONB may arrive as a string from asyncpg; normalize to dict
+    if isinstance(ct, str):
+        import json as _json
+        try:
+            ct = _json.loads(ct)
+        except Exception:
+            return None
+    if not isinstance(ct, dict):
+        return None
+    return {
+        "history_query": ct.get("history_query"),
+        "memory_budget_tokens": ct.get("memory_budget_tokens"),
+        "knowledge_budget_tokens": ct.get("knowledge_budget_tokens"),
+        "memory_actual_chars": ct.get("memory_actual_chars"),
+        "history_actual_chars": ct.get("history_actual_chars"),
+        "memory_fragment_count": len(ct.get("memory_fragment_ids") or []),
+        "always_skill_names": ct.get("always_skill_names") or [],
+        "skill_names": ct.get("skill_names"),
+        "persona_active": ct.get("persona_active"),
+    }
+
+
 def _snap_summary(r: Any) -> dict:
     return {
         "id": str(r.id),
@@ -460,6 +497,9 @@ def _snap_summary(r: Any) -> dict:
         "scores": r.scores,
         "final_response": r.final_response,
         "failed_dimensions": r.failed_dimensions,
+        # Phase 1 structured classification
+        "classification_layer": r.classification_layer,
+        "classification_target_kind": r.classification_target_kind,
     }
 
 
@@ -478,14 +518,24 @@ def _snap_detail(r: Any) -> dict:
         "annotated_at": r.annotated_at.isoformat() if r.annotated_at else None,
         "has_recordings": bool(r.tool_recordings),
         "judge_metadata": r.judge_metadata,
+        # Phase 1 structured pointer
+        "classification_layer": r.classification_layer,
+        "classification_target_kind": r.classification_target_kind,
+        "classification_target_id": r.classification_target_id,
+        # Phase 0 context trace (key fields only)
+        "context_trace": _fmt_context_trace(r.context_trace),
+        # Phase 5 baseline gate (if the snapshot has a linked proposal)
+        "baseline_score": None,  # populated by diagnosis endpoint; not on snapshot
+        "gate_status": None,
     })
     return base
 
 
 def _eval_run_dict(r: Any) -> dict:
     pass_rate = None
-    if r.total_cases > 0:
-        pass_rate = round(r.passed_cases / r.total_cases, 4)
+    scorable = r.passed_cases + r.failed_cases
+    if scorable > 0:
+        pass_rate = round(r.passed_cases / scorable, 4)
     return {
         "id": str(r.id),
         "name": r.name,
@@ -536,11 +586,30 @@ def _calibration_dict(r: Any) -> dict:
 
 
 def _proposal_dict(r: Any) -> dict:
+    # Enrich each candidate with gate fields flattened from JSONB
+    enriched = []
+    for p in (r.proposals or []):
+        cp = dict(p)
+        # Flatten nested scores for frontend consumption
+        scores = cp.get("scores") or {}
+        cp["fix_scores"] = scores.get("fix_set") or {}
+        cp["health_scores"] = scores.get("health_set") or {}
+        cp["fix_mean"] = (
+            sum(v for v in cp["fix_scores"].values()) / len(cp["fix_scores"])
+            if cp["fix_scores"] else None
+        )
+        cp["health_mean"] = (
+            sum(v for v in cp["health_scores"].values()) / len(cp["health_scores"])
+            if cp["health_scores"] else None
+        )
+        enriched.append(cp)
     return {
         "id": str(r.id),
         "category": r.category,
-        "proposals": r.proposals or [],
+        "proposals": enriched,
         "status": r.status,
+        "baseline_score": r.baseline_score,
+        "baseline_version_id": str(r.baseline_version_id) if r.baseline_version_id else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "approved_at": r.approved_at.isoformat() if r.approved_at else None,
         "created_by": r.created_by,
@@ -816,6 +885,7 @@ async def list_calibrations(
 class OptimizeRequest(BaseModel):
     category: str
     snapshot_ids: list[uuid.UUID]
+    target_kind: str | None = None  # "system_prompt" | "tool_description"; auto-derived if None
 
 
 @router.post("/optimize")
@@ -825,8 +895,17 @@ async def trigger_optimization(
     uid: str = Depends(get_current_user),
     repo: AgentEvalRepository = Depends(_repo),
 ):
-    """Trigger the optimization agent for a badcase category (async)."""
+    """Trigger the optimization agent for a badcase category (async).
+
+    Phase 6: target_kind is auto-derived from snapshots' classification_layer
+    when not explicitly provided.  If snapshots disagree on layer, the first
+    fixable one wins; if none are fixable, raises 400.
+    """
     from nanobot.eval.optimizer import OptimizationAgent
+    from nanobot.eval.tunable import PersonaObject, ToolDescriptionObject
+    from nanobot.storage.database import get_session_factory
+    from nanobot.storage.repositories.agent_repo import AgentRepository
+    from nanobot.eval.badcase_classifier import FIXABLE_LAYERS
 
     state = request.app.state
     channel_loop = getattr(state, "channel_loop", None)
@@ -838,14 +917,76 @@ async def trigger_optimization(
     if not snapshots:
         raise HTTPException(400, "No valid snapshots provided")
 
-    # Gate: only prompt-rooted badcases benefit from prompt optimization.
-    # root_cause_auto is None means not yet classified — allow through to preserve existing behaviour.
-    prompt_snaps = [s for s in snapshots if s.root_cause_auto == "prompt" or s.root_cause_auto is None]
-    if not prompt_snaps:
-        raise HTTPException(400, "所选 badcase 均非 prompt 类根因，无需 prompt 优化")
-    snapshots = prompt_snaps
+    # Determine target_kind: explicit > auto-derived from classification_layer
+    target_kind = body.target_kind
+    if target_kind is None:
+        for s in snapshots:
+            if s.classification_layer in FIXABLE_LAYERS and s.classification_target_kind:
+                target_kind = s.classification_target_kind
+                break
+    if target_kind is None:
+        # Fall back to legacy: if root_cause_auto is "prompt", use system_prompt
+        if any(s.root_cause_auto == "prompt" for s in snapshots):
+            target_kind = "system_prompt"
+        else:
+            raise HTTPException(
+                400,
+                "无法自动确定 target_kind——所有快照的 classification_layer 均为 None 或 diagnosis_only，"
+                "且无 prompt 类 root_cause_auto。请先运行 Phase 1 分类器。",
+            )
+    if target_kind not in ("system_prompt", "tool_description"):
+        raise HTTPException(400, f"不支持的目标类型：{target_kind}。仅支持 system_prompt 和 tool_description。")
 
-    golden_cases = await repo.list_test_cases(dataset_type="golden")
+    agent_id = str(snapshots[0].agent_id) if snapshots[0].agent_id else None
+    if agent_id is None:
+        raise HTTPException(400, "快照不包含 agent_id，无法构建优化目标")
+
+    agent_repo = AgentRepository(get_session_factory())
+
+    # Build the correct TunableObject
+    if target_kind == "tool_description":
+        tool_name = snapshots[0].classification_target_id
+        if not tool_name:
+            raise HTTPException(400, "classification_target_id 为空，无法确定目标工具名称")
+        target = ToolDescriptionObject(
+            tool_name=tool_name,
+            agent_id=agent_id,
+            agent_repo=agent_repo,
+            eval_repo=repo,
+            provider=channel_loop.provider,
+        )
+    else:
+        target = PersonaObject(
+            agent_id=agent_id,
+            agent_repo=agent_repo,
+            eval_repo=repo,
+            provider=channel_loop.provider,
+        )
+
+    # Phase 2: build fix_test_cases from badcase snapshots + load health set
+    from dataclasses import dataclass as _dc, field as _field
+
+    @_dc
+    class _FixTestCase:
+        id: uuid.UUID
+        user_input: str
+        tool_recordings: dict | None = None
+        expected_tools: list = _field(default_factory=list)
+        expected_keywords: list = _field(default_factory=list)
+
+    fix_test_cases = [
+        _FixTestCase(
+            id=s.id,
+            user_input=s.user_input or "",
+            tool_recordings=s.tool_recordings,
+        )
+        for s in snapshots
+    ]
+
+    health_test_cases = await repo.list_test_cases(set_kind="health", active_only=True)
+    if not health_test_cases:
+        # Try loading all test cases without set_kind filter (historical data)
+        health_test_cases = await repo.list_test_cases(active_only=True)
 
     async def _run() -> None:
         optimizer = OptimizationAgent(
@@ -854,14 +995,20 @@ async def trigger_optimization(
             registry=channel_loop.tools,
         )
         await optimizer.generate_proposals(
-            category=body.category,
+            target=target,
             representative_snapshots=snapshots,
-            golden_test_cases=golden_cases,
+            fix_test_cases=fix_test_cases,
+            health_test_cases=health_test_cases,
             created_by=uid,
         )
 
     asyncio.create_task(_run())
-    return {"status": "optimization_started", "category": body.category}
+    return {
+        "status": "optimization_started",
+        "category": body.category,
+        "target_kind": target_kind,
+        "target_id": target.target_id,
+    }
 
 
 @router.get("/optimize")
@@ -948,6 +1095,99 @@ async def context_diagnosis(
     return {"summary": summary, "items": items}
 
 
+# ---------------------------------------------------------------------------
+# Phase 6: Structured Diagnosis Panel
+# ---------------------------------------------------------------------------
+
+class DiagnosisEvidence(BaseModel):
+    history_query: str | None = None
+    memory_budget_tokens: int | None = None
+    knowledge_budget_tokens: int | None = None
+    memory_actual_chars: int | None = None
+    history_actual_chars: int | None = None
+    memory_fragment_count: int = 0
+    always_skill_names: list[str] | None = None
+    skill_names: list[str] | None = None
+    persona_active: bool | None = None
+
+
+class DiagnosisResponse(BaseModel):
+    snapshot_id: str
+    phenomenon: str | None
+    layer: str | None
+    fixable: bool
+    target_kind: str | None
+    target_id: str | None
+    evidence: dict | None
+    suggestion: str | None
+    has_optimization: bool
+    has_proposal: bool
+    proposal_id: str | None
+
+
+_DIAGNOSIS_ONLY_SUGGESTIONS = {
+    "Memory": "Memory 层不纳入自动修复。建议人工检查记忆写入规则、衰减策略或检索预算分配。",
+    "Recovery": "Recovery 层不纳入自动修复。建议人工检查超时阈值、Circuit Breaker 触发条件或回滚策略。",
+}
+
+
+@router.get("/snapshots/{snapshot_id}/diagnosis")
+async def get_snapshot_diagnosis(
+    snapshot_id: uuid.UUID,
+    uid: str = Depends(get_current_user),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    """Assemble the structured diagnosis panel for a single badcase snapshot."""
+    from nanobot.eval.badcase_classifier import FIXABLE_LAYERS, DIAGNOSIS_ONLY_LAYERS
+
+    snap = await repo.get_snapshot(snapshot_id)
+    if snap is None or snap.uid != uid:
+        raise HTTPException(404, "Snapshot not found")
+
+    layer = snap.classification_layer or None
+    target_kind = snap.classification_target_kind or None
+    target_id = snap.classification_target_id or None
+    # tool_impl means the tool itself has a bug — not fixable via text editing
+    fixable = layer in FIXABLE_LAYERS and target_kind != "tool_impl"
+
+    evidence = _fmt_context_trace(snap.context_trace)
+
+    suggestion = None
+    if layer in DIAGNOSIS_ONLY_LAYERS:
+        suggestion = _DIAGNOSIS_ONLY_SUGGESTIONS.get(
+            layer, f"{layer} 层暂不支持自动修复，建议人工排查。"
+        )
+
+    # Check if an optimization proposal for this target already exists
+    has_optimization = False
+    proposal_id = None
+    if layer in FIXABLE_LAYERS and target_kind and target_id:
+        target_cat = f"{target_kind}:{target_id}"
+        try:
+            proposals, _ = await repo.list_optimization_proposals(status=None, page=1, page_size=50)
+            for p in proposals:
+                if p.category == target_cat:
+                    has_optimization = True
+                    proposal_id = str(p.id)
+                    break
+        except Exception:
+            pass
+
+    return DiagnosisResponse(
+        snapshot_id=str(snap.id),
+        phenomenon=snap.semantic_category or None,
+        layer=layer,
+        fixable=fixable,
+        target_kind=target_kind,
+        target_id=target_id,
+        evidence=evidence,
+        suggestion=suggestion,
+        has_optimization=has_optimization,
+        has_proposal=proposal_id is not None,
+        proposal_id=proposal_id,
+    )
+
+
 @router.get("/tool-error-stats")
 async def tool_error_stats(
     days: int = Query(7, ge=1, le=365),
@@ -959,8 +1199,6 @@ async def tool_error_stats(
     from nanobot.storage.database import get_session_factory
 
     factory = get_session_factory()
-    interval = f"{days} days"
-
     async with factory() as session:
         agg_rows = (await session.execute(text("""
             SELECT
@@ -970,22 +1208,22 @@ async def tool_error_stats(
                 ROUND(AVG((entry->>'error' = 'true')::int)::numeric * 100, 1) AS error_rate_pct
             FROM agent_run_snapshots,
                  jsonb_array_elements(tool_call_chain) AS entry
-            WHERE timestamp > NOW() - CAST(:interval AS INTERVAL)
+            WHERE timestamp > NOW() - make_interval(days => :days)
               AND jsonb_typeof(tool_call_chain) = 'array'
               AND jsonb_array_length(tool_call_chain) > 0
             GROUP BY tool_name
             ORDER BY error_rate_pct DESC
-        """), {"interval": interval})).fetchall()
+        """), {"days": days})).fetchall()
 
         sample_rows = (await session.execute(text("""
             SELECT entry->>'name' AS tool_name, entry->>'result' AS result_text, timestamp
             FROM agent_run_snapshots,
                  jsonb_array_elements(tool_call_chain) AS entry
-            WHERE timestamp > NOW() - CAST(:interval AS INTERVAL)
+            WHERE timestamp > NOW() - make_interval(days => :days)
               AND entry->>'error' = 'true'
             ORDER BY timestamp DESC
             LIMIT 200
-        """), {"interval": interval})).fetchall()
+        """), {"days": days})).fetchall()
 
     samples_by_tool: dict[str, list[str]] = defaultdict(list)
     for row in sample_rows:
@@ -1064,8 +1302,10 @@ async def user_input_analysis(
 
     try:
         response = await channel_loop.provider.chat_with_retry(
-            messages=[{"role": "user", "content": user_msg}],
-            system=system,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
             max_tokens=1024,
             temperature=0.3,
         )
@@ -1136,8 +1376,10 @@ async def model_analysis(
 
     try:
         response = await channel_loop.provider.chat_with_retry(
-            messages=[{"role": "user", "content": user_msg}],
-            system=system,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
             max_tokens=1024,
             temperature=0.3,
         )
@@ -1161,3 +1403,283 @@ async def model_analysis(
         }
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Data Flywheel — pending case review queue
+# ---------------------------------------------------------------------------
+
+@router.get("/pending-cases")
+async def list_pending_cases(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    cases, total = await repo.list_pending_cases(page=page, page_size=page_size)
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": str(c.id),
+                "name": c.name,
+                "user_input": c.user_input,
+                "dataset_type": c.dataset_type,
+                "expected_keywords": c.expected_keywords,
+                "expected_tools": c.expected_tools,
+                "generation_reason": c.generation_reason,
+                "generated_from_snapshot_id": str(c.generated_from_snapshot_id) if c.generated_from_snapshot_id else None,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in cases
+        ],
+    }
+
+
+@router.post("/pending-cases/{case_id}/approve")
+async def approve_pending_case(
+    case_id: uuid.UUID,
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    await repo.approve_pending_case(case_id)
+    return {"status": "approved", "case_id": str(case_id)}
+
+
+@router.post("/pending-cases/{case_id}/reject")
+async def reject_pending_case(
+    case_id: uuid.UUID,
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    await repo.reject_pending_case(case_id)
+    return {"status": "rejected", "case_id": str(case_id)}
+
+
+class _FlywheelTriggerRequest(BaseModel):
+    eval_run_id: uuid.UUID
+    flywheel_thresholds: dict[str, float] | None = None
+    adversarial_count: int = 0
+
+
+@router.post("/data-flywheel/trigger")
+async def trigger_flywheel(
+    body: _FlywheelTriggerRequest,
+    request: Request,
+    uid: str = Depends(get_current_user),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    from nanobot.eval.data_flywheel import DataFlywheel, run_flywheel
+    from nanobot.eval.test_runner import EvalRunConfig
+
+    channel_loop = request.app.state.channel_loop
+    flywheel = DataFlywheel(channel_loop.provider)
+    config = EvalRunConfig(
+        enable_flywheel=True,
+        flywheel_thresholds=body.flywheel_thresholds or {
+            "retrieval_failure": 0.20,
+            "hallucination": 0.15,
+            "reasoning_failure": 0.25,
+            "tool_skip": 0.30,
+        },
+        flywheel_adversarial_per_run=body.adversarial_count,
+    )
+    try:
+        await run_flywheel(flywheel, repo, body.eval_run_id, uid, config)
+        pending, total = await repo.list_pending_cases()
+        return {"status": "ok", "pending_cases_total": total}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Tunable Object — Apply / Rollback / Version History
+# ---------------------------------------------------------------------------
+
+class ApplyRequest(BaseModel):
+    target_kind: str  # "system_prompt" | "tool_description"
+    target_id: str    # agent_id | tool_name
+    content: str      # candidate prompt text to apply
+    proposal_id: str | None = None  # optional tracking
+
+
+class RollbackRequest(BaseModel):
+    target_kind: str
+    target_id: str
+
+
+@router.post("/tunable/apply")
+async def tunable_apply(
+    body: ApplyRequest,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Apply a candidate version to the target tunable object.
+
+    Writes a new version to the registry (active=True), deactivates the previous
+    active version, and persists the new content to the underlying storage
+    (agents.persona or agents.tools_config[].description).
+    """
+    from nanobot.eval.tunable import PersonaObject, ToolDescriptionObject
+    from nanobot.storage.database import get_session_factory
+    from nanobot.storage.repositories.agent_repo import AgentRepository
+
+    state = request.app.state
+    channel_loop = getattr(state, "channel_loop", None)
+    agent_repo = AgentRepository(get_session_factory())
+
+    if not channel_loop:
+        raise HTTPException(503, "Agent loop not available")
+
+    from nanobot.storage.repositories.agent_eval_repo import AgentEvalRepository
+    eval_repo = AgentEvalRepository(get_session_factory())
+
+    if body.target_kind == "tool_description":
+        agent_id = None
+        agents = await agent_repo.list_all()
+        for a in agents:
+            for t in (a.tools_config or []):
+                if t.get("name") == body.target_id:
+                    agent_id = str(a.id)
+                    break
+            if agent_id:
+                break
+        if agent_id is None:
+            raise HTTPException(400, f"未找到拥有工具 '{body.target_id}' 的 agent")
+        target = ToolDescriptionObject(
+            tool_name=body.target_id,
+            agent_id=agent_id,
+            agent_repo=agent_repo,
+            eval_repo=eval_repo,
+            provider=channel_loop.provider,
+        )
+    elif body.target_kind == "system_prompt":
+        target = PersonaObject(
+            agent_id=body.target_id,
+            agent_repo=agent_repo,
+            eval_repo=eval_repo,
+            provider=channel_loop.provider,
+        )
+    else:
+        raise HTTPException(400, f"不支持的目标类型：{body.target_kind}")
+
+    old_content = await target.read()
+    version_id = await target.apply(body.content)
+
+    if body.proposal_id:
+        try:
+            await eval_repo.update_optimization_proposal_status(
+                uuid.UUID(body.proposal_id), "applied"
+            )
+        except Exception:
+            pass
+
+    return {
+        "status": "applied",
+        "version_id": version_id,
+        "previous_content": old_content[:500],
+        "target_kind": body.target_kind,
+        "target_id": body.target_id,
+    }
+
+
+@router.post("/tunable/rollback")
+async def tunable_rollback(
+    body: RollbackRequest,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Rollback to the previous active version."""
+    from nanobot.eval.tunable import PersonaObject, ToolDescriptionObject
+    from nanobot.storage.database import get_session_factory
+    from nanobot.storage.repositories.agent_repo import AgentRepository
+
+    state = request.app.state
+    channel_loop = getattr(state, "channel_loop", None)
+    if not channel_loop:
+        raise HTTPException(503, "Agent loop not available")
+
+    agent_repo = AgentRepository(get_session_factory())
+    from nanobot.storage.repositories.agent_eval_repo import AgentEvalRepository
+    eval_repo = AgentEvalRepository(get_session_factory())
+
+    if body.target_kind == "tool_description":
+        agent_id = None
+        agents = await agent_repo.list_all()
+        for a in agents:
+            for t in (a.tools_config or []):
+                if t.get("name") == body.target_id:
+                    agent_id = str(a.id)
+                    break
+            if agent_id:
+                break
+        if agent_id is None:
+            raise HTTPException(400, f"未找到拥有工具 '{body.target_id}' 的 agent")
+        target = ToolDescriptionObject(
+            tool_name=body.target_id,
+            agent_id=agent_id,
+            agent_repo=agent_repo,
+            eval_repo=eval_repo,
+            provider=channel_loop.provider,
+        )
+    elif body.target_kind == "system_prompt":
+        target = PersonaObject(
+            agent_id=body.target_id,
+            agent_repo=agent_repo,
+            eval_repo=eval_repo,
+            provider=channel_loop.provider,
+        )
+    else:
+        raise HTTPException(400, f"不支持的目标类型：{body.target_kind}")
+
+    current_version_id = await target.get_current_version()
+    if current_version_id is None:
+        raise HTTPException(400, "没有版本历史，无法回滚")
+
+    versions = await eval_repo.list_tunable_versions(body.target_kind, body.target_id)
+    prev_versions = [v for v in versions if str(v.id) != current_version_id]
+    if not prev_versions:
+        raise HTTPException(400, "只有一条版本记录，无法回滚")
+
+    prev = prev_versions[0]
+    old_content = await target.read()
+    await target.rollback(str(prev.id))
+    new_version_id = await target.get_current_version()
+
+    return {
+        "status": "rolled_back",
+        "version_id": new_version_id,
+        "rolled_back_from_version": current_version_id,
+        "restored_from_version": str(prev.id),
+        "previous_content": old_content[:500],
+        "restored_content": prev.content[:500],
+        "target_kind": body.target_kind,
+        "target_id": body.target_id,
+    }
+
+
+@router.get("/tunable/{target_kind}/{target_id}/versions")
+async def tunable_versions(
+    target_kind: str,
+    target_id: str,
+    uid: str = Depends(get_current_user),
+    repo: AgentEvalRepository = Depends(_repo),
+):
+    """List version history for a tunable object."""
+    if target_kind not in ("system_prompt", "tool_description"):
+        raise HTTPException(400, f"不支持的目标类型：{target_kind}")
+
+    rows = await repo.list_tunable_versions(target_kind, target_id)
+    return {
+        "target_kind": target_kind,
+        "target_id": target_id,
+        "versions": [
+            {
+                "id": str(v.id),
+                "content_preview": (v.content or "")[:500],
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "active": v.active,
+                "created_by": v.created_by,
+            }
+            for v in rows
+        ],
+    }
