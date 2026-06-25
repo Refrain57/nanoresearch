@@ -123,15 +123,11 @@ class ListDocumentsTool:
 
     @property
     def description(self) -> str:
-        return """List documents in a specific collection.
+        return """List documents in a knowledge base.
 
 When to use:
-- After list_collections, to see documents in a collection
-- When user asks about specific collection contents
+- When user asks about specific knowledge base contents
 - To verify if a document was ingested
-
-Args:
-    collection: Collection name (default: 'default')
 
 Returns:
     JSON with list of documents, each containing:
@@ -145,10 +141,9 @@ Returns:
         return {
             "type": "object",
             "properties": {
-                "collection": {
+                "kb_id": {
                     "type": "string",
-                    "default": "default",
-                    "description": "Collection name to list documents from",
+                    "description": "Knowledge base ID to list documents from",
                 },
             },
         }
@@ -271,7 +266,7 @@ Run semantic lint with LLM (checks if claims are self-contained):
 ### lint_all
 Run both structural and semantic checks combined.
 
-For actual content retrieval, use retrieve_hybrid with collections=["research_claims", "research_insights"]."""
+For actual content retrieval, use memory_search to search research knowledge."""
 
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -403,7 +398,7 @@ For actual content retrieval, use retrieve_hybrid with collections=["research_cl
             "claims": stats["claims"],
             "insights": stats["insights"],
             "chunks": stats["chunks"],
-            "usage_hint": "Use retrieve_hybrid with collections=['research_claims', 'research_insights'] to search content",
+            "usage_hint": "Use memory_search to search research knowledge (claims, insights, chunks)",
         })
 
     async def _list_claims(
@@ -727,7 +722,7 @@ class IngestDocumentTool:
 When to use:
 - User wants to add a document to the knowledge base
 - User says 'learn this document', 'add this file', 'import this PDF/Markdown'
-- After ingesting, you can retrieve from it with retrieve_hybrid
+- After ingesting, you can retrieve from it with kb_search or kb_retrieve
 
 IMPORTANT:
 - File path must include the correct extension (.pdf or .md)
@@ -739,7 +734,7 @@ IMPORTANT:
 Args:
     file_path: Path to the file to ingest (must include .pdf or .md extension)
     collection: Collection name (default: 'default')
-    pdf_parser: PDF parser to use - "markitdown" (fast, default) or "marker" (high-quality for academic papers, requires GPU)
+    pdf_parser: PDF parser to use - "mineru" (default, high-quality), "marker" (high-quality, requires GPU), or "markitdown" (fast, general-purpose)
 
 Returns:
     JSON with:
@@ -755,23 +750,21 @@ Returns:
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the PDF file to ingest",
+                    "description": "Path to the PDF or Markdown file to ingest",
+                },
+                "kb_id": {
+                    "type": "string",
+                    "description": "Knowledge base ID to ingest the document into",
                 },
                 "collection": {
                     "type": "string",
-                    "default": "default",
-                    "description": "Collection name to store the document",
+                    "description": "[DEPRECATED] Ignored; collection is derived from kb_id automatically.",
                 },
                 "pdf_parser": {
                     "type": "string",
-                    "enum": ["markitdown", "marker"],
-                    "default": "marker",
-                    "description": "PDF parser: marker (high-quality for academic papers with formulas/tables, requires GPU) or markitdown (fast, general-purpose)",
-                },
-                "force": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Force re-processing even if file was already processed",
+                    "enum": ["mineru", "marker", "markitdown"],
+                    "default": "mineru",
+                    "description": "PDF parser: mineru (default, high-quality), marker (high-quality, requires GPU), or markitdown (fast, general-purpose)",
                 },
             },
             "required": ["file_path"],
@@ -780,30 +773,24 @@ Returns:
     async def execute(
         self,
         file_path: str,
+        kb_id: str,
         collection: str = "default",
-        pdf_parser: str = "marker",
-        force: bool = False,
+        pdf_parser: str = "mineru",
     ) -> "MCPToolResponse":
-        """Execute the ingest document tool asynchronously."""
+        """Submit document ingestion as an ARQ background job and return immediately."""
+        import hashlib
+        import os as _os
+        import shutil
+        import uuid as _uuid
         from pathlib import Path
-        import time
 
-        logger.info(f"[ingest] Starting with file={file_path}, pdf_parser={pdf_parser}, force={force}")
-        t_start = time.time()
+        logger.info("[ingest] Received request: file=%s kb_id=%s pdf_parser=%s", file_path, kb_id, pdf_parser)
 
         try:
-            logger.info("[ingest] Step 1: Import modules...")
-            from nanobot.rag.core.settings import load_settings
-            from nanobot.rag.ingestion.pipeline import IngestionPipeline
-            from nanobot.rag.mcp_server.async_tasks import get_task_manager
-            logger.info(f"[ingest] Step 1 done in {time.time()-t_start:.2f}s")
-
-            # Validate file exists FIRST (synchronous, fast)
-            logger.info("[ingest] Step 2: Validate file...")
+            # ── File validation ──
             path = Path(file_path)
             if not path.is_absolute():
-                workspace = Path.home() / ".nanoresearch" / "workspace"
-                path = workspace / file_path
+                path = Path.home() / ".nanoresearch" / "workspace" / file_path
 
             if not path.exists():
                 return build_json_response({
@@ -819,58 +806,106 @@ Returns:
                     "file_path": file_path,
                     "error": f"Unsupported file type: {path.suffix}. Supported: PDF, Markdown (.md)",
                 })
-            logger.info(f"[ingest] Step 2 done in {time.time()-t_start:.2f}s")
 
-            # Load settings (should be fast, cached)
-            logger.info("[ingest] Step 3: Load settings...")
-            settings = load_settings()
-            logger.info(f"[ingest] Step 3 done in {time.time()-t_start:.2f}s")
+            # ── DB init ──
+            from nanobot.storage.repositories.knowledge_repo import KnowledgeRepository
+            try:
+                from nanobot.storage.database import get_session_factory
+                factory = get_session_factory()
+            except RuntimeError:
+                from nanobot.storage.database import get_session_factory, init_engine
+                init_engine()
+                factory = get_session_factory()
 
-            # Get task manager
-            logger.info("[ingest] Step 4: Get task manager...")
-            task_manager = get_task_manager()
-            logger.info(f"[ingest] Step 4 done in {time.time()-t_start:.2f}s")
+            repo = KnowledgeRepository(factory)
+            kb_uuid = _uuid.UUID(kb_id)
 
-            # Create a minimal task that just creates Pipeline and runs it in background
-            # This ensures all heavy initialization happens in the background thread
-            def _ingest():
-                logger.info(f"[ingest] Background task started for {path}")
-                pipeline = IngestionPipeline(settings, collection=collection, pdf_parser=pdf_parser, force=force)
-                return pipeline.run(str(path))
+            # ── Validate KB ──
+            kb = await repo.get(kb_uuid)
+            if kb is None:
+                return build_json_response({
+                    "accepted": False,
+                    "file_path": file_path,
+                    "error": f"Knowledge base not found: {kb_id}",
+                })
 
-            # Submit to background - this should return immediately
-            logger.info("[ingest] Step 5: Submit task...")
-            task_id = task_manager.submit(
-                task_type="ingest_document",
-                func=_ingest,
-                metadata={
-                    "file_path": str(path),
-                    "collection": collection,
-                    "pdf_parser": pdf_parser,
-                    "force": force,
-                }
+            # ── Content hash ──
+            sha256 = hashlib.sha256()
+            with open(str(path), "rb") as fh:
+                for block in iter(lambda: fh.read(65536), b""):
+                    sha256.update(block)
+            content_hash = sha256.hexdigest()
+
+            # ── Dedup check ──
+            existing = await repo.find_by_content_hash(kb_uuid, content_hash)
+            if existing is not None and existing.status == "indexed":
+                logger.info("[ingest] Duplicate detected, skipping: doc=%s", existing.id)
+                return build_json_response({
+                    "accepted": True,
+                    "status": "skipped_duplicate",
+                    "doc_id": str(existing.id),
+                    "kb_id": kb_id,
+                    "chunk_count": existing.chunk_count or 0,
+                    "duplicate_of": str(existing.id),
+                    "message": "Document already indexed (duplicate content).",
+                })
+
+            # ── Copy to permanent storage ──
+            doc_dir = Path.home() / ".nanoresearch" / "rag" / "documents" / kb_id
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                path.relative_to(doc_dir)
+                perm_path = path  # already permanent
+            except ValueError:
+                perm_path = doc_dir / f"{_uuid.uuid4()}{path.suffix}"
+                shutil.copy2(str(path), str(perm_path))
+                logger.info("[ingest] Copied to permanent path: %s", perm_path)
+
+            # ── Create PG record ──
+            doc = await repo.create_document(
+                kb_uuid,
+                filename=path.name,
+                file_path=str(perm_path),
+                content_hash=content_hash,
+                pdf_parser=pdf_parser,
             )
-            logger.info(f"[ingest] Step 5 done in {time.time()-t_start:.2f}s, task_id={task_id}")
+            logger.info("[ingest] Created document record: doc=%s", doc.id)
 
-            # Return immediately with task_id
-            logger.info(f"[ingest] Returning immediately with task_id={task_id}")
+            # ── Enqueue ARQ job ──
+            from arq.connections import create_pool, RedisSettings
+            REDIS_URL = _os.environ.get("REDIS_URL", "redis://localhost:6379")
+            arq_redis = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+            try:
+                await arq_redis.enqueue_job(
+                    "ingest_document_task",
+                    kb_id=kb_id,
+                    doc_id=str(doc.id),
+                    file_path=str(perm_path),
+                    chroma_collection=kb.chroma_collection or kb_id,
+                    original_filename=path.name,
+                    chunk_strategy="auto",
+                    pdf_parser=pdf_parser,
+                    content_hash=content_hash,
+                    file_is_permanent=True,
+                )
+            finally:
+                await arq_redis.aclose()
+
+            logger.info("[ingest] Enqueued ARQ job for doc=%s", doc.id)
             return build_json_response({
                 "accepted": True,
-                "task_id": task_id,
-                "file_path": str(path),
-                "collection": collection,
-                "pdf_parser": pdf_parser,
-                "message": f"Ingestion started. Use get_task_status(task_id='{task_id}') to check progress.",
+                "status": "queued",
+                "doc_id": str(doc.id),
+                "kb_id": kb_id,
+                "message": (
+                    f"Ingestion queued successfully. "
+                    f"Call get_task_status with doc_id={doc.id} to track progress."
+                ),
             })
 
-        except Exception as e:
-            import traceback
-            logger.exception(f"[ingest] Failed: {e}")
-            return build_json_response({
-                "accepted": False,
-                "file_path": file_path,
-                "error": str(e),
-            })
+        except Exception as exc:
+            logger.exception("[ingest] Unexpected error: %s", exc)
+            return build_json_response({"accepted": False, "file_path": file_path, "error": str(exc)})
 
 
 class DeleteDocumentTool:
@@ -921,6 +956,10 @@ delete_document(source_path="/path/to/document.pdf", collection="papers")
                     "type": "string",
                     "description": "原始文档的文件路径",
                 },
+                "kb_id": {
+                    "type": "string",
+                    "description": "Knowledge base ID (auto-injected when only one KB is available)",
+                },
                 "collection": {
                     "type": "string",
                     "default": "default",
@@ -937,11 +976,17 @@ delete_document(source_path="/path/to/document.pdf", collection="papers")
     async def execute(
         self,
         source_path: str,
+        kb_id: str = "",
         collection: str = "default",
         source_hash: Optional[str] = None,
     ) -> "MCPToolResponse":
         """Execute the delete document tool."""
         import asyncio
+        import os as _os
+
+        errors: list[str] = []
+        pg_deleted = False
+        file_deleted = False
 
         try:
             from nanobot.rag.core.settings import load_settings, resolve_path
@@ -980,16 +1025,66 @@ delete_document(source_path="/path/to/document.pdf", collection="papers")
                 )
 
             result = await asyncio.to_thread(_delete)
+            if result.errors:
+                errors.extend(result.errors)
+
+            # ── PostgreSQL + physical file cleanup ──
+            if kb_id:
+                try:
+                    import uuid as _uuid
+                    from pathlib import Path as _Path
+                    from nanobot.storage.repositories.knowledge_repo import KnowledgeRepository
+                    try:
+                        from nanobot.storage.database import get_session_factory
+                        factory = get_session_factory()
+                    except RuntimeError:
+                        from nanobot.storage.database import get_session_factory, init_engine
+                        init_engine()
+                        factory = get_session_factory()
+
+                    repo = KnowledgeRepository(factory)
+                    kb_uuid = _uuid.UUID(kb_id)
+                    all_docs = await repo.list_documents(kb_uuid)
+                    doc = next((d for d in all_docs if d.file_path == source_path), None)
+
+                    if doc is not None:
+                        # Delete physical file (best-effort).
+                        if doc.file_path and _Path(doc.file_path).exists():
+                            try:
+                                _os.unlink(doc.file_path)
+                                file_deleted = True
+                                logger.info("[delete_document] Deleted file: %s", doc.file_path)
+                            except OSError as e:
+                                errors.append(f"文件删除失败: {e}")
+                                logger.warning("[delete_document] Could not unlink file: %s", e)
+
+                        # Delete PG records.
+                        chunk_count = await repo.delete_chunks_by_doc(doc.id)
+                        await repo.delete_document(doc.id)
+                        await repo.increment_counts(kb_uuid, doc_delta=-1, chunk_delta=-(chunk_count))
+                        pg_deleted = True
+                        logger.info(
+                            "[delete_document] PG cleanup: doc=%s chunks=%d kb=%s",
+                            doc.id, chunk_count, kb_id,
+                        )
+                    else:
+                        errors.append(f"数据库中未找到 file_path={source_path} 的文档记录")
+                except Exception as exc:
+                    errors.append(f"数据库清理失败: {exc}")
+                    logger.exception("[delete_document] PG cleanup failed")
 
             return build_json_response({
                 "success": result.success,
                 "source_path": source_path,
+                "kb_id": kb_id or None,
                 "collection": collection,
                 "chunks_deleted": result.chunks_deleted,
                 "bm25_removed": result.bm25_removed,
                 "images_deleted": result.images_deleted,
                 "integrity_removed": result.integrity_removed,
-                "errors": result.errors,
+                "pg_deleted": pg_deleted,
+                "file_deleted": file_deleted,
+                "errors": errors if errors else result.errors,
             })
 
         except Exception as e:
@@ -1085,91 +1180,107 @@ class GetTaskStatusTool:
 
     @property
     def description(self) -> str:
-        return """查询后台任务的状态和结果。
+        return """查询文档入库任务的状态和结果。
 
 When to use:
 - After calling ingest_document, use this to check progress
-- Poll this tool until status is "completed" or "failed"
-- Get the final result when status becomes "completed"
+- Poll until status is "completed" or "failed"
 
 Args:
-    task_id: The task ID returned by ingest_document
-    wait: If true and task is still running, wait up to timeout seconds for completion
+    doc_id: The doc_id returned by ingest_document
 
 Returns:
     JSON with:
-    - task_id: Task identifier
-    - status: "pending", "running", "completed", or "failed"
-    - progress: Progress percentage (0.0 to 1.0)
-    - message: Status message
-    - result: Final result if completed (doc_id, chunk_count, etc.)
-    - error: Error message if failed
-    - duration: Time taken in seconds"""
+    - doc_id: Document identifier
+    - status: "pending" | "running" | "completed" | "failed"
+    - doc_status: Raw DB status (uploaded/parsing/processing/indexed/failed)
+    - filename: Original filename
+    - chunk_count: Number of chunks indexed (when completed)
+    - error: Error message if failed"""
 
     @property
     def input_schema(self) -> Dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "task_id": {
+                "doc_id": {
                     "type": "string",
-                    "description": "The task ID returned by ingest_document",
-                },
-                "wait": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "If true, wait up to 60 seconds for task completion",
+                    "description": "The doc_id returned by ingest_document",
                 },
             },
-            "required": ["task_id"],
+            "required": ["doc_id"],
         }
 
     async def execute(
         self,
-        task_id: str,
+        doc_id: str,
         wait: bool = False,
     ) -> "MCPToolResponse":
-        """Execute the get task status tool."""
+        """Query document ingestion status from PostgreSQL."""
+        import uuid as _uuid
         try:
-            from nanobot.rag.mcp_server.async_tasks import get_task_manager
-
-            task_manager = get_task_manager()
-            status = task_manager.get_status(task_id)
-
-            if status is None:
-                return build_json_response({
-                    "found": False,
-                    "task_id": task_id,
-                    "error": f"Task {task_id} not found",
-                })
-
-            # If wait=True and task is running, wait for completion
-            if wait and status["status"] == "running":
-                try:
-                    result = task_manager.get_result(task_id, timeout=60)
-                    status = task_manager.get_status(task_id)
-                    # Get the result from the PipelineResult
-                    if hasattr(result, 'to_dict'):
-                        status["result"] = result.to_dict()
-                    else:
-                        status["result"] = {
-                            "success": getattr(result, 'success', None),
-                            "doc_id": getattr(result, 'doc_id', None),
-                            "chunk_count": getattr(result, 'chunk_count', None),
-                        }
-                except TimeoutError:
-                    status["message"] = "Task still running after 60s wait"
-                except Exception as e:
-                    status["error"] = str(e)
-
-            return build_json_response(status)
-
-        except Exception as e:
-            logger.exception(f"get_task_status failed: {e}")
+            doc_uuid = _uuid.UUID(doc_id)
+        except ValueError:
             return build_json_response({
                 "found": False,
-                "task_id": task_id,
-                "error": str(e),
+                "doc_id": doc_id,
+                "error": "Invalid doc_id format (expected UUID)",
+            })
+
+        try:
+            from nanobot.storage.repositories.knowledge_repo import KnowledgeRepository
+            try:
+                from nanobot.storage.database import get_session_factory
+                factory = get_session_factory()
+            except RuntimeError:
+                from nanobot.storage.database import get_session_factory, init_engine
+                init_engine()
+                factory = get_session_factory()
+
+            repo = KnowledgeRepository(factory)
+            doc = await repo.get_document(doc_uuid)
+
+            if doc is None:
+                return build_json_response({
+                    "found": False,
+                    "doc_id": doc_id,
+                    "error": f"Document {doc_id} not found",
+                })
+
+            _status_map = {
+                "uploaded": "pending",
+                "parsing": "running",
+                "processing": "running",
+                "indexed": "completed",
+                "failed": "failed",
+            }
+            task_status = _status_map.get(doc.status, doc.status)
+
+            _messages = {
+                "pending": "Waiting for worker to pick up the job...",
+                "running": f"Ingestion in progress (stage: {doc.status})...",
+                "completed": f"Ingestion complete: {doc.chunk_count} chunks indexed.",
+                "failed": f"Ingestion failed: {doc.error_msg}",
+            }
+
+            return build_json_response({
+                "found": True,
+                "doc_id": str(doc.id),
+                "kb_id": str(doc.kb_id),
+                "status": task_status,
+                "doc_status": doc.status,
+                "filename": doc.filename,
+                "chunk_count": doc.chunk_count or 0,
+                "error": doc.error_msg,
+                "message": _messages.get(task_status, doc.status),
+            })
+
+        except Exception as exc:
+            logger.exception("get_task_status failed: %s", exc)
+            return build_json_response({
+                "found": False,
+                "doc_id": doc_id,
+                "error": str(exc),
             })
 
 
@@ -1180,8 +1291,14 @@ async def list_collections_handler() -> "MCPToolResponse":
     return await tool.execute()
 
 
-async def list_documents_handler(collection: str = "default") -> "MCPToolResponse":
-    """Handler for list_documents MCP tool."""
+async def list_documents_handler(
+    collection: str = "default",
+    kb_id: Optional[str] = None,
+) -> "MCPToolResponse":
+    """Handler for list_documents MCP tool.
+
+    Note: 'collection' is injected by the main process (mcp.py).
+    """
     tool = ListDocumentsTool()
     return await tool.execute(collection=collection)
 
@@ -1208,13 +1325,13 @@ async def list_research_knowledge_handler(
 
 async def ingest_document_handler(
     file_path: str,
+    kb_id: str,
     collection: str = "default",
-    pdf_parser: str = "markitdown",
-    force: bool = False,
+    pdf_parser: str = "marker",
 ) -> "MCPToolResponse":
     """Handler for ingest_document MCP tool."""
     tool = IngestDocumentTool()
-    return await tool.execute(file_path=file_path, collection=collection, pdf_parser=pdf_parser, force=force)
+    return await tool.execute(file_path=file_path, kb_id=kb_id, collection=collection, pdf_parser=pdf_parser)
 
 
 async def delete_document_handler(
@@ -1238,12 +1355,12 @@ async def delete_claim_handler(claim_id: str) -> "MCPToolResponse":
 
 
 async def get_task_status_handler(
-    task_id: str,
+    doc_id: str,
     wait: bool = False,
 ) -> "MCPToolResponse":
     """Handler for get_task_status MCP tool."""
     tool = GetTaskStatusTool()
-    return await tool.execute(task_id=task_id, wait=wait)
+    return await tool.execute(doc_id=doc_id, wait=wait)
 
 
 def register_tools(protocol_handler: Any) -> None:
@@ -1265,14 +1382,6 @@ def register_tools(protocol_handler: Any) -> None:
     logger.info("Registered agentic tool: list_documents")
 
     protocol_handler.register_tool(
-        name="list_research_knowledge",
-        description=ListResearchKnowledgeTool().description,
-        input_schema=ListResearchKnowledgeTool().input_schema,
-        handler=list_research_knowledge_handler,
-    )
-    logger.info("Registered agentic tool: list_research_knowledge")
-
-    protocol_handler.register_tool(
         name="ingest_document",
         description=IngestDocumentTool().description,
         input_schema=IngestDocumentTool().input_schema,
@@ -1287,14 +1396,6 @@ def register_tools(protocol_handler: Any) -> None:
         handler=delete_document_handler,
     )
     logger.info("Registered agentic tool: delete_document")
-
-    protocol_handler.register_tool(
-        name="delete_claim",
-        description=DeleteClaimTool().description,
-        input_schema=DeleteClaimTool().input_schema,
-        handler=delete_claim_handler,
-    )
-    logger.info("Registered agentic tool: delete_claim")
 
     protocol_handler.register_tool(
         name="get_task_status",

@@ -256,6 +256,7 @@ async def run_agent_job(
     agents_registry: list[dict] | None = None,
     agent_kb_id: str | None = None,
     job_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> None:
     """ARQ job: execute an Agent run inside the worker; events stream via Redis."""
     from nanobot.bus.redis_client import get_redis
@@ -277,6 +278,18 @@ async def run_agent_job(
             logger.warning("Redis SET(job) failed — idempotency unavailable")
 
     await run_repo.update(run_id, status="running", started_at=start)
+
+    # --------------- perf-test bypass (no LLM) ---------------
+    if content.startswith("__PERF_TEST__"):
+        _n = int(content.split(":")[1]) if ":" in content else 5
+        for _i in range(_n):
+            await xadd_event(redis, run_stream_key, {"type": "message_delta", "chunk": f"c{_i}"})
+        _fin = _utcnow()
+        _dur = int((_fin - start).total_seconds() * 1000)
+        await run_repo.update(run_id, status="completed", finished_at=_fin, duration_ms=_dur)
+        await xadd_event(redis, run_stream_key, {"type": "run_end", "status": "completed", "duration_ms": _dur})
+        return
+    # ----------------------------------------------------------
 
     async def _check_cancel() -> bool:
         try:
@@ -368,6 +381,7 @@ async def run_agent_job(
             agents_registry=agents_registry,
             kb_bindings=kb_bindings,
             kb_map=kb_map,
+            conversation_id=conversation_id,
         )
 
         # Wait for sub-agents: SCARD-only polling.  Subagents write directly to
@@ -431,8 +445,98 @@ async def run_agent_job(
             logger.warning("Redis cleanup in finally failed (non-fatal)")
 
 
+async def ingest_document_task(
+    ctx: dict,
+    *,
+    kb_id: str,
+    doc_id: str,
+    file_path: str,
+    chroma_collection: str = "",
+    original_filename: str = "",
+    chunk_strategy: str = "auto",
+    pdf_parser: str = "mineru",
+    uid: str = "",
+    content_hash: str = "",
+    file_is_permanent: bool = False,
+) -> None:
+    """ARQ job: copy to permanent storage (unless already there), then run unified.ingest_document."""
+    import os
+    import shutil
+    from pathlib import Path as _Path
+
+    from nanobot.storage.repositories.knowledge_repo import KnowledgeRepository
+    from nanobot.rag.ingestion.unified import ingest_document, IngestFailedError
+
+    factory = ctx["session_factory"]
+    settings = ctx["rag_settings"]
+    doc_uuid = uuid.UUID(doc_id)
+    repo = KnowledgeRepository(factory)
+
+    if uid:
+        try:
+            from nanobot.providers.model_factory import ModelFactory, ModelRole
+            from nanobot.storage.repositories.user_settings_repo import UserSettingsRepository
+
+            user_cfg = await UserSettingsRepository(factory).get(uid)
+            user_model = user_cfg.model if user_cfg else None
+            user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
+            spec = ModelFactory.resolve(
+                ModelRole.INGESTION_LLM,
+                config=ctx["loop_config"].get("config"),
+                rag_settings=settings,
+                user_model=user_model,
+                user_providers=user_providers,
+            )
+            settings = ModelFactory.patch_settings(settings, ModelRole.INGESTION_LLM, spec)
+        except Exception:
+            pass
+
+    await repo.update_document_status(doc_uuid, "parsing")
+
+    perm_path = file_path
+    if not file_is_permanent:
+        # Web UI path: file_path is a temp file; copy to permanent storage then delete.
+        try:
+            doc_dir = _Path(os.path.expanduser(f"~/.nanoresearch/rag/documents/{kb_id}"))
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            ext = _Path(file_path).suffix or ""
+            perm_path = str(doc_dir / f"{doc_id}{ext}")
+            shutil.copy2(file_path, perm_path)
+            await repo.update_document_file_path(doc_uuid, perm_path)
+        except Exception as _e:
+            logger.warning("ingest_document_task: 持久化源文件失败: %s", _e)
+
+    try:
+        result = await ingest_document(
+            kb_id=kb_id,
+            file_path=perm_path,
+            original_filename=original_filename,
+            content_hash=content_hash,
+            pdf_parser=pdf_parser,
+            chunk_strategy=chunk_strategy,
+            uid=uid,
+            repo=repo,
+            settings=settings,
+        )
+        logger.info(
+            "ingest_document_task: doc=%s status=%s chunks=%d",
+            doc_id, result.status, result.chunk_count,
+        )
+    except IngestFailedError as exc:
+        logger.error("ingest_document_task: doc=%s pipeline failed: %s", doc_id, exc)
+    except Exception as exc:
+        logger.error("ingest_document_task: doc=%s unexpected error: %s", doc_id, exc, exc_info=True)
+        await repo.update_document_status(doc_uuid, "failed", error_msg=str(exc))
+    finally:
+        if not file_is_permanent:
+            try:
+                os.unlink(file_path)
+            except Exception:
+                pass
+
+
 class WorkerSettings:
-    functions = [run_agent_job]
+    functions = [run_agent_job, ingest_document_task]
     redis_settings = RedisSettings.from_dsn(REDIS_URL)
     on_startup = startup
     on_shutdown = shutdown
