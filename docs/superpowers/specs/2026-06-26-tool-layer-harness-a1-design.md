@@ -82,6 +82,11 @@ fix_set / health_set 不只是 fixture,要能回答"覆盖了什么 / 漏了什�
 - 来源:`test_optimizer.py:143` 传空 golden_test_cases 绕过 `optimizer.py:103-107` 不变量这个教训
 - 验证:每条 case 元数据中含 origin_badcase_id / target_dimension / added_at / added_by / coverage_tags
 
+**B5. 行为级候选必须通过 execution 健全性 pre-gate**
+任何动 schema / retry_policy / routing 的候选,在进入 trial / 接生产流量之前,先在 witness 历史录音上重放"会不会让工具调用失败"(参数 JSON Schema 校验、required/类型/enum 兼容性、retry 不变量等)。pre-gate 不通过的候选直接 reject,不进 dual-set scoring,不进 trial。
+- 来源:用户硬约束 — 行为级坏配置(尤其 schema 收紧、retry 把 timeout 调没)能让功能失败但语义分数抓不到,SDD 反对自动 apply 的核心理由之一
+- 验证:存在 `execution_sanity_check(candidate, witness_recordings)`,对 schema 类候选能 deterministic 判出"参数不再符合"的录音条目数与比例;比例超阈值 → reject
+
 ### Layer C — 实验可以闭合成生产改动
 
 **C1. Apply 粒度 = 单一轴**
@@ -121,6 +126,7 @@ C3 的信号必须能 mark 候选为 regressing,接到 rollback。
 | B2 | **△** | `_execute_side_effect_only` (`sandbox.py:130-131`) "key 命中即等效"假设脆 — 候选参数微调即 key miss;噪声未刻画 |
 | B3 | ✓ | `optimizer.py:140-146` 双 baseline 重新打分;`optimizer.py:152-170` dual-set scoring 路径完整 |
 | B4 | **✗** | `test_optimizer.py:140-144` 用**过时参数名** `golden_test_cases=[]` 调用 `generate_proposals`;当前签名(`optimizer.py:77-83`)是 `fix_test_cases` + `health_test_cases`。该测试要么 silently broken,要么从未在新签名下运行 — 无论哪种,`optimizer.py:98-107` 的非空不变量都未被 CI 真正验证过。另:`test_score_candidate_raises_for_tool_description` (`:184-194`) 仍 pin 旧 `NotImplementedError` 行为,与 Phase 4 应有的解锁状态矛盾。case 集亦无元数据治理 |
+| B5 | **✗** | 无 execution 健全性 pre-gate。当前流程:候选生成 → dual-set scoring → gate → apply。中间没有一道"这个 schema 改完工具还跑不跑得起来"的离线校验。B1 引入 schema/retry 候选后,gate 的语义分数对"调用直接失败"的退化基本盲(失败的 run 在评测里要么被 retry 救回要么得低分,但跟"分布上略差"区分不开) |
 | C1 | ✓ | `ToolDescriptionObject.apply` (`tunable.py:338-361`) 只改 `tools_config` 中目标工具 |
 | C2 | **△** | `rollback` (`tunable.py:367-371`) 等于"再 apply 一次旧 content";对 schema/routing/retry 这类多字段联动改动不够 |
 | C3 | **✗** | 无 production_witness_set,无 trial 监控 |
@@ -135,9 +141,9 @@ C3 的信号必须能 mark 候选为 regressing,接到 rollback。
 
 **实施顺序**(每一节是后一节的前置):
 
-> **B4** → **B2** → **B1** → **C2** → **C3** → **C4**
+> **B4** → **B2** → **B1** → **B5** → **C2** → **C3** → **C4**
 
-理由:B4 没修(测试 mock 还在绕过不变量),其他验证都是假的;B2 不就位,B1 引入的非文字候选评测出的差异分不清是改进还是噪声;C2 不升级,B1 引入的多字段候选 rollback 不可靠;C3/C4 是最上层,必须建在前四层之上。
+理由:B4 没修(测试 mock 还在绕过不变量),其他验证都是假的;B2 不就位,B1 引入的非文字候选评测出的差异分不清是改进还是噪声;B5 紧跟 B1 — B1 一引入行为级候选就必须立刻把 execution 健全性 pre-gate 接上,否则坏 schema 直接进 dual-set scoring → trial → 生产,语义分数对调用失败基本盲;C2 不升级,B1 引入的多字段候选 rollback 不可靠;C3/C4 是最上层,必须建在前五层之上。
 
 ### 5.1 B4 — case 集治理(地基)
 
@@ -246,7 +252,7 @@ async def _score_candidate_set(...) -> dict[str, ScoreSample]: ...
 - 模拟 apply 中途异常(在写 DB 前抛错),reconcile 任务能检测并清理半状态
 - PersonaObject / ToolDescriptionObject 的 rollback 行为向后兼容(它们的 snapshot 等于"旧 content",restore 等于"写回旧 content")
 
-### 5.5 C3 — 应用后监控(meta-eval)
+### 5.5 C3 — 应用后监控(meta-eval)+ strict_replay 模式
 
 **动机**: gate 通过的候选可能在 health_set **没有覆盖到的维度**上让系统变糟,目前没人在看。这是用户"警惕自我修改副作用"的核心担忧。
 
@@ -259,15 +265,22 @@ async def _score_candidate_set(...) -> dict[str, ScoreSample]: ...
 - **trial 状态机**:
   - 候选 apply 后,version 的 `lifecycle_status` 字段从 `"applied"` 改为 `"trialing"`
   - **触发机制:只走 hook,不引入定时器 / 后台扫描 / cron**。具体两条入口:
-    - (a) **生产 hook**:`production_witness` 表插入新样本时,若该样本对应 agent 存在 `trialing` 候选,在同一事务内触发其 `trial_check`
-    - (b) **admin 端点**:`POST /trial/{version_id}/check` 作为人工入口(用于 oncall debug 或 hook 失效兜底)
-  - `trial_check` 执行:
+    - (a) **生产 hook**:`production_witness` 表插入新样本时,业务事务内只做一件事 — `enqueue ARQ task: trial_check(version_id, witness_id)`;真正的 trial_check 在 worker 里异步执行(fire-and-forget),不阻塞生产 run。若 agent 无 `trialing` 候选,enqueue 前过滤
+    - (b) **admin 端点**:`POST /trial/{version_id}/check` 作为人工入口(用于 oncall debug 或 hook 失效兜底),内部也走同一条 enqueue 路径
+  - `trial_check` 执行(ARQ worker 内):
     - 拉最近 `WITNESS_TRIAL_WINDOW`(默认 24h 或 50 samples,取最严)的 witness 样本
-    - 对每条样本,用同一份输入分别在 baseline 和 candidate 上重放(借用 sandbox replay),产出对比分数
-    - 计算 `witness_delta_mean ± σ`
-    - 若 `witness_delta_mean ≥ -k·σ`(没有显著退化)→ `stable`
-    - 若 `witness_delta_mean < -k·σ`(显著退化)→ `regressing`
+    - 对每条样本,用同一份输入分别在 baseline 和 candidate 上重放,**强制走 `strict_replay` 模式**(见下),产出对比分数和每次 replay 的 `divergence_rate`
+    - 计算 `witness_delta_mean ± σ` 和 `divergence_rate_mean`
+    - 若 `divergence_rate_mean > _DIVERGENCE_REJECT`(默认 0.3) → trial 终止判为 `signal_unreliable`,不允许转 `stable`,自动 propose rollback 走人工 click(理由:对比基础已经被环境漂移污染,看似"持平"或"略好"都不可信)
+    - 若 `witness_delta_mean ≥ -k·σ` 且 divergence 可接受 → `stable`
+    - 若 `witness_delta_mean < -k·σ` 且 divergence 可接受 → `regressing`
     - 样本不足且未超时 → 继续 `trialing`
+- **strict_replay 模式**(`sandbox.py` 新增):
+  - 现有 `side_effect_only` 模式在 query 工具录音 miss 时 passthrough 真调用(`sandbox.py:156-161`);用于 trial 对比时,这等于"baseline 和 candidate 看到的世界不一样",对比结论不可信
+  - 新增 `strict_replay`:任何工具调用 — query 或 side-effect — 录音 miss 都不 passthrough,而是返回结构化"录音缺失"标记并把这次 miss 计入 `divergence_log`
+  - `divergence_rate` = miss 次数 / 总调用次数,在 trial_check 的 evidence 中持久化
+  - 强制规则:trial 对比(baseline replay / candidate replay)只能用 `strict_replay`,不允许用 `side_effect_only`
+  - **诚实登记的残余盲区**:`divergence_rate > _DIVERGENCE_REJECT` 触发的"signal_unreliable"对**文本类**(persona 大改、tool_description 颠覆性改写)和**行为级**(schema/routing 大改)候选**都适用** — 候选改动越大,divergence 越高,这道 gate 越容易把它判成 signal_unreliable。换句话说,**A1 的自动监测对"激进改动"的候选无能为力,这类候选不能依赖 C3 / C4,必须由人在 apply 前评估或事后查 audit 决策**。这是有意为之的保守边界,不是 bug
 - **接口**:
   ```python
   @dataclass
@@ -311,6 +324,51 @@ class TrialMonitor:
 - proposal payload 包含 evidence(对比数据 + 退化维度)
 - 人 click 后走 C2 路径执行 rollback,执行完毕 candidate version 的 `lifecycle_status` 转 `rolled_back`
 
+### 5.7 B5 — Execution 健全性 pre-gate
+
+> 实施次序上 B5 在 B1 之后、C2 之前(见 §5 顺序);章节编号靠后是因为这是整个 A1 安全地基的下半段(上半段是 §5.5 的 strict_replay),放一起方便审计两道防线的措辞。
+
+**动机**: B1 引入 schema/retry 候选后,gate 评测的是**语义分数**,对"工具调用直接失败"的退化基本盲(失败的 run 在 dual-set 里要么被 retry 救回,要么得低分跟"分布上略差一点"混在一起,gate 阈值很难区分)。这是 SDD 反对自动 apply 的核心理由之一,必须正面堵。
+
+**改什么**:
+- 新增 `eval/execution_sanity.py`:
+  ```python
+  @dataclass
+  class ExecutionSanityResult:
+      total_recordings_checked: int
+      failures: list[dict]   # {recording_key, reason, severity}
+      failure_rate: float
+      has_loosening: bool
+      loosening_dimensions: list[str]
+  ```
+- 检查内容(按候选 kind 分发):
+  - `tool_schema`:对 witness_recordings 里每条该工具的调用,把录音参数对**新 schema** 做 JSON Schema validate;不通过 → 计一次 failure(severity = `param_validation_failed`);required 字段从 optional 改 required → failure(severity = `required_tightened`);enum 删值且历史调用用了该值 → failure(severity = `enum_value_removed`)
+  - `tool_retry_policy`:timeout 改短于历史调用 P99 时长 → failure(severity = `timeout_too_short`);max_retries 改 0 而历史有 retry 救回的调用 → failure(severity = `retry_disabled_with_history`)
+  - `tool_description` / `persona`:不适用(跳过,直接返回 `failure_rate = 0`,但写明 "not applicable")
+- gate 接线:`optimizer.generate_proposals` 在 dual-set scoring **之前**先跑 `execution_sanity_check`。`failure_rate > _SANITY_REJECT`(默认 0.05)或出现任何 `severity = required_tightened / enum_value_removed` → 直接拒,proposal 状态 `rejected_by_sanity_gate`,evidence 含失败录音列表(脱敏后),**不进 dual-set scoring**
+- 持久化:proposal 表新增 `sanity_check_result JSONB`,即使 pass 也存(供后续审计 / B2 噪声分析回看)
+
+**接口**: 上文 dataclass
+
+**验收**:
+- 对"把某 required string 参数改成 number"的合成候选,sanity_check 失败率 = 100%,proposal 状态 `rejected_by_sanity_gate`,不进 scoring
+- 对"删一个 enum 值但该值在 witness 历史中出现过"的候选,直接 reject
+- 对"timeout 5s → 1s 而历史 P99 = 3s"的候选,reject
+- 对 description/persona 候选,sanity_check 返回 "not applicable",proposal 仍正常走 scoring
+- 对放宽类候选(`has_loosening = true`),sanity_check 全 pass 但 `has_loosening / loosening_dimensions` 字段被填充并在 proposal 卡片中显眼展示
+
+**显式登记的盲区(B5 放宽方向)**:
+B5 的实现机制是"用 witness 历史录音校验新 schema/policy",这只能抓**收紧类**退化(新 schema 比旧 schema 严,历史调用不再通过)。**放宽类**改动 — 比如 required → optional、enum 加值、timeout 调大、新增可选参数 — sanity_check 必然全部 pass,因为旧录音对新 schema 永远兼容。
+
+但放宽是优化里**最常见**的方向(LLM 会主动提议"把这个参数改成可选,模型更容易调用"之类),放宽引入的运行时失败(比如:把 required 字段改 optional 后,下游消费方仍假设字段存在;timeout 调大让上游级联 timeout)B5 一律抓不到。
+
+**这道盲区不在 A1 范围内堵**,显式记录在此并在 §6 风险登记中登记。可能的后续防御方向(留给 A2 或后续轮次决策):
+- 在 sanity_check 里加"反向校验"——用 sandbox/staging 跑 candidate schema 下的合成调用,但需要可信的请求生成器,这本身是另一个 harness
+- 让放宽类候选**强制经过更长的 trial 窗口**,放弃 sanity pre-gate 的硬性约束,改靠 C3 witness 监控兜底(代价:C3 又被高 divergence 盲区限制,见 §5.5)
+- 完全禁止 LLM 提出放宽类候选(过严,放弃合法优化空间)
+
+短期内,A1 接受这个盲区,做法是:**B5 的 evidence 字段显式标注 candidate 是否含放宽类改动**(`has_loosening: bool` + `loosening_dimensions: list[str]`),让人在 click apply 时看得到。这不是技术防御,是知情边界。**绝不在 spec / PR description / proposal 卡片里把 B5 包装成"行为级候选的安全网" — 它只是"收紧方向的安全网"**。
+
 ---
 
 ## 6. 风险登记
@@ -319,7 +377,11 @@ class TrialMonitor:
 |---|---|---|
 | 非文字候选改动幅度大,gate 阈值不够保守,gate 通过的"改进"实际是噪声 | A1 引入 | B2 把 gate 改 σ 加权;非文字候选首次 apply 强制进 trial(C3),trial 通过才转 stable |
 | trial 期信号不足判 regressing,但 candidate 实际没问题(假阳性) | A1 引入 | trial_gate k=1.96 取较宽;regressing 不自动回滚,只 propose;N ≥ `WITNESS_TRIAL_MIN_N`(默认 50)才允许判定 |
-| schema 收紧让正常调用失败 | A1 引入 | apply 前在 witness 历史 replay 上跑一遍校验,正常调用失败率超阈值就 reject |
+| schema 收紧让正常调用失败 | A1 引入 | §5.7 B5 execution_sanity_check 在 witness 历史录音上跑兼容性校验,`failure_rate > _SANITY_REJECT` 或出现 required/enum 收紧直接 reject |
+| **行为级"坏配置"(schema/retry)进 trial,语义分数抓不到但工具调用直接失败** | A1 引入 | §5.7 B5 在 dual-set scoring **之前**强制跑 execution_sanity_check;`tool_schema` / `tool_retry_policy` 类候选不通过 pre-gate 直接 `rejected_by_sanity_gate`,不进 scoring、不进 trial |
+| **trial 期 baseline / candidate 重放在 query 工具上看到不一样的世界(环境漂移污染对比结论)** | A1 引入 | §5.5 strict_replay 模式:trial 对比禁止使用 `side_effect_only`(query miss passthrough)。所有 replay 走 strict_replay,录音 miss 计入 `divergence_log`;`divergence_rate > _DIVERGENCE_REJECT` 时 trial 判 `signal_unreliable`,不允许转 stable,自动 propose rollback |
+| **高 divergence_rate 让 C3 对"激进改动"候选的判断失效(文本类 + 行为级 都中招)** | A1 引入,但**只能登记不能消除** | divergence_rate 超阈值 → `signal_unreliable` + propose rollback;evidence 中存证;**这类候选不能依赖 C3/C4 自动监测,必须由人在 click apply 前评估**;在 proposal 卡片中显眼展示候选的 "改动幅度估计"(diff 行数 / schema 字段变化数 / persona 文本相似度) |
+| **B5 对放宽方向退化天然盲(required→optional、enum 加值、timeout 调大都 pass)** | A1 引入,显式不堵 | §5.7 末段"显式登记的盲区"详述。短期措施:`has_loosening / loosening_dimensions` 字段强制在 proposal 卡片中展示;不在任何文档里把 B5 包装成行为级候选的安全网;长期方向(反向 fuzz / 更长 trial 窗口)留 A2 |
 | C3 witness 采样的离线 dual-set 评测耗 LLM 成本 | A1 引入 | 采样率默认 5% 可配置;witness 离线评测有日预算上限;超出预算暂停 trial(不影响生产) |
 | LLM 生成的 schema 候选离谱(改类型 / 删 enum) | A1 引入 | B1 的 lint guard 直接丢弃违规候选,不进 scoring |
 | **A1 做完团队认为"系统已经在自我改进了"放下 A2** | 流程风险 | §9 附录"造下一个轴底座的方法论清单"是 A1 验收硬要求;不交付即 A1 未完成 |
@@ -333,8 +395,11 @@ class TrialMonitor:
 
 A1 算交付,当且仅当以下五条全部满足:
 
-1. **§3 的 11 条判据(排除 D1)对工具层每条都能用代码证明满足** — 每条对应一个 acceptance test 或 inspection record
-2. **端到端 demo** — 从一个真实 badcase 开始: 检测 → 分类到 `tool_schema` → 生成至少 2 个非文字候选 → dual-set scoring(含 σ) → gate 通过 → apply → 进入 trial → witness 监控 → trial 通过 → 转 stable。全程**无人工干预** *除*: 最后一次 click apply,以及(若发生) click rollback
+1. **§3 的 12 条判据(排除 D1)对工具层每条都能用代码证明满足** — 每条对应一个 acceptance test 或 inspection record
+2. **端到端 demo 三条路径全部跑通**:
+   - **正向**:从一个真实 badcase 开始,检测 → 分类到 `tool_schema` → 生成至少 2 个非文字候选 → execution_sanity pre-gate 通过(§5.7) → dual-set scoring(含 σ) → gate 通过 → apply → 进入 trial → witness 监控走 strict_replay 模式(§5.5) → trial 通过 → 转 stable。全程**无人工干预** *除*: 最后一次 click apply,以及(若发生) click rollback
+   - **被 B5 拦截**:故意构造一个收紧类候选(如 enum 删值、required 收紧),证明在进入 dual-set scoring 之前被 `rejected_by_sanity_gate`,evidence 含失败录音条目
+   - **被 strict_replay 拦截**:构造一个改动幅度大的候选(如 persona 颠覆性重写或 schema 大幅 routing 变化),进入 trial 后 `divergence_rate > _DIVERGENCE_REJECT`,trial 判 `signal_unreliable` 而非 stable,自动 propose rollback
 3. **CI 中 `test_optimizer.py::test_generate_proposals_full_path` 跑通**,不靠 mock 绕过 `optimizer.py:103-107` 的非空校验
 4. **`PHASE_STATUS.md` 与 `tunable.py` 注释更新到当前真实状态** — 关于 "Phase 4 blocked" / "scoring not available for tool_description" 的描述全部清理
 5. **§9 附录的"造下一个轴底座的方法论清单"完成** — A2 启动时不需要重新 brainstorm,清单是它的输入
@@ -347,6 +412,8 @@ A1 算交付,当且仅当以下五条全部满足:
 2. **witness_set 采样的 PII 顾虑**:5% 真实用户 query 进入评测管道。可选方案:(a) 全采样但脱敏(需要脱敏规则) / (b) 部分采样(限内部账号 / 限非敏感场景) / (c) 全采样不脱敏(若产品定位允许)。需用户在 implementation plan 阶段拍板。
 3. **trial 超时硬上限**:若 candidate 进入 trial 后,witness 样本积累慢 + 人长期不 click,新流量持续按 candidate 走是否可接受?候选方案:(a) trial 状态有硬上限(如 7 天),超过自动 propose rollback(仍人 click) / (b) 不设上限,完全依赖人 / (c) 设上限且自动回滚(触碰"自我修改"边界,需用户明确授权)。
 4. **retry_policy 的语义粒度**:是 per-tool(每个工具一份)还是 per-call-site(每个调用点一份)?per-tool 简单但粒度粗;per-call-site 精细但需要 call_site_id 概念,工具注册接口要扩。倾向 per-tool 起步,但需用户确认。
+5. **高 divergence_rate 让 C3 失效的应对(文本类 + 行为级)**:strict_replay 把"对比基础被污染"的情况识别出来后,trial 判 `signal_unreliable` 并 propose rollback,但这等同于承认 A1 自动监测对"激进改动"候选(persona 大改、tool_description 颠覆性重写、schema/routing 大改 — 文本类与行为级都中招)无能为力。可选方案:(a) 现状 — 这类候选必须人在 click apply 前评估幅度,trial 仅作事后审计 / (b) 引入"改动幅度"前置度量(文本相似度阈值 / schema 字段变化数 / diff 行数),超过阈值的候选**禁止自动 apply 流程**,强制走人审通道 / (c) 接受现状但在 proposal 卡片中显眼展示幅度估计。倾向 (c) + 部分 (b),但需用户在 implementation plan 阶段拍板。
+6. **B5 放宽方向盲区的可接受性**:§5.7 末段已显式登记 B5 抓不到 required→optional / enum 加值 / timeout 调大 这类放宽改动引发的运行时退化。短期靠 `has_loosening` 在卡片中提示 + C3 trial 兜底,但 C3 又被高 divergence 限制。是否需要在 A1 内做轻量反向校验(比如:对放宽类 schema 候选,要求至少 K 个合成调用在 staging 跑通)?倾向暂不在 A1 内做,但需用户明确知情。
 
 ---
 
