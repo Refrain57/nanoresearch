@@ -56,3 +56,10 @@ results/
 
 # Scripts (development only)
 scripts/
+
+# Phase 1 cleanup: runtime data must never be tracked
+node_modules/
+backend/nanobot/nanobot/workspace/
+backend/nanobot/data/db/
+*.log
+token.json
