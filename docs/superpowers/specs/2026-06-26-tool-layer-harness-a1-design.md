@@ -364,7 +364,7 @@ B5 的实现机制是"用 witness 历史录音校验新 schema/policy",这只能
 
 **这道盲区不在 A1 范围内堵**,显式记录在此并在 §6 风险登记中登记。可能的后续防御方向(留给 A2 或后续轮次决策):
 - 在 sanity_check 里加"反向校验"——用 sandbox/staging 跑 candidate schema 下的合成调用,但需要可信的请求生成器,这本身是另一个 harness
-- 让放宽类候选**强制经过更长的 trial 窗口**,放弃 sanity pre-gate 的硬性约束,改靠 C3 witness 监控兜底(代价:C3 又被高 divergence 盲区限制,见 §5.5)
+- 让放宽类候选**强制经过更长的 trial 窗口**,放弃 sanity pre-gate 的硬性约束,改靠 C3 witness 监控兜底(代价:C3 又被高 divergence 盲区限制,见 §5.5 — **"既放宽又大改"的候选落在两道盲区的交集上,B5 / C3 全部无效,只能纯人工 pre-apply 评估,见 §6 风险登记中标 🔴 的双盲候选类条目**)
 - 完全禁止 LLM 提出放宽类候选(过严,放弃合法优化空间)
 
 短期内,A1 接受这个盲区,做法是:**B5 的 evidence 字段显式标注 candidate 是否含放宽类改动**(`has_loosening: bool` + `loosening_dimensions: list[str]`),让人在 click apply 时看得到。这不是技术防御,是知情边界。**绝不在 spec / PR description / proposal 卡片里把 B5 包装成"行为级候选的安全网" — 它只是"收紧方向的安全网"**。
@@ -382,6 +382,7 @@ B5 的实现机制是"用 witness 历史录音校验新 schema/policy",这只能
 | **trial 期 baseline / candidate 重放在 query 工具上看到不一样的世界(环境漂移污染对比结论)** | A1 引入 | §5.5 strict_replay 模式:trial 对比禁止使用 `side_effect_only`(query miss passthrough)。所有 replay 走 strict_replay,录音 miss 计入 `divergence_log`;`divergence_rate > _DIVERGENCE_REJECT` 时 trial 判 `signal_unreliable`,不允许转 stable,自动 propose rollback |
 | **高 divergence_rate 让 C3 对"激进改动"候选的判断失效(文本类 + 行为级 都中招)** | A1 引入,但**只能登记不能消除** | divergence_rate 超阈值 → `signal_unreliable` + propose rollback;evidence 中存证;**这类候选不能依赖 C3/C4 自动监测,必须由人在 click apply 前评估**;在 proposal 卡片中显眼展示候选的 "改动幅度估计"(diff 行数 / schema 字段变化数 / persona 文本相似度) |
 | **B5 对放宽方向退化天然盲(required→optional、enum 加值、timeout 调大都 pass)** | A1 引入,显式不堵 | §5.7 末段"显式登记的盲区"详述。短期措施:`has_loosening / loosening_dimensions` 字段强制在 proposal 卡片中展示;不在任何文档里把 B5 包装成行为级候选的安全网;长期方向(反向 fuzz / 更长 trial 窗口)留 A2 |
+| **🔴 双盲候选类 — "既放宽又大改"(放宽 schema/policy + 改动幅度大,如 required→optional 且 diff 行数多 / persona 文本相似度低)** | A1 引入,**系统无任何一层防御** | B5 因为放宽方向必然 pass、C3 因为高 divergence 必然判 `signal_unreliable`,gate / B5 / C3 trial **三道机制全部对此类候选无效**。**唯一防线是 apply 前的纯人工评估**:proposal 卡片必须把 `has_loosening = true` 与"改动幅度估计"两个信号同时显眼展示,平台必须强制人审通道(不允许走"系统已通过 → 直接 click apply"心智);本风险登记在面向使用者(oncall / 决策者)的位置,目的是杜绝"B5 通过 + trial 在跑 = 系统兜着"的虚假信心 |
 | C3 witness 采样的离线 dual-set 评测耗 LLM 成本 | A1 引入 | 采样率默认 5% 可配置;witness 离线评测有日预算上限;超出预算暂停 trial(不影响生产) |
 | LLM 生成的 schema 候选离谱(改类型 / 删 enum) | A1 引入 | B1 的 lint guard 直接丢弃违规候选,不进 scoring |
 | **A1 做完团队认为"系统已经在自我改进了"放下 A2** | 流程风险 | §9 附录"造下一个轴底座的方法论清单"是 A1 验收硬要求;不交付即 A1 未完成 |
