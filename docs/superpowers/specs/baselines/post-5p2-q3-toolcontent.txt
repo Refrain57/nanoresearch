@@ -1,0 +1,15 @@
+# Query: chunk 切分用了什么策略,为什么不用固定 chunk_size
+# Tool: kb_search
+# isError: False
+# Content blocks: 1
+# Total raw length: 134
+# First 4 chars (hex): 7b0a2020
+---RAW TextContent.text START---
+{
+  "success": true,
+  "chunks": [],
+  "citations": null,
+  "summary": "Simple retrieval completed with 0 chunks",
+  "iterations": 1
+}
+---RAW TextContent.text END---

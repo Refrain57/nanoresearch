@@ -1,0 +1,17 @@
+# Query: Agentic RAG 和普通 RAG 的核心区别是什么
+# Tool: kb_search
+# isError: False
+# Content blocks: 1
+# Total raw length: 189
+# First 4 chars (hex): 7b0a2020
+---RAW TextContent.text START---
+{
+  "success": false,
+  "chunks": [],
+  "citations": null,
+  "verification": null,
+  "iterations": 5,
+  "summary": "Reached maximum iterations without sufficient results",
+  "error": null
+}
+---RAW TextContent.text END---

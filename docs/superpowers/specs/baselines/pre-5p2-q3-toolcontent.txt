@@ -1,0 +1,9 @@
+# Query: chunk 切分用了什么策略,为什么不用固定 chunk_size
+# Tool: kb_search
+# isError: False
+# Content blocks: 1
+# Total raw length: 245
+# First 4 chars (hex): 4d435054
+---RAW TextContent.text START---
+MCPToolResponse(content='{\n  "success": true,\n  "chunks": [],\n  "citations": null,\n  "summary": "Simple retrieval completed with 0 chunks",\n  "iterations": 1\n}', citations=[], metadata={'format': 'json'}, is_empty=False, image_contents=[])
+---RAW TextContent.text END---

@@ -1,0 +1,9 @@
+# Query: Agentic RAG 和普通 RAG 的核心区别是什么
+# Tool: kb_search
+# isError: False
+# Content blocks: 1
+# Total raw length: 302
+# First 4 chars (hex): 4d435054
+---RAW TextContent.text START---
+MCPToolResponse(content='{\n  "success": false,\n  "chunks": [],\n  "citations": null,\n  "verification": null,\n  "iterations": 5,\n  "summary": "Reached maximum iterations without sufficient results",\n  "error": null\n}', citations=[], metadata={'format': 'json'}, is_empty=False, image_contents=[])
+---RAW TextContent.text END---
