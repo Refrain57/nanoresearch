@@ -54,8 +54,8 @@ extract_*.json
 test_*.txt
 results/
 
-# Scripts (development only)
-scripts/
+# Scripts (development only — only the top-level dir; backend/scripts/ is real tracked code)
+/scripts/
 
 # Phase 1 cleanup: runtime data must never be tracked
 node_modules/
