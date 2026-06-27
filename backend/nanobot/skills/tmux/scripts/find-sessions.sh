@@ -10,7 +10,7 @@ List tmux sessions on a socket (default tmux socket if none provided).
 Options:
   -L, --socket       tmux socket name (passed to tmux -L)
   -S, --socket-path  tmux socket path (passed to tmux -S)
-  -A, --all          scan all sockets under NANOBOT_TMUX_SOCKET_DIR
+  -A, --all          scan all sockets under NANORESEARCH_TMUX_SOCKET_DIR (legacy: NANOBOT_TMUX_SOCKET_DIR)
   -q, --query        case-insensitive substring to filter session names
   -h, --help         show this help
 USAGE
@@ -20,7 +20,13 @@ socket_name=""
 socket_path=""
 query=""
 scan_all=false
-socket_dir="${NANOBOT_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/nanobot-tmux-sockets}"
+# Backward compat: NANOBOT_TMUX_SOCKET_DIR is deprecated, use NANORESEARCH_TMUX_SOCKET_DIR.
+# Will be removed in v0.3.0. Default socket dir name kept as nanobot-tmux-sockets
+# to preserve existing user sessions; only the env var name changes.
+if [[ -n "${NANOBOT_TMUX_SOCKET_DIR:-}" && -z "${NANORESEARCH_TMUX_SOCKET_DIR:-}" ]]; then
+  echo "Warning: NANOBOT_TMUX_SOCKET_DIR is deprecated; use NANORESEARCH_TMUX_SOCKET_DIR (will be removed in v0.3.0)." >&2
+fi
+socket_dir="${NANORESEARCH_TMUX_SOCKET_DIR:-${NANOBOT_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/nanobot-tmux-sockets}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

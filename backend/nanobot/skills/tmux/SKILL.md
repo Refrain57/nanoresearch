@@ -11,7 +11,7 @@ Use tmux only when you need an interactive TTY. Prefer exec background mode for 
 ## Quickstart (isolated socket, exec tool)
 
 ```bash
-SOCKET_DIR="${NANOBOT_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/nanobot-tmux-sockets}"
+SOCKET_DIR="${NANORESEARCH_TMUX_SOCKET_DIR:-${NANOBOT_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/nanobot-tmux-sockets}}"
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/nanobot.sock"
 SESSION=nanobot-python
@@ -31,8 +31,8 @@ To monitor:
 
 ## Socket convention
 
-- Use `NANOBOT_TMUX_SOCKET_DIR` environment variable.
-- Default socket path: `"$NANOBOT_TMUX_SOCKET_DIR/nanobot.sock"`.
+- Use `NANORESEARCH_TMUX_SOCKET_DIR` environment variable (legacy `NANOBOT_TMUX_SOCKET_DIR` still honored until v0.3.0).
+- Default socket path: `"$NANORESEARCH_TMUX_SOCKET_DIR/nanobot.sock"`.
 
 ## Targeting panes and naming
 
@@ -43,7 +43,7 @@ To monitor:
 ## Finding sessions
 
 - List sessions on your socket: `{baseDir}/scripts/find-sessions.sh -S "$SOCKET"`.
-- Scan all sockets: `{baseDir}/scripts/find-sessions.sh --all` (uses `NANOBOT_TMUX_SOCKET_DIR`).
+- Scan all sockets: `{baseDir}/scripts/find-sessions.sh --all` (uses `NANORESEARCH_TMUX_SOCKET_DIR`, legacy `NANOBOT_TMUX_SOCKET_DIR` still honored).
 
 ## Sending input safely
 
