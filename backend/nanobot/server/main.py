@@ -8,7 +8,11 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from nanobot.server.middleware.auth import get_current_user
+from nanobot.utils.env_compat import apply_legacy_env_compat
+
+apply_legacy_env_compat()
+
+from nanobot.server.middleware.auth import get_current_user  # noqa: E402
 from nanobot.server.routers.agent_router import router as agent_router
 from nanobot.server.routers.agent_eval_router import router as agent_eval_router
 from nanobot.server.routers.chat_router import router as chat_router

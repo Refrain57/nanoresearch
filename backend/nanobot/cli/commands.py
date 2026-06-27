@@ -32,7 +32,11 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from nanobot import __logo__, __version__
+from nanobot.utils.env_compat import apply_legacy_env_compat
+
+apply_legacy_env_compat()
+
+from nanobot import __logo__, __version__  # noqa: E402
 from nanobot.cli.stream import StreamRenderer, ThinkingSpinner
 from nanobot.config.paths import get_workspace_path, is_default_workspace
 from nanobot.config.schema import Config

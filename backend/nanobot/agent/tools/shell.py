@@ -98,7 +98,7 @@ class ExecTool(Tool):
         env = os.environ.copy()
         # 注入 nanobot 自己的 Python 路径到 PATH 最前面
         python_dir = os.path.dirname(sys.executable)
-        env["NANOBOT_PYTHON"] = sys.executable
+        env["NANORESEARCH_PYTHON"] = sys.executable
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         if self.path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append

@@ -150,8 +150,10 @@ class AgentLoop:
         self._session_locks: dict[str, asyncio.Lock] = {}
         # Track which sessions have had startup consolidation to avoid repeated checks
         self._startup_consolidated: set[str] = set()
-        # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
-        _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
+        # NANORESEARCH_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
+        # Legacy NANOBOT_MAX_CONCURRENT_REQUESTS is auto-copied at startup by
+        # apply_legacy_env_compat() (removed in v0.3.0).
+        _max = int(os.environ.get("NANORESEARCH_MAX_CONCURRENT_REQUESTS", "3"))
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )

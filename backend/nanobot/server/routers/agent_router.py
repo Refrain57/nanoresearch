@@ -156,7 +156,7 @@ async def get_agent_prompt_preview(
     if workspace is None:
         from pathlib import Path
         import os
-        workspace = Path(os.environ.get("NANOBOT_WORKSPACE", "~/.nanoresearch/workspace")).expanduser()
+        workspace = Path(os.environ.get("NANORESEARCH_WORKSPACE", "~/.nanoresearch/workspace")).expanduser()
     builder = ContextBuilder(workspace)
     skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
     harness = agent.harness or {}

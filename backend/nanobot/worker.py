@@ -19,6 +19,10 @@ from typing import Any
 
 from arq.connections import RedisSettings
 
+from nanobot.utils.env_compat import apply_legacy_env_compat
+
+apply_legacy_env_compat()
+
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 logger = logging.getLogger(__name__)
