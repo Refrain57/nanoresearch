@@ -177,12 +177,11 @@ class QQChannel(BaseChannel):
         if self.config.media_dir:
             root = Path(self.config.media_dir).expanduser()
         elif get_media_dir:
-            try:
-                root = Path(get_media_dir("qq"))
-            except Exception:
-                root = Path.home() / ".nanoresearch" / "media" / "qq"
+            root = Path(get_media_dir("qq"))
         else:
-            root = Path.home() / ".nanoresearch" / "media" / "qq"
+            raise RuntimeError(
+                "get_media_dir is unavailable; cannot resolve QQ media directory"
+            )
 
         root.mkdir(parents=True, exist_ok=True)
         logger.info("QQ media directory: {}", str(root))

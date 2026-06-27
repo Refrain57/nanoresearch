@@ -100,9 +100,11 @@ class ChromaStore(BaseVectorStore):
         )
 
         # Persist directory (allow override)
+        # Fallback default is the per-user data dir so first-time deploys
+        # without settings.yaml don't dump chroma into the source tree.
         persist_dir_str = kwargs.get(
             'persist_directory',
-            getattr(vector_store_config, 'persist_directory', './data/db/chroma')
+            getattr(vector_store_config, 'persist_directory', '~/.nanoresearch/rag/chroma')
         )
         self.persist_directory = resolve_path(persist_dir_str)
 
