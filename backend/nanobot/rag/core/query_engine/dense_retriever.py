@@ -103,6 +103,7 @@ class DenseRetriever:
         top_k: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
+        precomputed_query_embedding: Optional[List[float]] = None,
     ) -> List[RetrievalResult]:
         """Retrieve semantically similar chunks for a query.
         
@@ -111,6 +112,8 @@ class DenseRetriever:
             top_k: Maximum number of results to return. If None, uses default_top_k.
             filters: Optional metadata filters (e.g., {"collection": "api-docs"}).
             trace: Optional TraceContext for observability (reserved for Stage F).
+            precomputed_query_embedding: Optional pre-computed embedding vector.
+                If provided, skips the embedding API call and uses this directly.
         
         Returns:
             List of RetrievalResult objects, sorted by similarity (descending).
@@ -136,14 +139,17 @@ class DenseRetriever:
         logger.debug(f"Retrieving for query='{query[:50]}...', top_k={effective_top_k}")
         
         # Step 1: Embed the query
-        try:
-            query_vectors = self.embedding_client.embed([query], trace=trace)
-            query_vector = query_vectors[0]
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to embed query: {e}. "
-                "Check embedding client configuration and connectivity."
-            ) from e
+        if precomputed_query_embedding is not None:
+            query_vector = precomputed_query_embedding
+        else:
+            try:
+                query_vectors = self.embedding_client.embed([query], trace=trace)
+                query_vector = query_vectors[0]
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to embed query: {e}. "
+                    "Check embedding client configuration and connectivity."
+                ) from e
         
         # Step 2: Query the vector store
         try:

@@ -464,6 +464,8 @@ class OpenAICompatProvider(LLMProvider):
     @classmethod
     def _parse_chunks(cls, chunks: list[Any]) -> LLMResponse:
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        has_reasoning = False  # True if any chunk carries reasoning_content (even "")
         tc_bufs: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: dict[str, int] = {}
@@ -517,6 +519,10 @@ class OpenAICompatProvider(LLMProvider):
                 text = cls._extract_text_content(delta.get("content"))
                 if text:
                     content_parts.append(text)
+                if "reasoning_content" in delta:
+                    has_reasoning = True
+                    rc = cls._extract_text_content(delta["reasoning_content"]) or ""
+                    reasoning_parts.append(rc)
                 for idx, tc in enumerate(delta.get("tool_calls") or []):
                     _accum_tc(tc, idx)
                 usage = cls._extract_usage(chunk_map) or usage
@@ -531,6 +537,9 @@ class OpenAICompatProvider(LLMProvider):
             delta = choice.delta
             if delta and delta.content:
                 content_parts.append(delta.content)
+            if delta and hasattr(delta, "reasoning_content"):
+                has_reasoning = True
+                reasoning_parts.append(delta.reasoning_content or "")
             for tc in (delta.tool_calls or []) if delta else []:
                 _accum_tc(tc, getattr(tc, "index", 0))
 
@@ -548,6 +557,7 @@ class OpenAICompatProvider(LLMProvider):
 
         return LLMResponse(
             content="".join(content_parts) or None,
+            reasoning_content="".join(reasoning_parts) if has_reasoning else None,
             tool_calls=[
                 ToolCallRequest(
                     id=b["id"] or _short_tool_id(),

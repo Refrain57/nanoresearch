@@ -30,14 +30,22 @@ from nanobot.rag.libs.loader.base_loader import BaseLoader
 
 logger = logging.getLogger(__name__)
 
-# Marker availability check
+# Marker availability check — supports both 0.3.x and 1.x APIs
 try:
-    from marker.converters.pdf import PdfConverter
-    from marker.models import create_model_dict
-    from marker.output import text_from_rendered
+    from marker.convert import convert_single_pdf
+    from marker.models import load_all_models
     MARKER_AVAILABLE = True
+    MARKER_API = "v0"
 except ImportError:
-    MARKER_AVAILABLE = False
+    try:
+        from marker.converters.pdf import PdfConverter
+        from marker.models import create_model_dict
+        from marker.output import text_from_rendered
+        MARKER_AVAILABLE = True
+        MARKER_API = "v1"
+    except ImportError:
+        MARKER_AVAILABLE = False
+        MARKER_API = None
 
 
 class MarkerLoader(BaseLoader):
@@ -88,44 +96,27 @@ class MarkerLoader(BaseLoader):
         """Lazy load Marker models."""
         if self._models is None:
             logger.info(f"Loading Marker models on {self.device}...")
-            self._models = create_model_dict(device=self.device)
+            if MARKER_API == "v1":
+                self._models = create_model_dict(device=self.device)
+            else:
+                self._models = load_all_models()
             logger.info("Marker models loaded")
         return self._models
 
-    @property
-    def converter(self) -> PdfConverter:
-        """Get or create PDF converter."""
-        if self._converter is None:
-            self._converter = PdfConverter(artifact_dict=self.models)
-        return self._converter
-
     def load(self, file_path: str | Path) -> Document:
-        """Load and parse a PDF file using Marker.
-
-        Args:
-            file_path: Path to the PDF file.
-
-        Returns:
-            Document with Markdown text and metadata.
-
-        Raises:
-            FileNotFoundError: If the PDF file doesn't exist.
-            ValueError: If the file is not a valid PDF.
-            RuntimeError: If parsing fails critically.
-        """
-        # Validate file
+        """Load and parse a PDF file using Marker."""
         path = self._validate_file(file_path)
         if path.suffix.lower() != '.pdf':
             raise ValueError(f"File is not a PDF: {path}")
 
-        # Compute document hash for unique ID and image directory
         doc_hash = self._compute_file_hash(path)
         doc_id = f"doc_{doc_hash[:16]}"
 
         try:
-            # Parse PDF with Marker
-            rendered = self.converter(str(path))
-            text_content, _, images = text_from_rendered(rendered)
+            if MARKER_API == "v1":
+                text_content, images = self._parse_v1(path)
+            else:
+                text_content, images = self._parse_v0(path)
 
             # If text is empty, fallback to MarkItDown
             if not text_content or not text_content.strip():
@@ -133,6 +124,7 @@ class MarkerLoader(BaseLoader):
                 return self._fallback_to_markitdown(path, doc_id, doc_hash)
 
         except Exception as e:
+            import traceback; traceback.print_exc()
             logger.warning(f"Marker parsing failed: {e}, falling back to MarkItDown")
             return self._fallback_to_markitdown(path, doc_id, doc_hash)
 
@@ -165,6 +157,19 @@ class MarkerLoader(BaseLoader):
             text=text_content,
             metadata=metadata
         )
+
+    def _parse_v1(self, path: Path):
+        """Parse using marker 1.x API (PdfConverter)."""
+        if self._converter is None:
+            self._converter = PdfConverter(artifact_dict=self.models)
+        rendered = self._converter(str(path))
+        text_content, _, images = text_from_rendered(rendered)
+        return text_content, images
+
+    def _parse_v0(self, path: Path):
+        """Parse using marker 0.3.x API (convert_single_pdf)."""
+        full_text, images, _ = convert_single_pdf(str(path), self.models)
+        return full_text, images
 
     def _fallback_to_markitdown(
         self,
@@ -252,38 +257,28 @@ class MarkerLoader(BaseLoader):
         image_dir = self.image_storage_dir / doc_hash
         image_dir.mkdir(parents=True, exist_ok=True)
 
+        # filename -> saved absolute path (for inline reference replacement)
+        filename_to_path: Dict[str, Path] = {}
+
         # Marker images dict: {filename: PIL.Image}
         for filename, img in images.items():
             if not isinstance(img, Image.Image):
                 continue
 
             try:
-                # Generate image ID from filename
-                # Filename format: _page_N_Figure_M.jpeg or similar
                 image_id = self._generate_image_id_from_filename(filename, doc_hash)
-
-                # Save as PNG
                 image_filename = f"{image_id}.png"
                 image_path = image_dir / image_filename
                 img.save(image_path, "PNG")
-
-                # Get image dimensions
                 width, height = img.size
-
-                # Create placeholder
-                placeholder = f"[IMAGE: {image_id}]"
-                text_content += f"\n{placeholder}\n"
-
-                # Record metadata
-                # Try to extract page number from filename
                 page_num = self._extract_page_from_filename(filename)
+
+                filename_to_path[filename] = image_path
 
                 image_metadata = {
                     "id": image_id,
                     "path": str(image_path.absolute()),
                     "page": page_num,
-                    "text_offset": len(text_content) - len(placeholder),
-                    "text_length": len(placeholder),
                     "position": {
                         "width": width,
                         "height": height,
@@ -291,12 +286,25 @@ class MarkerLoader(BaseLoader):
                     }
                 }
                 images_metadata.append(image_metadata)
-
                 logger.debug(f"Saved image {image_id} to {image_path}")
 
             except Exception as e:
                 logger.warning(f"Failed to process image {filename}: {e}")
                 continue
+
+        # Replace inline ![](relative_filename) references with absolute paths.
+        # Marker embeds images as ![](0_image_0.png) using the original filename.
+        import re as _re
+        def _replace_inline(m: _re.Match) -> str:
+            alt, ref = m.group(1), m.group(2)
+            basename = Path(ref).name
+            # Try exact filename match first, then basename match
+            saved = filename_to_path.get(ref) or filename_to_path.get(basename)
+            if saved:
+                return f"![]({saved.as_posix()})"
+            return m.group(0)
+
+        text_content = _re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _replace_inline, text_content)
 
         if images_metadata:
             logger.info(f"Processed {len(images_metadata)} images from {pdf_path}")

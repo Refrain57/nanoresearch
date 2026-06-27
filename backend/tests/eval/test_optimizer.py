@@ -1,18 +1,17 @@
-"""Tests for OptimizationAgent — candidate generation, scoring, proposal creation."""
+"""Tests for OptimizationAgent — updated for Phase 1 TunableTextObject API."""
 
 from __future__ import annotations
 
-import json
 import uuid
 import pytest
 
-from nanobot.eval.optimizer import OptimizationAgent, OptimizationCandidate
+from nanobot.eval.tunable import OptimizationCandidate
+from nanobot.eval.optimizer import OptimizationAgent
 
 
 # ---------------------------------------------------------------------------
-# Mock dependencies
+# Shared mocks
 # ---------------------------------------------------------------------------
-
 
 class _MockProvider:
     def __init__(self):
@@ -48,7 +47,7 @@ class _MockRepo:
         return p
 
     async def get_latest_snapshot_with_recordings(self, user_input):
-        return None  # no recordings by default
+        return None
 
 
 class _MockRegistry:
@@ -57,17 +56,61 @@ class _MockRegistry:
     def get_definitions(self):
         return [{"name": "dummy", "description": "test"}]
 
-    def register(self, tool):
+
+# ---------------------------------------------------------------------------
+# Mock TunableTextObject
+# ---------------------------------------------------------------------------
+
+class _MockPersonaTarget:
+    kind = "system_prompt"
+    target_id = "agent-123"
+    _candidates = [
+        OptimizationCandidate(prompt="be concise", rationale="shorter is better"),
+        OptimizationCandidate(prompt="be detailed", rationale="more info"),
+    ]
+
+    async def generate_candidates(self, badcases):
+        return self._candidates
+
+    async def read(self):
+        return "current persona"
+
+    async def apply(self, content):
+        return str(uuid.uuid4())
+
+    async def get_current_version(self):
+        return None
+
+    async def rollback(self, version_id):
         pass
 
-    async def execute(self, name, params):
-        return f"result:{name}"
+
+class _MockToolTarget:
+    kind = "tool_description"
+    target_id = "web_search"
+    _candidates = [
+        OptimizationCandidate(prompt="Search the web for real-time info", rationale="clearer"),
+    ]
+
+    async def generate_candidates(self, badcases):
+        return self._candidates
+
+    async def read(self):
+        return "current description"
+
+    async def apply(self, content):
+        return str(uuid.uuid4())
+
+    async def get_current_version(self):
+        return None
+
+    async def rollback(self, version_id):
+        pass
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# OptimizationAgent tests
 # ---------------------------------------------------------------------------
-
 
 class TestOptimizationAgent:
     def test_init_stores_registry(self):
@@ -87,29 +130,15 @@ class TestOptimizationAgent:
         assert agent._model is not None
 
     @pytest.mark.asyncio
-    async def test_generate_proposals_with_empty_candidates(self):
-        provider = _MockProvider()
-        provider.add_response("[]")  # empty JSON array → no candidates
+    async def test_generate_proposals_empty_candidates(self):
+        class _EmptyTarget(_MockPersonaTarget):
+            async def generate_candidates(self, badcases):
+                return []
+
         repo = _MockRepo()
-        agent = OptimizationAgent(provider=provider, repo=repo, registry=_MockRegistry())
-
+        agent = OptimizationAgent(provider=_MockProvider(), repo=repo, registry=_MockRegistry())
         result = await agent.generate_proposals(
-            category="test_cat",
-            representative_snapshots=[],
-            golden_test_cases=[],
-        )
-        assert result.category == "test_cat"
-        assert result.proposals == []  # no proposals generated
-
-    @pytest.mark.asyncio
-    async def test_generate_proposals_handles_malformed_llm_output(self):
-        provider = _MockProvider()
-        provider.add_response("not json at all")
-        repo = _MockRepo()
-        agent = OptimizationAgent(provider=provider, repo=repo, registry=_MockRegistry())
-
-        result = await agent.generate_proposals(
-            category="test_cat",
+            target=_EmptyTarget(),
             representative_snapshots=[],
             golden_test_cases=[],
         )
@@ -117,60 +146,52 @@ class TestOptimizationAgent:
 
     @pytest.mark.asyncio
     async def test_generate_proposals_parses_candidates(self):
-        provider = _MockProvider()
-        provider.add_response(
-            '[{"prompt": "be concise", "rationale": "shorter is better"}, {"prompt": "be detailed", "rationale": "more info"}]'
-        )
         repo = _MockRepo()
-        agent = OptimizationAgent(provider=provider, repo=repo, registry=_MockRegistry())
-
+        agent = OptimizationAgent(provider=_MockProvider(), repo=repo, registry=_MockRegistry())
         result = await agent.generate_proposals(
-            category="verbose",
+            target=_MockPersonaTarget(),
             representative_snapshots=[],
             golden_test_cases=[],
         )
-        assert result.proposals != []
         assert len(result.proposals) == 2
 
     @pytest.mark.asyncio
-    async def test_generate_proposals_ranks_by_mean_score(self):
-        provider = _MockProvider()
-        provider.add_response(
-            '[{"prompt": "p1", "rationale": "r1"}, {"prompt": "p2", "rationale": "r2"}]'
-        )
+    async def test_generate_proposals_assigns_rank(self):
         repo = _MockRepo()
-        agent = OptimizationAgent(provider=provider, repo=repo, registry=_MockRegistry())
-
+        agent = OptimizationAgent(provider=_MockProvider(), repo=repo, registry=_MockRegistry())
         result = await agent.generate_proposals(
-            category="test",
+            target=_MockPersonaTarget(),
             representative_snapshots=[],
             golden_test_cases=[],
         )
-        # All proposals should have rank assigned
         for p in result.proposals:
             assert "rank" in p
 
     @pytest.mark.asyncio
-    async def test_generate_candidates_empty_on_no_match(self):
-        provider = _MockProvider()
-        provider.add_response("no json array here")
-        agent = OptimizationAgent(provider=provider, repo=_MockRepo(), registry=_MockRegistry())
-
-        candidates = await agent._generate_candidates("cat", [])
-        assert candidates == []
+    async def test_generate_proposals_tool_description_no_crash(self):
+        """ToolDescriptionObject: scoring raises NotImplementedError — proposals still persisted."""
+        repo = _MockRepo()
+        agent = OptimizationAgent(provider=_MockProvider(), repo=repo, registry=_MockRegistry())
+        result = await agent.generate_proposals(
+            target=_MockToolTarget(),
+            representative_snapshots=[],
+            golden_test_cases=[],
+        )
+        # Should NOT raise; should persist unscored candidates
+        assert len(result.proposals) == 1
+        assert result.proposals[0]["scores"] == {}
 
     @pytest.mark.asyncio
-    async def test_generate_candidates_extracts_json_array(self):
-        provider = _MockProvider()
-        provider.add_response(
-            'some text\n[{"prompt": "p1", "rationale": "r1"}]\nmore text'
-        )
-        agent = OptimizationAgent(provider=provider, repo=_MockRepo(), registry=_MockRegistry())
-
-        candidates = await agent._generate_candidates("cat", [])
-        assert len(candidates) == 1
-        assert candidates[0].prompt == "p1"
-        assert candidates[0].rationale == "r1"
+    async def test_score_candidate_raises_for_tool_description(self):
+        """_score_candidate must raise NotImplementedError for tool_description."""
+        agent = OptimizationAgent(provider=_MockProvider(), repo=_MockRepo(), registry=_MockRegistry())
+        with pytest.raises(NotImplementedError, match="Phase 4"):
+            await agent._score_candidate(
+                target=_MockToolTarget(),
+                candidate=OptimizationCandidate(prompt="x", rationale="y"),
+                golden_test_cases=[],
+                recordings_map={},
+            )
 
     @pytest.mark.asyncio
     async def test_gather_recordings_returns_empty_when_none_found(self):

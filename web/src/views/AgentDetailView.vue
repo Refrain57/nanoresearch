@@ -65,6 +65,48 @@
             <a-empty v-else description="暂未配置 Skill" />
           </a-card>
 
+          <!-- Knowledge Bases -->
+          <a-card :bordered="false" class="section-card">
+            <template #title>
+              <div class="card-title-row">
+                <span>知识库 <span class="kb-hint">（绑定后 Agent 在对话中可检索这些知识库）</span></span>
+                <a-button size="small" @click="addKBOpen = true">
+                  <plus-outlined /> 绑定
+                </a-button>
+              </div>
+            </template>
+            <div v-if="boundKBs.length">
+              <div v-for="kb in boundKBs" :key="kb.id" class="skill-row">
+                <div>
+                  <span class="skill-name">{{ kb.name }}</span>
+                  <span v-if="kb.description" class="skill-desc"> — {{ kb.description }}</span>
+                </div>
+                <a-popconfirm title="确定解绑这个知识库？" @confirm="handleUnbindKB(kb.id)">
+                  <a-button size="small" danger type="link">解绑</a-button>
+                </a-popconfirm>
+              </div>
+            </div>
+            <a-empty v-else description="暂未绑定知识库" />
+          </a-card>
+
+          <!-- KB 添加 Modal -->
+          <a-modal v-model:open="addKBOpen" title="绑定知识库" :footer="null" width="560">
+            <div v-if="kbsToAdd.length" class="add-skill-list">
+              <div
+                v-for="kb in kbsToAdd"
+                :key="kb.id"
+                class="add-skill-row"
+                @click="handleBindKB(kb.id)"
+              >
+                <div>
+                  <div class="add-skill-name">{{ kb.name }}</div>
+                  <div v-if="kb.description" class="add-skill-desc">{{ kb.description }}</div>
+                </div>
+              </div>
+            </div>
+            <a-empty v-else description="所有知识库已绑定" />
+          </a-modal>
+
           <!-- Tools -->
           <a-card title="工具" :bordered="false" class="section-card" v-if="agent.tools?.length">
             <div v-for="tool in agent.tools" :key="tool.name" class="tool-row">
@@ -210,13 +252,15 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
-import { getAgentToolStats, getAgentPromptPreview } from '@/apis/agents'
+import { getAgentToolStats, getAgentPromptPreview, listBoundKBs, bindKB, unbindKB } from '@/apis/agents'
+import { useKnowledgeStore } from '@/stores/knowledge'
 
 const route = useRoute()
 const router = useRouter()
 const agentStore = useAgentStore()
 const chatStore = useChatStore()
 const settingsStore = useSettingsStore()
+const kbStore = useKnowledgeStore()
 
 const toolStats = ref([])
 const toolStatsLoading = ref(false)
@@ -243,6 +287,14 @@ const skillsToAdd = computed(() =>
   agentStore.skills.filter(s => !agent.value?.skills?.some(as => as.id === s.name))
 )
 
+// KB bindings
+const boundKBs = ref([])
+const bindKBSaving = ref(false)
+const addKBOpen = ref(false)
+const kbsToAdd = computed(() =>
+  kbStore.kbs.filter(kb => !boundKBs.value.some(b => b.id === kb.id))
+)
+
 const agent = computed(() => agentStore.current)
 const caps = computed(() => agent.value?.capabilities || {})
 
@@ -251,7 +303,9 @@ onMounted(async () => {
     await agentStore.fetchOne(route.params.id)
     if (!agentStore.skills.length) await agentStore.fetchSkills()
     if (!settingsStore.providers.length) settingsStore.fetchAll()
+    if (!kbStore.kbs.length) await kbStore.fetchList()
     await loadToolStats()
+    await loadBoundKBs()
   } catch (e) {
     console.error('[AgentDetail] mount error:', e)
     message.error('加载 Agent 详情失败: ' + (e.message || e))
@@ -345,6 +399,38 @@ async function saveHarness() {
   }
 }
 
+async function loadBoundKBs() {
+  try {
+    boundKBs.value = await listBoundKBs(route.params.id)
+  } catch (e) {
+    message.error('加载知识库绑定失败')
+  }
+}
+
+async function handleBindKB(kbId) {
+  bindKBSaving.value = true
+  try {
+    await bindKB(route.params.id, kbId)
+    await loadBoundKBs()
+    addKBOpen.value = false
+    message.success('绑定成功')
+  } catch (e) {
+    message.error(e.message || '绑定失败')
+  } finally {
+    bindKBSaving.value = false
+  }
+}
+
+async function handleUnbindKB(kbId) {
+  try {
+    await unbindKB(route.params.id, kbId)
+    await loadBoundKBs()
+    message.success('已解绑')
+  } catch (e) {
+    message.error(e.message || '解绑失败')
+  }
+}
+
 async function loadPromptPreview() {
   promptPreviewLoading.value = true
   try {
@@ -410,4 +496,5 @@ async function loadPromptPreview() {
   background: #f8f8f8; border-radius: 6px; padding: 12px; max-height: 60vh; overflow-y: auto;
   border: 1px solid #f0f0f0; margin: 0;
 }
+.kb-hint { font-size: 12px; color: #aaa; font-weight: 400; }
 </style>

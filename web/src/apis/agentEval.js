@@ -113,3 +113,13 @@ export const getToolErrorStats = (days = 7) => apiGet(`/api/eval/agent/tool-erro
 export const userInputAnalysis = (data) => apiPost('/api/eval/agent/badcases/user-input-analysis', data)
 
 export const getModelAnalysis = (limit = 20) => apiGet(`/api/eval/agent/badcases/model-analysis?limit=${limit}`)
+
+// Phase 6: Diagnosis panel + apply/rollback
+export const getDiagnosis = (snapshotId) => apiGet(`/api/eval/agent/snapshots/${snapshotId}/diagnosis`)
+
+export const tunableApply = (data) => apiPost('/api/eval/agent/tunable/apply', data)
+
+export const tunableRollback = (data) => apiPost('/api/eval/agent/tunable/rollback', data)
+
+export const tunableVersions = (targetKind, targetId) =>
+  apiGet(`/api/eval/agent/tunable/${targetKind}/${targetId}/versions`)

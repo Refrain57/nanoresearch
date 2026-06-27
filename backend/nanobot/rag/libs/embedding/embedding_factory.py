@@ -130,6 +130,12 @@ def _register_builtin_providers() -> None:
     except ImportError:
         pass  # Ollama provider not available
 
+    try:
+        from nanobot.rag.libs.embedding.dashscope_embedding import DashScopeEmbedding
+        EmbeddingFactory.register_provider("dashscope", DashScopeEmbedding)
+    except ImportError:
+        pass
+
 
 # Register providers when module is imported
 _register_builtin_providers()

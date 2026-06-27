@@ -25,14 +25,6 @@
                 <a-tag :color="kb.status === 'active' ? 'green' : 'default'" size="small">
                   {{ kb.status === 'active' ? '活跃' : kb.status }}
                 </a-tag>
-                <a-button
-                  size="small"
-                  type="link"
-                  style="color: #1677ff; padding: 0"
-                  @click.stop="router.push(`/knowledge/${kb.id}/eval`)"
-                >
-                  评估
-                </a-button>
               </div>
             </div>
             <a-popconfirm
@@ -69,15 +61,25 @@
         <a-form-item label="分块策略">
           <a-select v-model:value="form.chunk_strategy">
             <a-select-option value="auto">自动检测（推荐）</a-select-option>
+            <a-select-option value="semantic">语义分块（嵌入聚类）</a-select-option>
             <a-select-option value="fixed">固定大小</a-select-option>
-            <a-select-option value="document_based">结构感知（标题/章节）</a-select-option>
+            <a-select-option value="structured">结构感知（标题/章节）</a-select-option>
           </a-select>
           <div style="font-size: 12px; color: #999; margin-top: 4px">
-            自动检测：根据文档结构自动选择；固定大小：按 token 数均匀切分；结构感知：按标题层级保留文档结构
+            自动检测：根据文档结构自动选择；语义分块：按语义相似度聚类切分；固定大小：按 token 数均匀切分；结构感知：按标题层级保留文档结构
           </div>
         </a-form-item>
         <a-form-item label="Embedding 模型">
-          <a-input v-model:value="form.embedding_model" placeholder="留空使用默认配置" />
+          <a-auto-complete
+            v-model:value="form.embedding_model"
+            :options="embeddingOptions"
+            placeholder="留空使用默认配置"
+            allow-clear
+            style="width: 100%"
+          />
+          <div style="font-size: 12px; color: #999; margin-top: 4px">
+            选择或输入 Embedding 模型名称，留空则使用全局默认配置
+          </div>
         </a-form-item>
       </a-form>
     </a-modal>
@@ -91,15 +93,39 @@ import { message } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, DatabaseOutlined, FileTextOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
+import { useSettingsStore } from '@/stores/settings'
+import { computed } from 'vue'
 
 const router = useRouter()
 const kbStore = useKnowledgeStore()
+const settingsStore = useSettingsStore()
+
+// Merge user-configured models with common embedding model presets
+const EMBEDDING_PRESETS = [
+  'text-embedding-v3', 'text-embedding-v2', 'text-embedding-ada-002',
+  'text-embedding-3-small', 'text-embedding-3-large', 'bge-m3',
+]
+const embeddingOptions = computed(() => {
+  const seen = new Set()
+  const opts = []
+  // User's provider models first
+  for (const p of settingsStore.providers) {
+    for (const m of (p.models || [])) {
+      if (!seen.has(m)) { seen.add(m); opts.push({ value: m, label: m }) }
+    }
+  }
+  // Common embedding presets as fallback
+  for (const m of EMBEDDING_PRESETS) {
+    if (!seen.has(m)) { seen.add(m); opts.push({ value: m, label: m }) }
+  }
+  return opts
+})
 
 const createOpen = ref(false)
 const creating = ref(false)
 const form = reactive({ name: '', description: '', chunk_strategy: 'auto', embedding_model: '' })
 
-onMounted(() => kbStore.fetchList())
+onMounted(() => { kbStore.fetchList(); settingsStore.fetchAll() })
 
 function openCreate() {
   Object.assign(form, { name: '', description: '', chunk_strategy: 'auto', embedding_model: '' })

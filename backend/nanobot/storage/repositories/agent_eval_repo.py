@@ -21,6 +21,7 @@ from nanobot.storage.models import (
     AgentTestCase,
     JudgeCalibrationLog,
     OptimizationProposal,
+    TunableObjectVersion,
 )
 
 
@@ -234,6 +235,8 @@ class AgentEvalRepository:
         status: str = "active",
         generated_from_snapshot_id: uuid.UUID | None = None,
         generation_reason: str | None = None,
+        set_kind: str | None = None,
+        tool_recordings: dict | None = None,
     ) -> AgentTestCase:
         tc = AgentTestCase(
             dataset_type=dataset_type,
@@ -249,6 +252,8 @@ class AgentEvalRepository:
             status=status,
             generated_from_snapshot_id=generated_from_snapshot_id,
             generation_reason=generation_reason,
+            set_kind=set_kind,
+            tool_recordings=tool_recordings,
         )
         async with self._factory() as session:
             session.add(tc)
@@ -259,12 +264,15 @@ class AgentEvalRepository:
     async def list_test_cases(
         self,
         dataset_type: str | None = None,
+        set_kind: str | None = None,
         active_only: bool = True,
     ) -> list[AgentTestCase]:
         async with self._factory() as session:
             q = select(AgentTestCase)
             if dataset_type is not None:
                 q = q.where(AgentTestCase.dataset_type == dataset_type)
+            if set_kind is not None:
+                q = q.where(AgentTestCase.set_kind == set_kind)
             if active_only:
                 q = q.where(AgentTestCase.is_active == True)  # noqa: E712
                 q = q.where(AgentTestCase.status == "active")
@@ -455,13 +463,95 @@ class AgentEvalRepository:
                 update(AgentRunSnapshot)
                 .where(AgentRunSnapshot.id == snapshot_id)
                 .values(
+                    # legacy columns — preserved for backward compat
                     semantic_category=result.semantic_category,
                     root_cause_auto=result.root_cause_auto,
                     root_cause_auto_confidence=result.confidence,
                     root_cause_auto_reason=result.reason,
+                    # Phase 1: structured pointer (parallel write, old columns untouched)
+                    classification_layer=result.layer,
+                    classification_target_kind=result.target_kind,
+                    classification_target_id=result.target_id,
                 )
             )
             await session.commit()
+
+    # ------------------------------------------------------------------
+    # Phase 1: tunable object version registry
+    # ------------------------------------------------------------------
+
+    async def create_tunable_version(
+        self,
+        kind: str,
+        target_id: str,
+        content: str,
+        created_by: str = "system",
+    ) -> uuid.UUID:
+        """Insert a new version (active=True) and deactivate all prior versions."""
+        async with self._factory() as session:
+            # deactivate existing active versions for this kind+target_id
+            await session.execute(
+                update(TunableObjectVersion)
+                .where(
+                    TunableObjectVersion.kind == kind,
+                    TunableObjectVersion.target_id == target_id,
+                    TunableObjectVersion.active == True,  # noqa: E712
+                )
+                .values(active=False)
+            )
+            new_version = TunableObjectVersion(
+                kind=kind,
+                target_id=target_id,
+                content=content,
+                active=True,
+                created_by=created_by,
+            )
+            session.add(new_version)
+            await session.commit()
+            await session.refresh(new_version)
+            return new_version.id
+
+    async def get_current_tunable_version(
+        self, kind: str, target_id: str
+    ) -> TunableObjectVersion | None:
+        """Return the currently active version, or None."""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(TunableObjectVersion)
+                .where(
+                    TunableObjectVersion.kind == kind,
+                    TunableObjectVersion.target_id == target_id,
+                    TunableObjectVersion.active == True,  # noqa: E712
+                )
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_tunable_version_by_id(
+        self, version_id: uuid.UUID
+    ) -> TunableObjectVersion | None:
+        """Return a specific version by ID (used for rollback)."""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(TunableObjectVersion).where(TunableObjectVersion.id == version_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_tunable_versions(
+        self, kind: str, target_id: str, limit: int = 20
+    ) -> list[TunableObjectVersion]:
+        """Return version history for a kind+target_id, newest first."""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(TunableObjectVersion)
+                .where(
+                    TunableObjectVersion.kind == kind,
+                    TunableObjectVersion.target_id == target_id,
+                )
+                .order_by(desc(TunableObjectVersion.created_at))
+                .limit(limit)
+            )
+            return list(result.scalars().all())
 
     async def list_unclassified_badcases(self, limit: int = 50) -> list[AgentRunSnapshot]:
         from sqlalchemy import func
@@ -565,13 +655,18 @@ class AgentEvalRepository:
         category: str,
         proposals: list[dict],
         created_by: str,
+        baseline_score: dict | None = None,
+        baseline_version_id: uuid.UUID | None = None,
+        status: str = "pending",
     ) -> OptimizationProposal:
         prop = OptimizationProposal(
             category=category,
             proposals=proposals,
-            status="pending",
+            status=status,
             created_at=_utcnow(),
             created_by=created_by,
+            baseline_score=baseline_score,
+            baseline_version_id=baseline_version_id,
         )
         async with self._factory() as session:
             session.add(prop)

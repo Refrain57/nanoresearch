@@ -312,6 +312,7 @@ class AgentLoop:
         run_id: str | None = None,
         session_key: str | None = None,
         context_trace: dict | None = None,
+        conversation_id: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -412,7 +413,7 @@ class AgentLoop:
         _tool_recordings = _sandbox.export_recordings() if _sandbox and _sandbox.recordings else None
 
         # Async snapshot save (non-blocking, best-effort)
-        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings, session_key=session_key, context_trace=context_trace)
+        self._maybe_save_snapshot(_collector, result, user_input, tool_recordings=_tool_recordings, session_key=session_key, context_trace=context_trace, conversation_id=conversation_id)
 
         return result.final_content, result.tools_used, result.messages
 
@@ -556,7 +557,7 @@ class AgentLoop:
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
 
-    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None, session_key: str | None = None, context_trace: dict | None = None) -> None:
+    def _maybe_save_snapshot(self, collector: Any, result: Any, user_input: str, tool_recordings: str | None = None, session_key: str | None = None, context_trace: dict | None = None, conversation_id: str | None = None) -> None:
         """Fire-and-forget snapshot write, subject to sampling rate."""
         if self._eval_repo is None or self._uid is None:
             return
@@ -597,8 +598,20 @@ class AgentLoop:
         async def _save() -> None:
             try:
                 from nanobot.eval.badcase_detector import BadcaseDetector
+                import uuid as _uuid_lib
+                _conv_uuid = None
+                if conversation_id and conversation_id != "direct":
+                    try:
+                        _conv_uuid = _uuid_lib.UUID(conversation_id)
+                    except (ValueError, AttributeError):
+                        logger.warning(
+                            "snapshot: conversation_id is not a valid UUID, storing NULL "
+                            "(value={!r}). Phase 1 will not be able to locate this snapshot "
+                            "by conversation.", conversation_id
+                        )
                 snap_id = await self._eval_repo.save_snapshot(
                     snapshot_data, self._uid,
+                    conversation_id=_conv_uuid,
                     system_prompt_version="production",
                     tool_recordings=tool_recordings,
                 )
@@ -666,6 +679,7 @@ class AgentLoop:
         kb_bindings: list[dict] | None = None,
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -795,6 +809,7 @@ class AgentLoop:
             run_id=run_id,
             session_key=key,
             context_trace=_ctx_trace,
+            conversation_id=conversation_id,
         )
 
         if final_content is None:
@@ -900,6 +915,7 @@ class AgentLoop:
         kb_bindings: list[dict] | None = None,
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -916,4 +932,5 @@ class AgentLoop:
             kb_bindings=kb_bindings,
             kb_map=kb_map,
             run_id=run_id,
+            conversation_id=conversation_id,
         )

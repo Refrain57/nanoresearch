@@ -186,7 +186,7 @@ class SessionManager:
                     "updated_at": ts,
                     "created_at": session.created_at.isoformat(),
                     "metadata": json.dumps(session.metadata, ensure_ascii=False),
-                    "last_consolidated": "0",
+                    "last_consolidated": str(session.last_consolidated),
                 })
                 pipe.expire(msg_key, RedisKeys.SESSION_TTL)
                 pipe.expire(meta_key, RedisKeys.SESSION_TTL)

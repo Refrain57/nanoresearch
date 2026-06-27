@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from mcp import types
 from mcp.server.lowlevel import Server
 
+from nanobot.rag.core.response.response_builder import MCPToolResponse
 from nanobot.rag.observability.logger import get_logger
 
 
@@ -145,6 +146,11 @@ class ProtocolHandler:
                     content=[types.TextContent(type="text", text=result)],
                     isError=False,
                 )
+            if isinstance(result, MCPToolResponse):
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=result.content)],
+                    isError=False,
+                )
             if isinstance(result, list):
                 return types.CallToolResult(content=result, isError=False)
             # Default: convert to string
@@ -193,7 +199,9 @@ def _register_default_tools(protocol_handler: ProtocolHandler) -> None:
     """Register all default MCP tools with the protocol handler.
 
     This function registers the RAG tools in the new unified entry point style:
-    - rag_search: Single entry point for all retrieval operations
+    - kb_search: Smart multi-round KB retrieval (managed mode)
+    - kb_retrieve: Direct single-pass KB retrieval (manual mode, for multi-hop)
+    - memory_search: Research memory retrieval (fixed collections)
     - list_collections: View collections
     - list_documents: View documents in collection
     - ingest_document: Add documents to collection
@@ -203,15 +211,19 @@ def _register_default_tools(protocol_handler: ProtocolHandler) -> None:
     """
     logger = get_logger()
 
-    # Register rag_search - unified entry point
-    from nanobot.rag.mcp_server.tools.rag_search import register_tools as register_rag_search_tools
-    register_rag_search_tools(protocol_handler)
+    # Register kb_search - smart multi-round KB retrieval
+    from nanobot.rag.mcp_server.tools.rag_search import register_tools as register_kb_search_tools
+    register_kb_search_tools(protocol_handler)
+
+    # Register kb_retrieve + memory_search - direct retrieval tools
+    from nanobot.rag.mcp_server.tools.agentic.retrieval import register_tools as register_retrieval_tools
+    register_retrieval_tools(protocol_handler)
 
     # Register collection management tools
     from nanobot.rag.mcp_server.tools.agentic.collections import register_tools as register_collection_tools
     register_collection_tools(protocol_handler)
 
-    logger.info("Registered RAG tools: rag_search, list_collections, list_documents, ingest_document")
+    logger.info("Registered RAG tools: kb_search, kb_retrieve, memory_search, list_collections, list_documents, ingest_document")
 
 
 def create_mcp_server(

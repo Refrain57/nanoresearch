@@ -1,4 +1,4 @@
-"""Custom evaluator: Recall@K and F1@K for online retrieval quality checks."""
+"""Custom evaluator: Recall@K, Precision@K, MRR, F1@K for retrieval quality checks."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from nanobot.rag.libs.evaluator.base_evaluator import BaseEvaluator
 
 
 class CustomEvaluator(BaseEvaluator):
-    """Recall@K and F1@K evaluator — fast, deterministic, no LLM needed."""
+    """Deterministic retrieval evaluator — no LLM needed."""
 
-    SUPPORTED_METRICS = {"recall@k", "f1@k"}
+    SUPPORTED_METRICS = {"recall@k", "f1@k", "precision@k", "mrr"}
     _ID_FIELDS = ("id", "chunk_id", "document_id", "doc_id")
 
     def __init__(
@@ -27,7 +27,7 @@ class CustomEvaluator(BaseEvaluator):
 
         normalized = [str(m).strip().lower() for m in (metrics or [])]
         if not normalized:
-            normalized = ["recall@k", "f1@k"]
+            normalized = ["recall@k", "precision@k", "mrr"]
 
         unsupported = [m for m in normalized if m not in self.SUPPORTED_METRICS]
         if unsupported:
@@ -56,6 +56,10 @@ class CustomEvaluator(BaseEvaluator):
         results: Dict[str, float] = {}
         if "recall@k" in self.metrics:
             results["recall@k"] = self._compute_recall(retrieved_ids, ground_truth_ids)
+        if "precision@k" in self.metrics:
+            results["precision@k"] = self._compute_precision(retrieved_ids, ground_truth_ids)
+        if "mrr" in self.metrics:
+            results["mrr"] = self._compute_mrr(retrieved_ids, ground_truth_ids)
         if "f1@k" in self.metrics:
             results["f1@k"] = self._compute_f1(retrieved_ids, ground_truth_ids)
         return results
@@ -112,6 +116,22 @@ class CustomEvaluator(BaseEvaluator):
         gold_set = set(gold)
         hits = sum(1 for r in retrieved if r in gold_set)
         return hits / len(gold_set)
+
+    def _compute_precision(self, retrieved: Sequence[str], gold: Sequence[str]) -> float:
+        if not retrieved:
+            return 0.0
+        gold_set = set(gold)
+        hits = sum(1 for r in retrieved if r in gold_set)
+        return hits / len(retrieved)
+
+    def _compute_mrr(self, retrieved: Sequence[str], gold: Sequence[str]) -> float:
+        if not gold:
+            return 0.0
+        gold_set = set(gold)
+        for rank, chunk_id in enumerate(retrieved, start=1):
+            if chunk_id in gold_set:
+                return 1.0 / rank
+        return 0.0
 
     def _compute_f1(self, retrieved: Sequence[str], gold: Sequence[str]) -> float:
         if not gold or not retrieved:

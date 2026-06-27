@@ -11,9 +11,10 @@ export const deleteKnowledge  = (id)         => apiDelete(`/api/knowledge/${id}`
 export const listDocuments    = (kbId)       => apiGet(`/api/knowledge/${kbId}/documents`)
 export const deleteDocument   = (kbId, docId) => apiDelete(`/api/knowledge/${kbId}/documents/${docId}`)
 
-export const uploadDocument = (kbId, file) => {
+export const uploadDocument = (kbId, file, pdfParser = 'marker') => {
   const form = new FormData()
   form.append('file', file)
+  form.append('pdf_parser', pdfParser)
   return apiPost(`/api/knowledge/${kbId}/documents`, form)
 }
 
@@ -23,6 +24,26 @@ export const listChunks        = (kbId, params = {}) => {
   return apiGet(`/api/knowledge/${kbId}/chunks${qs ? '?' + qs : ''}`)
 }
 export const listDocumentChunks = (kbId, docId) => apiGet(`/api/knowledge/${kbId}/documents/${docId}/chunks`)
+
+// Document file download (returns Blob)
+export const getDocumentFileBlob = async (kbId, docId) => {
+  const { useUserStore } = await import('@/stores/user')
+  const userStore = useUserStore()
+  const resp = await fetch(`/api/knowledge/${kbId}/documents/${docId}/file`, {
+    headers: {
+      ...userStore.getAuthHeaders(),
+      'Accept-Encoding': 'identity',
+    },
+  })
+  if (!resp.ok) throw new Error(await resp.text())
+  return resp.blob()
+}
+
+// Knowledge Graph
+export const buildDocGraph   = (kbId, docId) => apiPost(`/api/knowledge/${kbId}/documents/${docId}/graph/build`, {})
+export const getDocEntities  = (kbId, docId) => apiGet(`/api/knowledge/${kbId}/documents/${docId}/graph/entities`)
+export const getGraphStats   = (kbId)        => apiGet(`/api/knowledge/${kbId}/graph/stats`)
+export const buildKbGraph    = (kbId)        => apiPost(`/api/knowledge/${kbId}/graph/build`, {})
 
 // Test retrieval
 export const testQuery = (kbId, query, topK = 5, mode = 'hybrid') =>
@@ -44,9 +65,12 @@ export const uploadDataset = (kbId, name, file) => {
   return apiPost(`/api/eval/${kbId}/datasets/upload?name=${encodeURIComponent(name)}`, form)
 }
 
+export const generateDataset = (kbId, data) => apiPost(`/api/eval/${kbId}/datasets/generate`, data)
+
 // Eval runs
 export const listEvalRuns   = (kbId)       => apiGet(`/api/eval/${kbId}/runs`)
 export const createEvalRun  = (kbId, data) => apiPost(`/api/eval/${kbId}/runs`, data)
 export const createRagasRun = (kbId, data) => apiPost(`/api/eval/${kbId}/runs/ragas`, data)
+export const createAgentRun = (kbId, data) => apiPost(`/api/eval/${kbId}/runs/agent`, data)
 export const getEvalRun     = (kbId, runId) => apiGet(`/api/eval/${kbId}/runs/${runId}`)
 export const deleteEvalRun  = (kbId, runId) => apiDelete(`/api/eval/${kbId}/runs/${runId}`)

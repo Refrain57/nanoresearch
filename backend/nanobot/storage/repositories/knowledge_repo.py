@@ -195,8 +195,9 @@ class KnowledgeRepository:
         file_size: int | None = None,
         mime_type: str | None = None,
         pdf_parser: str = "marker",
+        content_hash: str | None = None,
     ) -> KbDocument:
-        doc = KbDocument(kb_id=kb_id, filename=filename, file_path=file_path, file_size=file_size, mime_type=mime_type, pdf_parser=pdf_parser)
+        doc = KbDocument(kb_id=kb_id, filename=filename, file_path=file_path, file_size=file_size, mime_type=mime_type, pdf_parser=pdf_parser, content_hash=content_hash)
         async with self._factory() as db:
             db.add(doc)
             await db.commit()
@@ -227,6 +228,38 @@ class KnowledgeRepository:
             doc = result.scalar_one_or_none()
             if doc:
                 doc.file_path = file_path
+                await db.commit()
+
+    async def find_by_content_hash(self, kb_id: uuid.UUID, content_hash: str) -> KbDocument | None:
+        """Find a document by kb_id + content_hash, excluding failed ones."""
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KbDocument).where(
+                    KbDocument.kb_id == kb_id,
+                    KbDocument.content_hash == content_hash,
+                    KbDocument.status != "failed",
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def reset_for_reprocessing(
+        self,
+        doc_id: uuid.UUID,
+        file_path: str | None = None,
+        content_hash: str | None = None,
+    ) -> None:
+        """Reset a document to 'reprocessing' status for force/recovery flows."""
+        async with self._factory() as db:
+            result = await db.execute(select(KbDocument).where(KbDocument.id == doc_id))
+            doc = result.scalar_one_or_none()
+            if doc:
+                doc.status = "reprocessing"
+                doc.chunk_count = 0
+                doc.error_msg = None
+                if file_path is not None:
+                    doc.file_path = file_path
+                if content_hash is not None:
+                    doc.content_hash = content_hash
                 await db.commit()
 
     async def delete_document(self, doc_id: uuid.UUID) -> None:

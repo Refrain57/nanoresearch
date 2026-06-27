@@ -221,6 +221,23 @@ class ChunkRecord:
         )
 
 
+@dataclass
+class ChunkPayload:
+    """Lightweight payload carrying chunk data from pipeline to caller.
+
+    Built by VectorUpserter during ChromaDB write and returned through
+    PipelineResult so callers can persist KbChunk rows without reading
+    back from the vector store.
+    """
+
+    chroma_id: str
+    text: str
+    token_count: int
+    char_start: int | None = None
+    char_end: int | None = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 # Type aliases for convenience
 Metadata = Dict[str, Any]
 Vector = List[float]

@@ -1367,9 +1367,19 @@ def serve(
     else:
         logger.disable("nanobot")
 
-    init_engine()
     import asyncio as _asyncio
+    import sys as _sys
+    if _sys.platform == "win32":
+        _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
+
+    init_engine()
     _asyncio.run(check_schema_migrations())
+    # Re-create the engine so uvicorn's event loop starts with a clean connection pool.
+    # asyncio.run() above creates a temporary loop; any asyncpg connections acquired
+    # during check_schema_migrations() are bound to that (now-closed) loop. Calling
+    # init_engine() replaces the global _engine with a fresh instance (empty pool),
+    # avoiding "Future attached to a different loop" errors on Windows.
+    init_engine()
     factory = get_session_factory()
 
     bus = MessageBus()
@@ -1450,10 +1460,6 @@ def serve(
     )
 
     console.print(f"{__logo__} NanoResearch API server starting on http://{host}:{port}")
-    import sys as _sys
-    if _sys.platform == "win32":
-        import asyncio as _asyncio
-        _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(fastapi_app, host=host, port=port)
 
 

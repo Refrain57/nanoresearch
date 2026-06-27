@@ -1,45 +1,63 @@
-"""Optimization Agent: generate and score system-prompt improvement candidates
-for a given badcase category.
+"""Optimization Agent: generate and score TunableTextObject improvement candidates.
 
 Flow:
-  1. LLM generates 3-5 candidate prompt improvements given category + representative badcases.
-  2. For each golden test case, find the most recent snapshot that has tool_recordings.
-  3. Run each candidate prompt through SandboxedToolRegistry(replay) on those snapshots.
-  4. Score via RuleEvaluator, rank candidates by mean score.
-  5. Persist as OptimizationProposal.
+  1. target.generate_candidates(badcases) — LLM proposes 3-5 candidate texts.
+  2. Read & score BASELINE (current deployed version) on both sets (Phase 5):
+     CRITICAL: baseline uses the EXACT SAME fix_test_cases and health_test_cases
+     Python objects as candidate scoring — same list instances, same recordings.
+     The only variable is the text content (baseline vs candidate).
+  3. Score each candidate on TWO independent sets (Phase 2):
+       fix_set  — the badcases that triggered this optimization run (runtime, dynamic).
+       health_set — explicitly constructed cases (set_kind="health" in DB, ≥50 cases).
+  4. Run each candidate through SandboxedToolRegistry(replay) on those test cases.
+  5. Score via RuleEvaluator, rank by mean fix_set score.
+  6. Phase 5 gate: candidate.fix_set_delta ≥ GATE_IMPROVE AND
+     candidate.health_set_delta ≥ -GATE_TOLERATE → gate_status = "pending_approval",
+     else "rejected_by_gate".  deltas are pre-computed and stored in JSONB for
+     direct SQL query: proposals->'proposals'->0->>'fix_set_delta'.
+  7. Persist as OptimizationProposal with baseline_score, baseline_version_id,
+     and per-candidate gate_status / deltas.
+
+Phase constraints:
+  - Phase 1: Only PersonaObject (kind="system_prompt") can complete the full flow.
+    ToolDescriptionObject scoring requires Phase 4 sandbox layering.
+  - Phase 2: generate_proposals requires BOTH fix_cases and health_cases to be non-empty.
+    Missing either set raises ValueError — the dual-set invariant must hold.
+  - Phase 5: baseline is scored fresh every generate_proposals call using the same
+    test case objects as candidates.  Historical baseline scores are never reused.
+    Gate thresholds are hardcoded — no dynamic threshold (insufficient calibration data).
 """
 
 from __future__ import annotations
 
-import json
-import os
-import re
 import uuid
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.eval.tunable import OptimizationCandidate, TunableTextObject
     from nanobot.providers.base import LLMProvider
     from nanobot.storage.models import AgentRunSnapshot, AgentTestCase, OptimizationProposal
     from nanobot.storage.repositories.agent_eval_repo import AgentEvalRepository
 
+# OptimizationCandidate is defined in tunable.py — import here for callers that
+# previously imported it from optimizer.py.
+from nanobot.eval.tunable import OptimizationCandidate  # noqa: F401  (re-export)
 
-@dataclass
-class OptimizationCandidate:
-    prompt: str
-    rationale: str
+# ---------------------------------------------------------------------------
+# Phase 5: deployment gate thresholds (hardcoded — no dynamic threshold yet;
+# insufficient calibration data to tune.  Revisit after 2-3 months of real
+# proposal data per SDD §4.4 Rationale.)
+# ---------------------------------------------------------------------------
+_GATE_IMPROVE = 0.05   # fix_set delta must be ≥ this (candidate beats baseline on fix set)
+_GATE_TOLERATE = 0.02  # health_set delta must be ≥ -this (candidate doesn't wreck health set)
 
 
-_GENERATE_SYSTEM = """\
-你是一位 AI Agent 系统 prompt 优化专家。
-给定一类 badcase 的失败模式和代表性样本，生成 3-5 条候选系统 prompt 改进方案。
-每条方案只需包含改进后的系统 prompt 文本及简要说明（rationale）。
-以 JSON 数组输出，格式：[{"prompt": "...", "rationale": "..."}]
-不要输出任何其他内容。
-"""
+def _dict_mean(d: dict) -> float:
+    """Mean of dict values. Returns 0.0 for empty dict (scores absent = neutral)."""
+    return round(sum(d.values()) / len(d), 4) if d else 0.0
 
 
 class OptimizationAgent:
@@ -53,132 +71,203 @@ class OptimizationAgent:
         self._provider = provider
         self._repo = repo
         self._registry = registry
+        import os
         self._model = model or os.environ.get("EVAL_JUDGE_MODEL") or provider.get_default_model()
 
     async def generate_proposals(
         self,
-        category: str,
+        target: "TunableTextObject",
         representative_snapshots: "list[AgentRunSnapshot]",
-        golden_test_cases: "list[AgentTestCase]",
+        fix_test_cases: "list[AgentTestCase]",
+        health_test_cases: "list[AgentTestCase]",
         created_by: str = "system",
     ) -> "OptimizationProposal":
-        """Main entry: generate, score, rank, and persist optimization proposals."""
-        # Step 1: generate candidate prompts from LLM
-        candidates = await self._generate_candidates(category, representative_snapshots)
+        """Generate, score on both sets, gate, rank, and persist.
+
+        fix_test_cases  — test cases derived from the badcases triggering this run.
+        health_test_cases — independently constructed health set (set_kind="health").
+
+        Both sets must be non-empty; missing either raises ValueError (Phase 2 invariant).
+
+        CRITICAL (Phase 5): baseline scoring and candidate scoring share the EXACT SAME
+        fix_test_cases and health_test_cases Python objects.  The only variable is the
+        text content (baseline vs candidate).  This ensures delta computations are
+        meaningful — if the test sets differed, the gate would be comparing apples
+        to oranges.
+        """
+        if not fix_test_cases:
+            raise ValueError(
+                "generate_proposals requires fix_test_cases — "
+                "provide test cases derived from the triggering badcases"
+            )
+        if not health_test_cases:
+            raise ValueError(
+                "generate_proposals requires health_test_cases — "
+                "construct the health set first (set_kind='health', ≥50 cases, see Phase 2 SDD)"
+            )
+
+        # ---- Phase 5: baseline anchor (before any candidate work) ----
+        baseline_text = await target.read()
+        baseline_version_id_raw = await target.get_current_version()
+        baseline_version_id: uuid.UUID | None = (
+            uuid.UUID(baseline_version_id_raw) if baseline_version_id_raw else None
+        )
+
+        # ---- generate candidates ----
+        candidates = await target.generate_candidates(representative_snapshots)
         if not candidates:
-            logger.warning("OptimizationAgent: no candidates generated for category={}", category)
-            return await self._repo.create_optimization_proposal(
-                category=category, proposals=[], created_by=created_by
-            )
-
-        # Step 2: gather recordings for golden test cases
-        recordings_map = await self._gather_recordings(golden_test_cases)
-        if not recordings_map:
             logger.warning(
-                "OptimizationAgent: no tool recordings found for any golden test case, "
-                "cannot score candidates reliably"
+                "OptimizationAgent: no candidates generated for kind={} target_id={}",
+                target.kind, target.target_id,
             )
-            proposals = [
-                {"prompt": c.prompt, "rationale": c.rationale, "scores": {}, "rank": i + 1}
-                for i, c in enumerate(candidates)
-            ]
             return await self._repo.create_optimization_proposal(
-                category=category, proposals=proposals, created_by=created_by
+                category=f"{target.kind}:{target.target_id}",
+                proposals=[],
+                created_by=created_by,
+                baseline_score=None,
+                baseline_version_id=baseline_version_id,
             )
 
-        # Step 3: score each candidate
+        # ---- gather recordings ONCE for both baseline and candidates ----
+        fix_recordings = await self._gather_recordings(fix_test_cases)
+        health_recordings = await self._gather_recordings(health_test_cases)
+
+        # ---- score baseline on EXACT SAME test case objects (Phase 5 invariant) ----
+        baseline_candidate = OptimizationCandidate(
+            prompt=baseline_text,
+            rationale="baseline (current deployed version)",
+        )
+        baseline_fix = await self._score_candidate_set(
+            target, baseline_candidate, fix_test_cases, fix_recordings
+        )
+        baseline_health = await self._score_candidate_set(
+            target, baseline_candidate, health_test_cases, health_recordings
+        )
+        baseline_score = {"fix_set": baseline_fix, "health_set": baseline_health}
+
+        baseline_fix_mean = _dict_mean(baseline_fix)
+        baseline_health_mean = _dict_mean(baseline_health)
+
+        # ---- score candidates ----
         scored: list[dict[str, Any]] = []
         for candidate in candidates:
-            scores = await self._score_candidate(candidate, golden_test_cases, recordings_map)
-            mean_score = round(sum(scores.values()) / len(scores), 4) if scores else 0.0
+            try:
+                fix_scores = await self._score_candidate_set(
+                    target, candidate, fix_test_cases, fix_recordings
+                )
+                health_scores = await self._score_candidate_set(
+                    target, candidate, health_test_cases, health_recordings
+                )
+            except NotImplementedError as exc:
+                logger.warning(
+                    "OptimizationAgent: scoring not available for kind={}: {} — "
+                    "persisting candidate without scores",
+                    target.kind, exc,
+                )
+                fix_scores = {}
+                health_scores = {}
+
+            dual_scores = {"fix_set": fix_scores, "health_set": health_scores}
+            fix_mean = (
+                round(sum(fix_scores.values()) / len(fix_scores), 4)
+                if fix_scores else 0.0
+            )
+
+            # ---- Phase 5: compute deltas & gate decision ----
+            health_mean = _dict_mean(health_scores)
+
+            fix_set_delta = round(fix_mean - baseline_fix_mean, 4)
+            health_set_delta = round(health_mean - baseline_health_mean, 4)
+
+            gate_passed = (
+                fix_set_delta >= _GATE_IMPROVE
+                and health_set_delta >= -_GATE_TOLERATE
+            )
+            gate_status = "pending_approval" if gate_passed else "rejected_by_gate"
+
             scored.append({
                 "prompt": candidate.prompt,
                 "rationale": candidate.rationale,
-                "scores": scores,
-                "mean_score": mean_score,
+                "scores": dual_scores,
+                "fix_mean_score": fix_mean,
+                "fix_set_delta": fix_set_delta,
+                "health_set_delta": health_set_delta,
+                "gate_status": gate_status,
             })
 
-        # Step 4: rank by mean score descending
-        scored.sort(key=lambda x: x["mean_score"], reverse=True)
+        scored.sort(key=lambda x: x["fix_mean_score"], reverse=True)
         for i, item in enumerate(scored):
             item["rank"] = i + 1
 
+        # ---- proposal-level status ----
+        all_rejected = all(
+            item["gate_status"] == "rejected_by_gate" for item in scored
+        )
+        proposal_status = "gate_all_rejected" if all_rejected else "pending"
+
         return await self._repo.create_optimization_proposal(
-            category=category, proposals=scored, created_by=created_by
+            category=f"{target.kind}:{target.target_id}",
+            proposals=scored,
+            created_by=created_by,
+            baseline_score=baseline_score,
+            baseline_version_id=baseline_version_id,
+            status=proposal_status,
         )
-
-    async def _generate_candidates(
-        self,
-        category: str,
-        snapshots: "list[AgentRunSnapshot]",
-    ) -> list[OptimizationCandidate]:
-        # Build a summary of badcase examples
-        examples: list[str] = []
-        for snap in snapshots[:5]:
-            chain = snap.tool_call_chain or []
-            recent = chain[-2:] if len(chain) > 2 else chain
-            chain_str = json.dumps(recent, ensure_ascii=False, default=str)[:500]
-            resp = (snap.final_response or "(无回复)")[:300]
-            examples.append(
-                f"- 用户输入: {(snap.user_input or '')[:200]}\n"
-                f"  工具调用(最近): {chain_str}\n"
-                f"  最终回复: {resp}"
-            )
-
-        prompt = (
-            f"Badcase 类别：{category}\n\n"
-            f"代表性 badcase 样本（共 {len(examples)} 条）：\n"
-            + "\n\n".join(examples)
-            + "\n\n请生成 3-5 条候选系统 prompt 改进方案（JSON 数组）。"
-        )
-
-        try:
-            response = await self._provider.chat_with_retry(
-                messages=[{"role": "user", "content": prompt}],
-                system=_GENERATE_SYSTEM,
-                model=self._model,
-                max_tokens=2048,
-                temperature=0.3,
-            )
-            raw = (response.content or "").strip()
-            # Extract JSON array
-            match = re.search(r'\[.*\]', raw, re.DOTALL)
-            if not match:
-                return []
-            items: list[dict] = json.loads(match.group())
-            return [
-                OptimizationCandidate(
-                    prompt=str(item.get("prompt", "")),
-                    rationale=str(item.get("rationale", "")),
-                )
-                for item in items
-                if item.get("prompt")
-            ]
-        except Exception as exc:
-            logger.warning("OptimizationAgent._generate_candidates failed: {}", exc)
-            return []
 
     async def _gather_recordings(
         self,
-        golden_test_cases: "list[AgentTestCase]",
+        test_cases: "list[AgentTestCase]",
     ) -> dict[uuid.UUID, str]:
-        """Return {test_case_id: recordings_json} for cases that have recordings."""
+        """Return {test_case_id: recordings_json} for cases that have tool recordings.
+
+        Priority:
+          1. tc.tool_recordings — used by health-set cases (recordings stored directly
+             on the test case row at construction time).
+          2. Latest snapshot matching user_input — used by fix-set cases (recordings
+             come from the original badcase run).
+        """
+        import json
         result: dict[uuid.UUID, str] = {}
-        for tc in golden_test_cases:
+        for tc in test_cases:
+            if tc.tool_recordings:
+                result[tc.id] = json.dumps(tc.tool_recordings)
+                continue
             snap = await self._repo.get_latest_snapshot_with_recordings(
-                user_input=tc.user_input  # uid=None matches any user
+                user_input=tc.user_input
             )
             if snap and snap.tool_recordings:
                 result[tc.id] = json.dumps(snap.tool_recordings)
         return result
 
-    async def _score_candidate(
+    async def _score_candidate_set(
         self,
-        candidate: OptimizationCandidate,
-        golden_test_cases: "list[AgentTestCase]",
+        target: "TunableTextObject",
+        candidate: "OptimizationCandidate",
+        test_cases: "list[AgentTestCase]",
         recordings_map: dict[uuid.UUID, str],
     ) -> dict[str, float]:
-        """Score a candidate prompt against golden test cases using replay mode."""
+        """Score a candidate against one test set (fix or health).
+
+        system_prompt assembly:
+          - system_prompt (kind="tool_description"): built via ContextBuilder with agent
+            persona/skills/kb_bindings from DB; workspace = tmp dir; knowledge_search = None
+            (no user history injection — evaluation must be reproducible).
+            Candidate text goes into description_overrides on the sandbox, not the system msg.
+          - system_prompt (kind="system_prompt"): candidate.prompt used directly as the full
+            system message (Phase 1 simplification — no ContextBuilder; PersonaObject
+            evaluation environment does not match production context assembly).
+
+        sandbox mode:
+          - tool_description: side_effect_only — query tools passthrough on cache miss,
+            side-effect tools intercepted and logged.
+          - system_prompt: strict replay — SandboxReplayError on any cache miss.
+
+        Cases without tool_recordings run the agent live (no sandbox) — suitable for
+        health cases that are purely text-based (no expected_tools). Fix cases without
+        recordings are skipped with a warning.
+        """
+        import json
+
         from nanobot.agent.runner import AgentRunner, AgentRunSpec
         from nanobot.eval.evaluator import RuleEvaluator
         from nanobot.eval.sandbox import SandboxedToolRegistry
@@ -188,30 +277,51 @@ class OptimizationAgent:
         evaluator = RuleEvaluator()
         all_scores: list[dict[str, float]] = []
 
-        for tc in golden_test_cases:
+        # --- tool_description: build system prompt once via ContextBuilder ---
+        tool_desc_system_prompt: str | None = None
+        if target.kind == "tool_description":
+            tool_desc_system_prompt = await _build_tool_desc_system_prompt(
+                target, self._registry.tool_names
+            )
+
+        for tc in test_cases:
             recordings_json = recordings_map.get(tc.id)
-            if recordings_json is None:
+            use_sandbox = recordings_json is not None
+            if not use_sandbox and tc.expected_tools:
                 logger.warning(
-                    "OptimizationAgent: no recordings for test case {}, skipping", tc.id
+                    "OptimizationAgent: test case {} has expected_tools but no recordings — skipping",
+                    tc.id,
                 )
                 continue
 
             try:
-                sandboxed = SandboxedToolRegistry.from_recordings_json(
-                    self._registry,
-                    recordings_json,
-                )
+                recorded = json.loads(recordings_json) if recordings_json else {}
+
+                if target.kind == "tool_description":
+                    tools: Any = SandboxedToolRegistry(
+                        registry=self._registry,
+                        mode="side_effect_only",
+                        recorded=recorded,
+                        description_overrides={target.target_id: candidate.prompt},
+                    )
+                    system_content: Any = tool_desc_system_prompt or ""
+                else:
+                    tools = (
+                        SandboxedToolRegistry.from_recordings_json(self._registry, recordings_json)
+                        if use_sandbox
+                        else self._registry
+                    )
+                    system_content = candidate.prompt
+
                 collector = RunSnapshotCollector()
-                initial_messages = [
-                    {"role": "system", "content": candidate.prompt},
-                ]
+                initial_messages = [{"role": "system", "content": system_content}]
                 if tc.session_history:
                     initial_messages.extend(tc.session_history)
                 initial_messages.append({"role": "user", "content": tc.user_input})
 
                 spec = AgentRunSpec(
                     initial_messages=initial_messages,
-                    tools=sandboxed,
+                    tools=tools,
                     model=self._model,
                     max_iterations=10,
                     concurrent_tools=False,
@@ -229,17 +339,16 @@ class OptimizationAgent:
                     final_response=result.final_content,
                     status=status,
                 )
-                scores = evaluator.evaluate(snapshot_data, tc)
+                scores = await evaluator.evaluate(snapshot_data, tc)
                 all_scores.append(scores)
             except Exception as exc:
                 logger.warning(
-                    "OptimizationAgent._score_candidate: test case {} failed: {}", tc.id, exc
+                    "OptimizationAgent._score_candidate_set: test case {} failed: {}", tc.id, exc
                 )
 
         if not all_scores:
             return {}
 
-        # Average across all successfully scored test cases
         all_dims = set(d for s in all_scores for d in s)
         avg: dict[str, float] = {}
         for dim in all_dims:
@@ -247,3 +356,54 @@ class OptimizationAgent:
             if vals:
                 avg[dim] = round(sum(vals) / len(vals), 4)
         return avg
+
+
+async def _build_tool_desc_system_prompt(target: Any, tool_names: list[str]) -> str:
+    """Build system prompt for ToolDescriptionObject evaluation via ContextBuilder.
+
+    Uses a tmp workspace (RAG tools don't touch user files) and knowledge_search=None
+    (no user history injection — evaluation must be stable and reproducible).
+    Agent persona, skills summary, and KB bindings are fetched from the agent config.
+
+    Accesses target._agent_id and target._agent_repo via duck typing — these are
+    ToolDescriptionObject-specific attributes not in the TunableTextObject interface.
+    Patching in the caller per SDD §4.1: interface is frozen until Phase 6.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from nanobot.agent.context import ContextBuilder
+
+    agent_id: str | None = getattr(target, "_agent_id", None)
+    agent_repo = getattr(target, "_agent_repo", None)
+
+    persona: str | None = None
+    kb_bindings: list[dict] = []
+
+    if agent_id and agent_repo:
+        try:
+            import uuid as _uuid
+            agent = await agent_repo.get_by_id(_uuid.UUID(agent_id))
+            if agent:
+                persona = agent.persona or None
+            kbs = await agent_repo.list_bound_kbs(_uuid.UUID(agent_id))
+            kb_bindings = [
+                {"id": str(kb.id), "name": kb.name or "", "description": kb.description or ""}
+                for kb in kbs
+            ]
+        except Exception as exc:
+            logger.warning(
+                "_build_tool_desc_system_prompt: failed to fetch agent config for {}: {}",
+                agent_id, exc,
+            )
+
+    tmp_workspace = Path(tempfile.mkdtemp(prefix="nanobot_eval_"))
+    ctx = ContextBuilder(workspace=tmp_workspace, knowledge_search=None)
+    return ctx.build_system_prompt(
+        custom_persona=persona,
+        skill_names=None,   # None = include all available skills in summary
+        tool_names=tool_names,
+        agent_id=agent_id,
+        kb_bindings=kb_bindings or None,
+        topic=None,         # no history recall during evaluation
+    )

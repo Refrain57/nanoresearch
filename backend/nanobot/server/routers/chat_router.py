@@ -291,6 +291,7 @@ async def create_run(
         "run_agent_job",
         run_id=str(run_id),
         session_key=session_key,
+        conversation_id=str(conv.id),
         content=body.content,
         uid=uid,
         rag_mode=body.rag_mode,

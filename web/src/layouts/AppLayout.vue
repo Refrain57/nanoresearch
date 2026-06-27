@@ -16,6 +16,10 @@
           <database-outlined />
           <span>知识库</span>
         </a-menu-item>
+        <a-menu-item key="/eval/agent">
+          <experiment-outlined />
+          <span>评测</span>
+        </a-menu-item>
       </a-menu>
 
       <div class="sider-footer">
@@ -91,6 +95,26 @@
             </div>
           </div>
         </a-spin>
+
+        <!-- Base 模型选择 -->
+        <div class="section-header" style="margin-top: 24px">
+          <span class="section-title">Base 模型</span>
+        </div>
+        <div class="field-hint" style="margin-bottom: 10px">
+          设置全局默认模型，未绑定 Agent 或未指定模型时使用此设置
+        </div>
+        <div class="base-model-row">
+          <a-auto-complete
+            v-model:value="localBaseModel"
+            :options="settingsStore.allModelOptions"
+            placeholder="留空则根据供应商自动匹配"
+            allow-clear
+            style="width: 280px"
+          />
+          <a-button type="primary" size="small" :loading="baseModelSaving" @click="saveBaseModel">
+            保存
+          </a-button>
+        </div>
       </a-tab-pane>
 
       <!-- ── Tab 2: 引导文件 ── -->
@@ -163,6 +187,7 @@
           placeholder="输入模型名后按 Enter，如 qwen-plus"
           style="width: 100%"
           :token-separators="[',']"
+          :options="providerModelOptions"
         />
         <div class="field-hint">这些模型将出现在 Agent 的模型选择下拉框中</div>
       </a-form-item>
@@ -176,7 +201,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   CommentOutlined, RobotOutlined, LogoutOutlined, DatabaseOutlined,
-  SettingOutlined, PlusOutlined, EditOutlined, DeleteOutlined,
+  SettingOutlined, PlusOutlined, EditOutlined, DeleteOutlined, ExperimentOutlined,
 } from '@ant-design/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useSettingsStore } from '@/stores/settings'
@@ -245,9 +270,25 @@ async function saveBootstrapFile(file) {
   }
 }
 
+const localBaseModel = ref('')
+const baseModelSaving = ref(false)
+
+async function saveBaseModel() {
+  baseModelSaving.value = true
+  try {
+    await settingsStore.saveBaseModel(localBaseModel.value)
+    message.success('Base 模型已保存')
+  } catch (e) {
+    message.error('保存失败：' + (e.message || '未知错误'))
+  } finally {
+    baseModelSaving.value = false
+  }
+}
+
 async function openSettings() {
   settingsOpen.value = true
   await settingsStore.fetchAll()
+  localBaseModel.value = settingsStore.baseModel || ''
   bootstrapFiles.forEach(loadBootstrapFile)
 }
 
@@ -256,6 +297,23 @@ const providerModalOpen = ref(false)
 const providerSaving    = ref(false)
 const editingProvider   = ref(null)
 const providerForm      = ref({ name: '', api_key: '', api_base: '', models: [] })
+
+const PROVIDER_MODEL_PRESETS = {
+  deepseek:  ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-r1'],
+  openai:    ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o3', 'o3-mini', 'o4-mini'],
+  claude:    ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5'],
+  anthropic: ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5'],
+  qwen:      ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long', 'qwen-max-latest', 'qwen3-235b-a22b'],
+  阿里云:    ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long', 'qwen-max-latest', 'deepseek-v3', 'deepseek-r1'],
+  dashscope: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'deepseek-v3', 'deepseek-r1'],
+  ollama:    ['llama3', 'llama3.1', 'mistral', 'mixtral', 'qwen2.5', 'deepseek-r1'],
+}
+
+const providerModelOptions = computed(() => {
+  const name = (providerForm.value.name || '').toLowerCase()
+  const key = Object.keys(PROVIDER_MODEL_PRESETS).find(k => name.includes(k))
+  return (key ? PROVIDER_MODEL_PRESETS[key] : []).map(m => ({ label: m, value: m }))
+})
 
 function openProviderModal(p) {
   editingProvider.value = p
@@ -316,6 +374,7 @@ async function deleteProvider(id) {
 const activeKey = computed(() => {
   if (route.path.startsWith('/agents')) return '/agents'
   if (route.path.startsWith('/knowledge')) return '/knowledge'
+  if (route.path.startsWith('/eval')) return '/eval/agent'
   return '/chat'
 })
 
@@ -326,6 +385,7 @@ function logout() { userStore.logout(); router.push('/login') }
 </script>
 
 <style scoped>
+.base-model-row { display: flex; align-items: center; gap: 10px; }
 .logo {
   height: 56px;
   display: flex;

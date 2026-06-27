@@ -99,11 +99,11 @@ class OpenAIVisionLLM(BaseVisionLLM):
         if not self.api_key:
             self.api_key = getattr(settings.llm, 'api_key', None)
         if not self.api_key:
-            self.api_key = os.environ.get("OPENAI_API_KEY")
+            self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
         if not self.api_key:
             raise ValueError(
                 "OpenAI API key not provided. Set in settings.yaml (vision_llm.api_key), "
-                "OPENAI_API_KEY environment variable, or pass api_key parameter."
+                "OPENAI_API_KEY / DASHSCOPE_API_KEY environment variable, or pass api_key parameter."
             )
         
         # Azure-compatible mode detection
@@ -121,6 +121,8 @@ class OpenAIVisionLLM(BaseVisionLLM):
         
         self._use_azure_auth = False
         
+        settings_base_url = getattr(vision_settings, "base_url", None) if vision_settings else None
+
         if base_url:
             self.base_url = base_url
         elif azure_endpoint:
@@ -131,6 +133,8 @@ class OpenAIVisionLLM(BaseVisionLLM):
             self._use_azure_auth = True
             if not self.api_version:
                 self.api_version = "2024-02-15-preview"
+        elif settings_base_url:
+            self.base_url = settings_base_url
         else:
             self.base_url = self.DEFAULT_BASE_URL
         

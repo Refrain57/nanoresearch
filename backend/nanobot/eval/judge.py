@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from loguru import logger
 import os
 import re
 import statistics
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
 
 if TYPE_CHECKING:
     from nanobot.eval.snapshot import RunSnapshotData
@@ -23,26 +26,19 @@ class CalibrationResult:
 
 
 _SYSTEM_PROMPT = """\
-你是一位专业的 AI Agent 质量评审员。你的任务是评估 Agent 对用户请求的处理质量。
+你是 AI Agent 质量评审员。按两步评分：
+1. 为每个维度写出 1-2 条针对本题的评分标准（criteria）
+2. 按标准逐维度打 1-5 分并给理由
 
-请根据以下维度对 Agent 的表现打分（1-5 整数）：
-- tool_rationality：工具调用的合理性（选择了正确的工具、顺序合理、没有多余调用）
-- task_completion：任务完成度（用户问题是否真正得到了解答）
-- response_logic：回复逻辑清晰度（结构清晰、内容准确、表述流畅）
-- hallucination：幻觉检测——对比 Agent 最终回复与工具实际返回值，检查有无捏造数据、虚假引用或与工具返回不符的陈述。以工具返回值为 ground truth，1 = 严重幻觉，5 = 完全准确
+维度：tool_rationality（工具调用合理性）、task_completion（任务完成度）、response_logic（回复逻辑清晰度）、faithfulness_score（忠实度：对比工具返回 ground truth 检查捏造）
+有历史时加 multi_turn_coherence（检查与历史回复的事实矛盾）
 
-仅在有多轮对话历史时额外评估：
-- multi_turn_coherence：多轮对话连贯性（前后一致、上下文理解准确）
-
-评分标准：
-1 = 很差，2 = 较差，3 = 一般，4 = 良好，5 = 优秀
-
-**必须以如下 JSON 格式输出，不要有其他内容：**
-{"scores": {"tool_rationality": <int>, "task_completion": <int>, "response_logic": <int>, "hallucination": <int>}, "reasoning": "<一句话说明>"}
+仅输出如下 JSON：
+{"dimensions":{"tool_rationality":{"criteria":["..."],"score":1,"reason":"..."},"task_completion":{"criteria":["..."],"score":1,"reason":"..."},"response_logic":{"criteria":["..."],"score":1,"reason":"..."},"faithfulness_score":{"criteria":["..."],"score":1,"reason":"..."}}}
 """
 
-_MAX_TOOL_CHAIN_CHARS = 3000
-_MAX_RESPONSE_CHARS = 2000
+_MAX_TOOL_CHAIN_CHARS = 1500
+_MAX_RESPONSE_CHARS = 1000
 
 
 class LLMJudge:
@@ -66,15 +62,59 @@ class LLMJudge:
         prompt = _build_prompt(snapshot, test_case, session_history)
         try:
             response = await self._provider.chat_with_retry(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": _SYSTEM_PROMPT + "\n\n---\n\n" + prompt}],
                 model=self._model,
-                max_tokens=512,
+                max_tokens=4096,
                 temperature=0.0,
             )
             raw = response.content or ""
+            logger.info(
+                "LLMJudge.score(): finish_reason={}, content_len={}, model={}",
+                response.finish_reason, len(raw), self._model,
+            )
             return _parse_scores(raw), raw
         except Exception:
+            import traceback
+            logger.warning("LLMJudge.score(): provider call failed:\n{}", traceback.format_exc())
             return {}, ""
+
+    async def score_with_consistency(
+        self,
+        snapshot: "RunSnapshotData",
+        test_case: "AgentTestCase | None" = None,
+        session_history: list[dict] | None = None,
+        runs: int = 3,
+    ) -> tuple[dict[str, float], str, bool]:
+        """Run score() `runs` times concurrently, return (consensus_scores, raw_output, low_confidence).
+
+        Consensus is the median per dimension (rounded to nearest 0.25 step after
+        normalisation). low_confidence=True when any dimension's max–min spread
+        across runs exceeds 1 raw score point (0.25 normalised).
+        """
+        tasks = [self.score(snapshot, test_case, session_history) for _ in range(runs)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        valid: list[dict[str, float]] = [
+            r[0] for r in results if isinstance(r, tuple) and r[0]
+        ]
+        if not valid:
+            return {}, "", False
+
+        all_dims = set(d for s in valid for d in s)
+        consensus: dict[str, float] = {}
+        low_confidence = False
+
+        for dim in all_dims:
+            vals = sorted(s[dim] for s in valid if dim in s)
+            if not vals:
+                continue
+            mid = vals[len(vals) // 2]
+            consensus[dim] = mid
+            if max(vals) - min(vals) > 0.25:
+                low_confidence = True
+
+        raw_out = results[0][1] if isinstance(results[0], tuple) else ""
+        return consensus, raw_out, low_confidence
 
     async def calibrate(
         self,
@@ -122,7 +162,11 @@ def _build_prompt(
             f"[{m.get('role', '?')}]: {str(m.get('content', ''))[:300]}"
             for m in session_history[-6:]
         )
-        parts.append(f"## 历史对话\n{history_str}")
+        parts.append(
+            f"## 历史对话\n{history_str}\n\n"
+            "（评估 multi_turn_coherence 时，请重点检查 assistant 历史回复中的事实性陈述"
+            "——如时间、数字、实体名称——是否与当前回复存在矛盾）"
+        )
 
     parts.append(f"## 用户输入\n{snapshot.user_input[:1000]}")
 
@@ -142,33 +186,49 @@ def _build_prompt(
         parts.append(f"## 期望关键词（参考）\n{kws}")
 
     has_history = bool(session_history)
-    parts.append(
-        "## 评分要求\n"
-        + ("请评估以上维度（含 multi_turn_coherence）并返回 JSON。"
-           if has_history
-           else "请评估 tool_rationality / task_completion / response_logic 并返回 JSON。")
-    )
+    if has_history:
+        parts.append("（请评估含 multi_turn_coherence 在内的所有维度）")
 
     return "\n\n".join(parts)
 
 
 def _parse_scores(raw: str) -> dict[str, float]:
-    """Extract scores from LLM JSON output and normalize 1-5 → 0.0-1.0."""
-    # Extract JSON block (may be wrapped in markdown)
+    """Extract scores from LLM JSON output and normalize 1-5 → 0.0-1.0.
+
+    Handles two formats:
+    - G-Eval format: {"dimensions": {"dim": {"criteria": [...], "score": int, "reason": "..."}}}
+    - Legacy format: {"scores": {"dim": int, ...}, "reasoning": "..."}
+    """
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not match:
         return {}
     try:
         data = json.loads(match.group())
-        raw_scores: dict[str, Any] = data.get("scores", {})
-        result: dict[str, float] = {}
-        for dim, val in raw_scores.items():
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+
+    result: dict[str, float] = {}
+
+    # G-Eval format
+    if "dimensions" in data and isinstance(data["dimensions"], dict):
+        for dim, dim_data in data["dimensions"].items():
+            if not isinstance(dim_data, dict):
+                continue
             try:
-                v = float(val)
+                v = float(dim_data.get("score", 0))
                 if 1.0 <= v <= 5.0:
-                    result[dim] = round((v - 1) / 4, 4)  # normalize to 0-1
+                    result[dim] = round((v - 1) / 4, 4)
             except (TypeError, ValueError):
                 pass
         return result
-    except (json.JSONDecodeError, AttributeError):
-        return {}
+
+    # Legacy format fallback
+    raw_scores: dict[str, Any] = data.get("scores", {})
+    for dim, val in raw_scores.items():
+        try:
+            v = float(val)
+            if 1.0 <= v <= 5.0:
+                result[dim] = round((v - 1) / 4, 4)
+        except (TypeError, ValueError):
+            pass
+    return result

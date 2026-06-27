@@ -179,11 +179,14 @@ class IngestionSettings:
     chunk_overlap: int
     splitter: str
     batch_size: int
-    chunk_strategy: str = "fixed"  # fixed | document_based | semantic
+    chunk_strategy: str = "fixed"  # fixed | structured | semantic | document_based (legacy alias)
     min_chunk_length: int = 100
     max_chunk_length: int = 2000
     chunk_refiner: Optional[Dict[str, Any]] = None  # 动态配置
     metadata_enricher: Optional[Dict[str, Any]] = None  # 动态配置
+    # Image URL stabilization (Layer 2)
+    image_storage_root: str = "~/.nanoresearch/rag/images"
+    image_base_url: str = "http://localhost:18790/rag-images"
 
 
 @dataclass(frozen=True)
@@ -197,6 +200,7 @@ class Settings:
     observability: ObservabilitySettings
     ingestion: Optional[IngestionSettings] = None
     vision_llm: Optional[VisionLLMSettings] = None
+    mineru_url: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":
@@ -224,6 +228,8 @@ class Settings:
                 max_chunk_length=ingestion.get("max_chunk_length", 2000),
                 chunk_refiner=ingestion.get("chunk_refiner"),  # 可选配置
                 metadata_enricher=ingestion.get("metadata_enricher"),  # 可选配置
+                image_storage_root=ingestion.get("image_storage_root", "~/.nanoresearch/rag/images"),
+                image_base_url=ingestion.get("image_base_url", "http://localhost:18790/rag-images"),
             )
 
         vision_llm_settings = None
@@ -293,6 +299,7 @@ class Settings:
             ),
             ingestion=ingestion_settings,
             vision_llm=vision_llm_settings,
+            mineru_url=data.get("mineru_url"),
         )
 
         return settings
@@ -315,6 +322,29 @@ def validate_settings(settings: Settings) -> None:
         raise SettingsError("Missing required field: evaluation.provider")
     if not settings.observability.log_level:
         raise SettingsError("Missing required field: observability.log_level")
+
+
+def _inject_api_keys_from_config(raw_data: dict) -> None:
+    """Fill in missing api_key fields from config.json providers.
+
+    Allows settings.yaml to omit api_key entirely — the key is pulled
+    automatically from config.json (``providers.<name>.api_key``) based
+    on the provider name in each section.
+    """
+    try:
+        from nanobot.config.loader import load_config
+        cfg = load_config()
+    except Exception:
+        return
+
+    for section in ("llm", "embedding", "vision_llm"):
+        sec = raw_data.get(section)
+        if not isinstance(sec, dict) or sec.get("api_key"):
+            continue
+        provider_name = sec.get("provider", "")
+        provider_cfg = getattr(cfg.providers, provider_name, None)
+        if provider_cfg and provider_cfg.api_key:
+            sec["api_key"] = provider_cfg.api_key
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
@@ -349,9 +379,47 @@ def load_settings(path: str | Path | None = None) -> Settings:
     with settings_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
 
+    # Warn about deprecated api_key fields in settings.yaml
+    # (before injection so only user-written keys trigger the warning)
+    _warn_deprecated_api_keys(data)
+    # Auto-inject API keys from config.json (one source of truth)
+    _inject_api_keys_from_config(data)
+    # Warn about legacy duplicate settings.yaml
+    _warn_legacy_settings_path(settings_path)
+
     settings = Settings.from_dict(data or {})
     validate_settings(settings)
+
     return settings
+
+
+def _warn_deprecated_api_keys(raw: dict) -> None:
+    """Emit deprecation warnings if api_keys are set in settings.yaml."""
+    import warnings as _warnings
+
+    for section in ("llm", "embedding", "vision_llm"):
+        sec = raw.get(section)
+        if isinstance(sec, dict) and sec.get("api_key"):
+            _warnings.warn(
+                f"settings.yaml.{section}.api_key is deprecated and will be ignored in a future version. "
+                f"Configure the API key in config.json instead (under providers).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+
+def _warn_legacy_settings_path(loaded_path: Path) -> None:
+    """Warn if the old ~/.nanoresearch/rag/settings.yaml exists."""
+    rag_settings = Path.home() / ".nanoresearch" / "rag" / "settings.yaml"
+    if rag_settings.exists() and rag_settings.resolve() != loaded_path.resolve():
+        import warnings as _warnings
+        _warnings.warn(
+            f"Legacy settings file found at {rag_settings}. "
+            "This file is no longer used; the active file is "
+            f"{loaded_path}. You can safely delete the legacy file.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 # Singleton cache for settings

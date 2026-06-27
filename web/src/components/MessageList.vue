@@ -1,26 +1,45 @@
 <template>
   <div class="message-list" ref="listRef">
-    <div v-for="msg in messages" :key="msg.id" :class="['message', msg.role]">
-      <!-- 头像 -->
-      <div v-if="msg.role === 'assistant'" class="avatar agent-avatar" :style="agentAvatarStyle">
-        {{ agentInitial }}
+    <div v-for="msg in messages" :key="msg.id" :class="['message-wrap', msg.role]">
+      <!-- skip raw tool result messages — they're shown inside the tool-calls panel -->
+      <template v-if="msg.role !== 'tool'">
+      <div :class="['message', msg.role]">
+        <!-- 头像 -->
+        <div v-if="msg.role === 'assistant'" class="avatar agent-avatar" :style="agentAvatarStyle">
+          {{ agentInitial }}
+        </div>
+
+        <div v-if="msg.role !== 'assistant' || msgText(msg)" class="bubble">
+          <span v-if="msg.role === 'user'">{{ msgText(msg) }}</span>
+          <div v-else class="md-body" v-html="renderMd(msgText(msg))" />
+        </div>
+
+        <div v-if="msg.role === 'user'" class="avatar user-avatar">
+          {{ userInitial }}
+        </div>
       </div>
 
-      <div class="bubble">
-        <span v-if="msg.role === 'user'">{{ msgText(msg) }}</span>
-        <div v-else class="md-body" v-html="renderMd(msgText(msg))" />
+      <!-- 工具调用折叠面板（仅 assistant 消息） -->
+      <div v-if="msg.role === 'assistant' && msg.toolCalls?.length" class="tool-calls-panel">
+        <a-collapse size="small" :bordered="false">
+          <a-collapse-panel
+            v-for="(tc, idx) in msg.toolCalls"
+            :key="idx"
+            :header="`🔧 ${tc.name}${tc.status === 'error' ? ' ❌' : ''}`"
+          >
+            <div class="tc-input"><b>输入：</b>{{ JSON.stringify(tc.input, null, 2) }}</div>
+            <div class="tc-output"><b>输出：</b>{{ tc.output_summary }}</div>
+          </a-collapse-panel>
+        </a-collapse>
       </div>
-
-      <div v-if="msg.role === 'user'" class="avatar user-avatar">
-        {{ userInitial }}
-      </div>
+      </template>
     </div>
 
-    <!-- 流式输出气泡 -->
-    <div v-if="streamingText" class="message assistant">
+    <!-- 流式输出气泡：streaming=true 时即使还没文本也显示占位光标 -->
+    <div v-if="streamingText || props.streaming" class="message assistant">
       <div class="avatar agent-avatar" :style="agentAvatarStyle">{{ agentInitial }}</div>
       <div class="bubble streaming">
-        <div class="md-body" v-html="renderMd(streamingText)" />
+        <div v-if="streamingText" class="md-body" v-html="renderMd(streamingText)" />
         <span class="cursor">▌</span>
       </div>
     </div>
@@ -46,6 +65,7 @@ function renderMd(text) {
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   streamingText: { type: String, default: '' },
+  streaming: { type: Boolean, default: false },
   toolHint: { type: String, default: '' },
   agentName: { type: String, default: 'Agent' },
   userName: { type: String, default: 'U' },
@@ -67,7 +87,7 @@ const agentAvatarStyle = computed(() => {
 function msgText(msg) {
   if (!msg.content) return ''
   if (typeof msg.content === 'string') return msg.content
-  return msg.content.text || msg.content.content || JSON.stringify(msg.content)
+  return msg.content.text || msg.content.content || ''
 }
 
 watch(() => [props.messages.length, props.streamingText], async () => {
@@ -85,9 +105,12 @@ watch(() => [props.messages.length, props.streamingText], async () => {
   flex-direction: column;
   gap: 12px;
 }
+.message-wrap { display: flex; flex-direction: column; gap: 4px; }
 .message { display: flex; align-items: flex-end; gap: 8px; }
 .message.user { justify-content: flex-end; }
 .message.assistant { justify-content: flex-start; }
+.tool-calls-panel { margin-left: 40px; max-width: 68%; }
+.tc-input, .tc-output { font-size: 12px; white-space: pre-wrap; word-break: break-all; color: #555; margin-bottom: 4px; }
 
 .avatar {
   width: 32px; height: 32px; border-radius: 50%;

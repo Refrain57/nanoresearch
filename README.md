@@ -22,7 +22,7 @@
 - **2026-05-05** 📚 Agentic RAG 多路召回 + Cross-Encoder 精排，Top-10 召回率提升 ~25%
 - **2026-05-01** 💾 Token 感知记忆压缩，整合后上下文降至触发阈值 50%
 - **2026-04-28** ⚡ Subagent 异步执行耗时研究任务，MessageBus 回注主会话
-- **2026-04-25** 🏗️ 完成研究流程编排：Planner → Searcher → Synthesizer → Refiner → Reporter
+- **2026-04-25" 🏗️ 完成研究流程编排：Planner → Searcher → Synthesizer → Refiner → Reporter
 
 <details>
 <summary>Earlier news</summary>
@@ -31,7 +31,7 @@
 - **2026-04-15** 📊 Cross-Encoder 精排 + 去重，去重率约 38%
 - **2026-04-10** 📝 带引用溯源的报告生成器
 - **2026-04-05** 🔍 并行搜索 + RRF 融合的多路召回
-- **2026-04-01** 🎯 项目启动，基于 NanoResearch 框架扩展研究能力
+- **2026-04-01" 🎯 项目启动，基于 NanoResearch 框架扩展研究能力
 
 </details>
 
@@ -59,15 +59,6 @@
 ⚡ **Subagent 异步执行** — 耗时任务后台处理
 - 主流程即时响应，后台任务完成自动通知
 - 复用 RAG 检索服务作为长期记忆
-
-🌐 **Web 管理界面** — 可视化管理与监控
-- Vue 3 + Ant Design Vue 构建，覆盖对话、Agent、知识库全流程
-- 对话详情页展示 Agent 工具调用时间线与 token 用量统计
-- 知识库上传、检索、评估一体化管理
-
-📊 **知识库评估** — RAGAS 框架驱动的 RAG 质量评估
-- 支持自定义评估数据集，量化召回率、准确率、忠实度等指标
-- 评估结果持久化，支持多次评估对比
 
 🪶 **轻量级 Agent 框架**
 - 基于 ReAct 循环自研，代码简洁易扩展
@@ -153,7 +144,6 @@
 - [Deep Research](#-deep-research)
 - [Agentic RAG](#-agentic-rag)
 - [混合记忆系统](#-混合记忆系统)
-- [Web 管理界面](#-web-管理界面)
 - [Chat Apps](#-chat-apps)
 - [Configuration](#️-configuration)
 - [Multiple Instances](#-multiple-instances)
@@ -349,50 +339,98 @@ research(action="list")
 
 NanoResearch 的 RAG 系统通过 MCP 协议发布，支持 Agent 自主决策检索策略。
 
-### 架构
+### MCP 协议架构
 
-<!-- TODO: 绘制 RAG 架构图 -->
+LLM 看到的是一堆本地工具，每个工具背后可能是子进程、也可能是远端 HTTP 服务。
+中间通过 `MCPToolWrapper`（翻译转运层）和 `ProtocolHandler`（服务端接线员）对接。
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Agent (MCP Client)                     │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  RAG Skill (决策层)                                  │   │
-│  │  - 遇到知识类问题 → 先查 knowledge base              │   │
-│  │  - 现有知识足够 → 直接回答                           │   │
-│  │  - 知识不足 → spawn 后台 research                    │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-                            │ MCP Protocol
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      RAG Server (MCP)                       │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Hybrid Search Engine                               │   │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌───────────┐ │   │
-│  │  │    Dense     │  │    Sparse    │  │  RRF      │ │   │
-│  │  │  Retriever   │  │  Retriever   │  │  Fusion   │ │   │
-│  │  │  (Vector)    │  │   (BM25)     │  │           │ │   │
-│  │  └──────────────┘  └──────────────┘  └───────────┘ │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                            │                                │
-│                            ▼                                │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Reranker (Cross-Encoder)                           │   │
-│  │  - bge-reranker-v2-m3                               │   │
-│  │  - 精排 Top-K 结果                                   │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-                    ┌─────────────┐
-                    │  ChromaDB   │
-                    │(Collections)│
-                    │  - default  │
-                    │  - claims   │
-                    │  - insights │
-                    └─────────────┘
+                        Agent 主进程
+   ┌───────────────────────────────────────────────────────────┐
+   │                                                           │
+   │   LLM 调用工具                                             │
+   │        │                                                  │
+   │        ▼                                                  │
+   │   ToolRegistry（工具注册表，就是个 dict）                    │
+   │   ┌─────────────────────────────┐                        │
+   │   │ 本地工具    │ MCP 工具        │                       │
+   │   │ file_read   │ mcp_rag_kb_search                     │
+   │   │ exec        │ mcp_rag_list_collections              │
+   │   │ web_search  │ mcp_rag_ingest_document               │
+   │   └─────────────┴──────────────────┘                    │
+   │                    │                                      │
+   │                    ▼                                      │
+   │   MCPToolWrapper  ← 翻译转运层                            │
+   │   ┌────────────────────────────────────┐                 │
+   │   │ 1. 参数翻译（AI 的说法→底层说法）    │                 │
+   │   │ 2. Schema 适配（不同 AI 格式兼容）   │                 │
+   │   │ 3. 转发：session.call_tool()       │                 │
+   │   │ 4. 兜底：超时/报错不崩，返回文字给 AI │                 │
+   │   └────────────────┬───────────────────┘                 │
+   │                    │                                      │
+   └────────────────────┼──────────────────────────────────────┘
+                        │
+               JSON-RPC 2.0（一条条 JSON 字符串，带 id 对账）
+                        │
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+   ┌─────────┐   ┌──────────┐   ┌───────────┐
+   │  stdio  │   │   SSE    │   │   HTTP    │
+   │子进程管道│   │长连接+POST│   │ 请求-响应  │
+   └────┬────┘   └────┬─────┘   └─────┬─────┘
+        │             │               │
+        └─────────────┼───────────────┘
+                      │
+                      ▼
+   ┌───────────────────────────────────────────────────────────┐
+   │                   MCP Server 进程                          │
+   │                                                           │
+   │   ProtocolHandler ← 服务端接线员                           │
+   │   ┌──────────────────────────────────────┐               │
+   │   │ tools = {                            │               │
+   │   │   "kb_search"     → search_handler   │  收到请求→    │
+   │   │   "kb_retrieve"   → retrieve_handler │  字典查名字→  │
+   │   │   "ingest_doc"    → ingest_handler   │  调对应函数    │
+   │   │   ...                                │               │
+   │   │ }                                    │               │
+   │   └────────────────┬─────────────────────┘               │
+   │                    │                                      │
+   │                    ▼                                      │
+   │   ┌──────────────────────────────────────┐               │
+   │   │        RAG 检索引擎                    │               │
+   │   │  ┌──────────┐ ┌────────┐ ┌────────┐  │               │
+   │   │  │  Dense   │ │ Sparse │ │  RRF   │  │               │
+   │   │  │ (向量)   │ │ (BM25) │ │ 融合   │  │               │
+   │   │  └──────────┘ └────────┘ └────────┘  │               │
+   │   │              ↓                        │               │
+   │   │  ┌──────────────────────────┐        │               │
+   │   │  │ Cross-Encoder Reranker   │        │               │
+   │   │  └──────────────────────────┘        │               │
+   │   └──────────────────────────────────────┘               │
+   │                    │                                      │
+   └────────────────────┼──────────────────────────────────────┘
+                        │
+                        ▼
+                ┌─────────────┐
+                │  ChromaDB   │
+                │ (向量数据库) │
+                └─────────────┘
+```
+
+**核心组件说明：**
+
+| 组件 | 在哪 | 一句话 |
+|------|------|--------|
+| **ToolRegistry** | Agent 主进程 | 工具注册表，就是个 dict，不管工具从哪来 |
+| **MCPToolWrapper** | Agent 主进程 | 翻译转运层——对 AI 暴露统一接口，对后端转发 JSON-RPC 调用 |
+| **ProtocolHandler** | MCP Server 进程 | 服务端接线员——收到请求按名字查字典，调对应函数，结果包好返回 |
+| **ClientSession** | Agent 主进程 | MCP SDK 封装，负责 JSON-RPC 的编解码和请求-响应匹配 |
+| **Server** | MCP Server 进程 | MCP SDK 封装，负责监听 stdio/HTTP，路由到 ProtocolHandler |
+
+**JSON-RPC 请求示例（底层就是这样的字符串）：**
+```json
+→ {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kb_search","arguments":{"query":"什么是RAG"}}}
+← {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"检索结果..."}]}}
 ```
 
 ### Collections
@@ -423,6 +461,95 @@ NanoResearch 的 RAG 系统通过 MCP 协议发布，支持 Agent 自主决策�
                 └─► subagent 执行 research（10-30min）
                     完成后自动通知用户
 ```
+
+### 查询规划与改写
+
+检索前先对查询做两件事情：指代消解和策略规划。
+
+**指代消解（Query Rewriting）：**
+
+多轮对话中用户经常会说"它的缺点是什么""和刚才那个对比一下"——这些指代词单拿出来没法检索。系统会获取最近 5 轮对话历史，调 LLM 把查询改写为独立完整的检索句。如果查询本身已经完整，就原样返回。
+
+**策略规划（Query Planning）：**
+
+改写后的查询送入 Planner，LLM 判断复杂度并拆解子查询，同时为每个子查询标注检索策略：
+
+| 查询类型 | 推荐策略 | 例子 |
+|---------|---------|------|
+| 专有名词、方法名、指标 | sparse | "PGSR", "PSNR" |
+| 概念描述、通用术语 | dense | "核心思想", "渲染质量" |
+| 复杂对比、多问题 | hybrid | "A 和 B 对比" |
+
+### Internal Loop（多轮检索）
+
+复杂查询（对比类、多子问题、指代消解等）会进入内部循环，用 4 阶段状态机迭代检索，直到验证通过或达到最大轮次。
+
+```
+用户查询
+    │
+    ▼
+┌──────────────────────────────────────────┐
+│  Phase 1: Plan（查询规划）                │
+│  - LLM 将查询拆解为多个子查询              │
+│  - 每个子查询标注检索策略（dense/sparse/hybrid）│
+└──────────────────┬───────────────────────┘
+                   ▼
+┌──────────────────────────────────────────┐
+│  Phase 2: Search（批量检索）              │
+│  - 并发执行所有子查询                      │
+│  - 对比类查询额外拉取关联段落              │
+└──────────────────┬───────────────────────┘
+                   ▼
+┌──────────────────────────────────────────┐
+│  Phase 3: Fuse + Verify（融合验证）       │
+│  - RRF 融合多路结果                       │
+│  - LLM 验证：confidence >= 0.7？         │
+│    ├─ 通过 → Phase 4                     │
+│    └─ 不通过 → 扩展邻居 chunk             │
+│               生成 next_actions          │
+│               回到 Phase 2（最多 5 轮）    │
+└──────────────────┬───────────────────────┘
+                   ▼
+┌──────────────────────────────────────────┐
+│  Phase 4: Finalize（构建引用）            │
+│  - 整理最终结果                           │
+│  - 构建带溯源引用的回复                    │
+└──────────────────────────────────────────┘
+```
+
+**触发多轮的条件：**
+- 查询复杂度判定为 complex（规则判断：指代词、对比关键词、多问号等）
+- 单轮检索后 verify 认为 confidence 不足或存在缺失方面
+
+**防偏控制：**
+- 最大 5 轮硬上限，不会无限循环
+- 每轮保留原始查询上下文，避免越搜越偏
+- 验证不通过时先扩展邻居 chunk 补充上下文，再决定下一步方向
+
+### 查询归一化与 Redis 缓存
+
+查询改写只解决了指代消解（把"它的缺点"补成"3DGS 的缺点"），但同一个意思可以有很多种问法——"3DGS 的缺点""3DGS 有什么局限性""3DGS 不足"——改写过后的文本不同，如果直接用文本做缓存 key，语义等价的查询永远对不上。
+
+所以在改写之后加了一层**查询归一化**：把语义等价的查询映射到同一个规范形式上。规范形式同时用作 Redis 缓存的 key。
+
+```
+查询进来
+    │
+    ▼
+查询改写（指代消解）
+    │
+    ▼
+查询归一化（映射到规范形式）
+    │
+    ▼
+Redis 查缓存 ── 命中 → 直接返回
+    │
+    └── 未命中 → 走完整检索链路 → 结果写回 Redis
+```
+
+- 常见问题提前写入 Redis，TTL 设得较长
+- 未命中的查询检索完成后自动回种缓存
+- Redis 不可用时降级为直接调 embedding API
 
 ### 使用示例
 
@@ -527,36 +654,6 @@ NanoResearch 采用分层记忆架构，结合短期上下文与长期知识库�
   }
 }
 ```
-
-## 🌐 Web 管理界面
-
-NanoResearch 提供基于 Vue 3 的 Web 管理界面，通过 FastAPI REST API 与后端交互。
-
-### 启动
-
-```bash
-# 启动后端 API 服务
-cd backend
-uvicorn nanobot.server.app:app --host 0.0.0.0 --port 8000
-
-# 启动前端开发服务器
-cd web
-pnpm dev
-```
-
-### 主要功能页面
-
-| 页面 | 功能 |
-|------|------|
-| **对话界面** | 多会话管理，实时流式输出，支持选择自定义 Agent |
-| **对话详情** | Agent 工具调用时间线，每步 token 用量，工具统计 |
-| **Agent 画廊** | 创建/编辑自定义 Agent，配置 skills、tools 与系统提示 |
-| **知识库** | 文档上传、分块预览、语义检索测试 |
-| **知识库评估** | 基于 RAGAS 的 RAG 质量评估，支持自定义评估数据集 |
-
-### API 鉴权
-
-Web 界面使用 JWT + bcrypt 鉴权。登录后 token 自动注入请求头，所有接口均为 per-user 隔离。
 
 ## 💬 Chat Apps
 
@@ -949,58 +1046,49 @@ systemctl --user enable --now nanoresearch-gateway
 
 ```
 nanobot/
-├── backend/nanobot/          # 🐍 Python 后端
-│   ├── agent/                #    🧠 Core Agent
-│   │   ├── loop.py           #       ReAct 执行循环（per-session 串行 + 跨 session 并发）
-│   │   ├── context.py        #       上下文构建，Prompt Caching 分层优化
-│   │   ├── memory.py         #       Token 感知压缩 + LLM 驱动整合
-│   │   ├── subagent.py       #       后台异步任务，MessageBus 回注
-│   │   ├── skills.py         #       Skill 渐进式加载
-│   │   └── tools/            #       内置工具（web, file, shell, research, spawn...）
-│   │
-│   ├── research/             #    🔬 Deep Research Pipeline
-│   │   ├── runner.py         #       7 阶段流程编排，自适应深度
-│   │   ├── planner.py        #       主题分解（3-6 子问题 + 双语关键词）
-│   │   ├── searcher.py       #       并行搜索 + Cross-Encoder 精排去重
-│   │   ├── synthesizer.py    #       信息综合，覆盖度评分
-│   │   ├── refiner.py        #       迭代终止判断
-│   │   ├── reporter.py       #       报告生成 + 自评估重试
-│   │   ├── knowledge_processor.py # 知识入库（Claims / Insights）
-│   │   └── knowledge_search.py  #  知识预查询，时间衰减置信度
-│   │
-│   ├── rag/                  #    📚 RAG 系统
-│   │   ├── core/query_engine/
-│   │   │   ├── hybrid_search.py  # Dense + Sparse 并行检索
-│   │   │   ├── dense_retriever.py
-│   │   │   ├── sparse_retriever.py # BM25
-│   │   │   └── fusion.py         # RRF 融合（source 加权）
-│   │   ├── libs/
-│   │   │   ├── reranker/         # Cross-Encoder 精排
-│   │   │   ├── embedding/        # 向量编码（BAAI/bge-large-en-v1.5）
-│   │   │   ├── evaluator/        # RAGAS 评估框架
-│   │   │   └── vector_store/     # ChromaDB 封装
-│   │   └── mcp_server/           # MCP 协议 RAG 服务（stdio JSON-RPC）
-│   │
-│   ├── server/               #    🌐 REST API（FastAPI）
-│   │   └── routers/          #       chat, agents, knowledge, eval 路由
-│   │
-│   ├── storage/              #    🗄️ 数据持久层
-│   │   ├── models.py         #       SQLAlchemy ORM（User/Agent/Conv/Run/KB/Eval）
-│   │   └── repositories/     #       数据访问层
-│   │
-│   ├── skills/               #    🎯 内置 Skills（deep-research, rag, memory...）
-│   ├── channels/             #    📱 聊天平台适配器（12+ 渠道，动态发现）
-│   ├── bus/                  #    🚌 消息总线（Pub/Sub）
-│   ├── providers/            #    🤖 LLM 提供商注册表（20+）
-│   ├── session/              #    💬 会话管理
-│   ├── config/               #    ⚙️ Pydantic 配置 Schema
-│   └── cli/                  #    🖥️ CLI（Typer）
+├── agent/                    # 🧠 Core Agent
+│   ├── loop.py               #    ReAct 执行循环
+│   ├── context.py            #    上下文构建
+│   ├── memory.py             #    Token 压缩 + 长期记忆
+│   ├── subagent.py           #    后台任务执行
+│   ├── skills.py             #    Skill 渐进式加载
+│   └── tools/                #    内置工具
+│       ├── research.py       #    Deep Research 工具
+│       ├── spawn.py          #    Subagent 启动工具
+│       └── ...
 │
-└── web/                      # 🖥️ Vue 3 前端
-    └── src/
-        ├── views/            #    对话、Agent 画廊、知识库、评估页面
-        ├── apis/             #    API 请求层（auth/conv/agent/knowledge/run）
-        └── stores/           #    Pinia 状态管理
+├── research/                 # 🔬 Deep Research
+│   ├── runner.py             #    研究流程编排
+│   ├── planner.py            #    主题分解
+│   ├── searcher.py           #    并行搜索 + 评分
+│   ├── synthesizer.py        #    信息综合
+│   ├── refiner.py            #    迭代判断
+│   ├── reporter.py           #    报告生成
+│   ├── knowledge_processor.py #   知识沉淀
+│   └── knowledge_search.py   #    知识检索
+│
+├── rag/                      # 📚 RAG 系统
+│   ├── core/
+│   │   ├── query_engine/     #    检索引擎
+│   │   │   ├── hybrid_search.py   # 多路召回
+│   │   │   ├── dense_retriever.py # 向量检索
+│   │   │   ├── sparse_retriever.py# BM25 检索
+│   │   │   └── fusion.py     #    RRF 融合
+│   │   └── response/         #    响应构建
+│   ├── libs/
+│   │   ├── reranker/         #    精排模块
+│   │   ├── embedding/        #    向量编码
+│   │   └── vector_store/     #    向量存储
+│   └── mcp_server/           #    MCP 协议服务
+│       └── tools/agentic/    #    Agentic RAG 工具
+│
+├── skills/                   # 🎯 Skills (deep-research, rag, memory...)
+├── channels/                 # 📱 聊天平台接入
+├── bus/                      # 🚌 消息总线
+├── providers/                # 🤖 LLM 提供商
+├── session/                  # 💬 会话管理
+├── config/                   # ⚙️ 配置
+└── cli/                      # 🖥️ 命令行
 ```
 
 ## 📊 Performance

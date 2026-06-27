@@ -28,12 +28,20 @@ def _register_builtin_providers() -> None:
     except ImportError:
         pass  # RecursiveSplitter not available (missing langchain dependency)
 
-    # Register document-based (structure-aware) splitter
+    # Register structured (RAGFlow-like hierarchical) splitter
     try:
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
-        SplitterFactory.register_provider("document_based", DocumentStructureChunker)
+        from nanobot.rag.ingestion.chunking.document_chunker import StructuredChunker
+        SplitterFactory.register_provider("structured", StructuredChunker)
+        SplitterFactory.register_provider("document_based", StructuredChunker)  # legacy alias
+    except Exception:
+        pass  # StructuredChunker doesn't inherit BaseSplitter; used directly by DocumentChunker
+
+    # Register semantic splitter (sentence embeddings + agglomerative clustering)
+    try:
+        from nanobot.rag.ingestion.chunking.semantic_chunker import SemanticChunker
+        SplitterFactory.register_provider("semantic", SemanticChunker)
     except ImportError:
-        pass  # DocumentStructureChunker not available
+        pass
 
 
 class SplitterFactory:

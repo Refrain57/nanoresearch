@@ -46,16 +46,9 @@ _MEDIUM_CREDIBILITY = {
     "npmjs.com", "pypi.org", "crates.io",
     "huggingface.co", "paperswithcode.com",
 }
-# Known paywall/login required sites - lower base score
-_RESTRICTED_SITES = {
-    "zhihu.com",  # requires login
-    "reddit.com",  # requires login
-    "dl.acm.org",  # paywall
-    "ieeexplore.ieee.org",  # paywall
-    "sciencedirect.com",  # paywall
-    "springer.com",  # paywall
-    "wiley.com",  # paywall
-    "linkedin.com",  # requires login
+# Domains known to have persistent SSL/connection issues — skip immediately
+_KNOWN_DEAD_DOMAINS = {
+    "ngrok.cn", "joypage.cn", "vue-js.com",
 }
 
 # Blacklisted domains that are never relevant for research
@@ -186,6 +179,12 @@ class SearchOrchestrator:
         self._subq_sem = asyncio.Semaphore(self._MAX_CONCURRENT_SUBQ)
         self._fetch_sem = asyncio.Semaphore(self._MAX_CONCURRENT_FETCH)
 
+        # Cross-iteration deduplication (Bug 2C)
+        self._global_seen_urls: set[str] = set()
+        # Domain failure counter: SSL/connection errors increment by 3, HTTP errors by 1.
+        # Domains with count >= 3 are skipped on subsequent fetches.
+        self._failed_domains: dict[str, int] = {}
+
         # Initialize reranker if enabled
         self._reranker = None
         if config.rerank_enabled and config.rerank_provider != "none":
@@ -224,9 +223,18 @@ class SearchOrchestrator:
             Tuple of (deduplicated results, rerank details).
             rerank_details is a list of {"url": ..., "original_score": ..., "rerank_score": ...}
         """
-        logger.info("SearchOrchestrator: searching {} sub-questions", len(plan.sub_questions))
+        # Only search sub-questions that haven't been searched yet (Bug 2B)
+        pending = [sq for sq in plan.sub_questions if sq.status == "pending"]
+        logger.info(
+            "SearchOrchestrator: searching {} pending sub-questions ({} total)",
+            len(pending), len(plan.sub_questions),
+        )
 
-        tasks = [self._search_sub_question(sq) for sq in plan.sub_questions]
+        if not pending:
+            logger.info("SearchOrchestrator: no pending sub-questions, skipping search")
+            return [], []
+
+        tasks = [self._search_sub_question(sq) for sq in pending]
         results_per_sq = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_results: list[SearchResult] = []
@@ -236,7 +244,7 @@ class SearchOrchestrator:
                 continue
             all_results.extend(result)
 
-        # Deduplicate by URL
+        # Deduplicate: local (within-iteration) + global (cross-iteration, Bug 2C)
         deduped = self._dedupe(all_results)
         logger.info("SearchOrchestrator: {} raw results, {} after dedup", len(all_results), len(deduped))
 
@@ -347,8 +355,34 @@ class SearchOrchestrator:
             sq.results = results
             return results
 
+    def _get_domain(self, url: str) -> str:
+        """Extract the netloc/domain from a URL for failure tracking."""
+        try:
+            from urllib.parse import urlparse
+            return urlparse(url).netloc.lower()
+        except Exception:
+            return url
+
     async def _fetch_content(self, url: str) -> str:
-        """Fetch content from a URL using web_fetch tool."""
+        """Fetch content from a URL using web_fetch tool.
+
+        Skips domains in _KNOWN_DEAD_DOMAINS or whose failure count has reached
+        the threshold (>= 3), avoiding repeated 10-30s timeout chains.
+        SSL/connection errors count as 3 (permanent); HTTP errors count as 1 (session).
+        """
+        domain = self._get_domain(url)
+
+        # Skip statically known dead domains
+        for dead in _KNOWN_DEAD_DOMAINS:
+            if dead in domain:
+                logger.debug("SearchOrchestrator: skipping known dead domain {}", domain)
+                return ""
+
+        # Skip dynamically detected failing domains
+        if self._failed_domains.get(domain, 0) >= 3:
+            logger.debug("SearchOrchestrator: skipping failing domain {} (count={})", domain, self._failed_domains[domain])
+            return ""
+
         try:
             raw = await self.web_fetch.execute(url=url, extractMode="text", maxChars=30000)
             if isinstance(raw, str):
@@ -356,13 +390,19 @@ class SearchOrchestrator:
                     data = json.loads(raw)
                     return data.get("text", "")
                 except json.JSONDecodeError:
-                    # Return full raw content, not truncated
                     return raw
             elif isinstance(raw, dict):
                 return raw.get("text", "")
             return ""
         except Exception as e:
-            logger.debug("SearchOrchestrator: fetch failed for {}: {}", url, e)
+            err_str = str(e).lower()
+            # SSL and connection errors are permanent — count as 3 to hit threshold immediately
+            if any(kw in err_str for kw in ("ssl", "certificate", "connection refused", "name or service not known")):
+                self._failed_domains[domain] = self._failed_domains.get(domain, 0) + 3
+                logger.debug("SearchOrchestrator: SSL/connection error for {} (domain count now {})", url, self._failed_domains[domain])
+            else:
+                self._failed_domains[domain] = self._failed_domains.get(domain, 0) + 1
+                logger.debug("SearchOrchestrator: fetch failed for {}: {}", url, e)
             return ""
 
     def _score_result(self, item: dict[str, Any], sq: SubQuestion, content: str) -> SearchResult | None:
@@ -427,15 +467,25 @@ class SearchOrchestrator:
         return sr
 
     def _dedupe(self, results: list[SearchResult]) -> list[SearchResult]:
-        """Deduplicate by URL, keeping highest-scoring entry per URL. Filters low-relevance."""
-        seen: dict[str, SearchResult] = {}
+        """Deduplicate by URL: local (within-iteration) + global (cross-iteration).
+
+        URLs already seen in previous iterations are dropped immediately.
+        New URLs are registered into the global set so future iterations skip them.
+        """
+        seen_local: dict[str, SearchResult] = {}
         for r in results:
             url = r.url
-            if url not in seen or r.final_score > seen[url].final_score:
-                seen[url] = r
+            # Skip URLs seen in any previous iteration (Bug 2C)
+            if url in self._global_seen_urls:
+                continue
+            if url not in seen_local or r.final_score > seen_local[url].final_score:
+                seen_local[url] = r
+
+        # Register all new URLs so future iterations won't re-fetch them
+        self._global_seen_urls.update(seen_local.keys())
 
         # Sort by final_score descending
-        sorted_results = sorted(seen.values(), key=lambda x: x.final_score, reverse=True)
+        sorted_results = sorted(seen_local.values(), key=lambda x: x.final_score, reverse=True)
 
         # Filter: keep only results with relevance >= 0.15 or high credibility
         MIN_RELEVANCE = 0.15

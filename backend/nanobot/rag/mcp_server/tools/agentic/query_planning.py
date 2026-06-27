@@ -150,7 +150,7 @@ When to use:
 - When simple retrieval didn't work well
 
 When NOT needed:
-- Simple factual lookups (just call retrieve_hybrid directly)
+- Simple factual lookups (just call kb_retrieve directly)
 
 Why:
 - Complex queries often need multiple searches (sub-queries)
@@ -549,7 +549,7 @@ Returns:
         # Step 1: Initial retrieval
         initial_step = {
             "step": 1,
-            "action": "retrieve_hybrid",
+            "action": "kb_retrieve",
             "query": query,
             "reason": "Initial hybrid search",
         }

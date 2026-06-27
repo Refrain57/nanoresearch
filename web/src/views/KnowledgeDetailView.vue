@@ -13,7 +13,7 @@
         <div class="header-right">
           <span class="stat-chip"><file-text-outlined /> {{ kb?.doc_count ?? 0 }} 篇</span>
           <span class="stat-chip"><database-outlined /> {{ kb?.chunk_count ?? 0 }} Chunk</span>
-          <a-button @click="router.push(`/knowledge/${kbId}/eval`)">评估</a-button>
+          <a-button @click="openEdit"><edit-outlined /> 设置</a-button>
         </div>
       </div>
 
@@ -23,9 +23,9 @@
           <div class="tab-toolbar">
             <a-upload
               :show-upload-list="false"
-              :before-upload="handleUpload"
+              :before-upload="openUploadModal"
               accept=".pdf,.md,.txt,.docx"
-              :multiple="true"
+              :multiple="false"
             >
               <a-button type="primary"><upload-outlined /> 上传文档</a-button>
             </a-upload>
@@ -48,7 +48,9 @@
                 {{ formatSize(record.file_size) }}
               </template>
               <template v-if="column.key === 'action'">
-                <a-button size="small" type="link" @click="openDocChunks(record)">查看 Chunks</a-button>
+                <a-button size="small" type="link" @click="openDocPreview(record)">预览</a-button>
+                <a-button size="small" type="link" @click="downloadDoc(record)">下载</a-button>
+                <a-button size="small" type="link" @click="openEntityModal(record)">实体</a-button>
                 <a-popconfirm title="确定删除？" ok-type="danger" @confirm="removeDoc(record.id)">
                   <a-button size="small" type="link" danger>删除</a-button>
                 </a-popconfirm>
@@ -168,6 +170,201 @@
             </a-spin>
           </div>
         </a-tab-pane>
+
+        <!-- Tab 4: RAG Eval -->
+        <a-tab-pane key="eval" tab="RAG 评估">
+          <div class="eval-tab">
+            <!-- RAGAS Model Config -->
+            <a-collapse v-model:activeKey="ragasConfigOpen" ghost style="margin-bottom: 20px">
+              <a-collapse-panel key="config" header="RAGAS 评估模型配置">
+                <a-form layout="inline" style="gap: 12px; flex-wrap: wrap; align-items: flex-end">
+                  <a-form-item label="Generator 模型" style="margin-bottom: 0">
+                    <a-auto-complete
+                      v-model:value="localRagasGen"
+                      :options="settingsStore.allModelOptions"
+                      placeholder="qwen-plus（默认）"
+                      allow-clear
+                      style="width: 200px"
+                    />
+                  </a-form-item>
+                  <a-form-item label="Evaluator 模型" style="margin-bottom: 0">
+                    <a-auto-complete
+                      v-model:value="localRagasEval"
+                      :options="settingsStore.allModelOptions"
+                      placeholder="qwen-max（默认）"
+                      allow-clear
+                      style="width: 200px"
+                    />
+                  </a-form-item>
+                  <a-form-item style="margin-bottom: 0">
+                    <a-button type="primary" :loading="ragasSaving" @click="saveRagasSettings">保存配置</a-button>
+                  </a-form-item>
+                </a-form>
+                <div style="font-size: 12px; color: #aaa; margin-top: 10px">
+                  Generator：生成候选答案，推荐性价比高的模型；Evaluator：评估 Faithfulness / Recall，推荐能力强的模型
+                </div>
+              </a-collapse-panel>
+            </a-collapse>
+
+            <!-- Graph Expansion Toggle -->
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 12px;background:#f9f9f9;border-radius:8px;border:1px solid #f0f0f0">
+              <a-switch
+                :checked="kb?.enable_graph_expansion"
+                :loading="graphToggleLoading"
+                @change="toggleGraphExpansion"
+              />
+              <span style="font-size:13px;font-weight:500">图增强检索</span>
+              <span style="font-size:12px;color:#aaa">建图后自动开启，向量检索结果将追加跨文档实体邻居</span>
+              <div style="flex:1"/>
+              <a-button size="small" :loading="kbGraphBuilding" @click="triggerKbGraphBuild">
+                {{ kbGraphBuilding ? '建图中…' : '重建知识图谱' }}
+              </a-button>
+              <a-button v-if="graphStats" size="small" @click="graphStatsVisible = true">查看图谱统计</a-button>
+            </div>
+            <!-- Graph Stats Modal -->
+            <a-modal v-model:open="graphStatsVisible" title="知识图谱统计" :footer="null" width="480px">
+              <div v-if="graphStats" style="padding:8px 0">
+                <a-descriptions :column="2" size="small" bordered style="margin-bottom:16px">
+                  <a-descriptions-item label="实体数">{{ graphStats.entity_count }}</a-descriptions-item>
+                  <a-descriptions-item label="关系数">{{ graphStats.triple_count }}</a-descriptions-item>
+                </a-descriptions>
+                <div style="font-size:13px;font-weight:500;margin-bottom:8px">Top 实体（按提及次数）</div>
+                <a-table
+                  :data-source="graphStats.top_entities"
+                  :columns="[{title:'实体',dataIndex:'name'},{title:'类型',dataIndex:'label'},{title:'提及次数',dataIndex:'mention_count',width:90}]"
+                  size="small"
+                  :pagination="false"
+                  :scroll="{y:360}"
+                  row-key="name"
+                />
+              </div>
+            </a-modal>
+
+            <!-- Eval Layout -->
+            <div class="eval-layout">
+              <!-- Datasets Panel -->
+              <div class="datasets-panel">
+                <div class="panel-header">
+                  <h3>评估数据集</h3>
+                  <div style="display:flex;gap:6px">
+                    <a-button size="small" type="primary" @click="generateModalOpen = true"><thunderbolt-outlined /> 自动生成</a-button>
+                    <a-upload :show-upload-list="false" :before-upload="handleDatasetUpload" accept=".jsonl">
+                      <a-button size="small"><upload-outlined /> 上传 JSONL</a-button>
+                    </a-upload>
+                  </div>
+                </div>
+
+                <a-spin :spinning="datasetsLoading">
+                  <div v-if="datasets.length" class="dataset-list">
+                    <div
+                      v-for="ds in datasets"
+                      :key="ds.id"
+                      class="dataset-item"
+                      :class="{ active: selectedDataset?.id === ds.id }"
+                      @click="selectedDataset = ds"
+                    >
+                      <div class="ds-name">{{ ds.name }}</div>
+                      <div class="ds-meta">{{ ds.item_count }} 条 · {{ fmtDate(ds.created_at) }}</div>
+                      <div class="ds-actions">
+                        <a-button size="small" type="primary" @click.stop="startRun(ds)" :loading="startingRun === ds.id + ':quick'">Quick</a-button>
+                        <a-button size="small" @click.stop="startRagasRun(ds)" :loading="startingRun === ds.id + ':ragas'">RAGAS</a-button>
+                        <a-button size="small" @click.stop="startAgentRun(ds)" :loading="startingRun === ds.id + ':agent'">Agent</a-button>
+                        <a-popconfirm title="确定删除数据集？" ok-type="danger" @confirm="removeDataset(ds.id)">
+                          <a-button size="small" danger type="text" @click.stop><delete-outlined /></a-button>
+                        </a-popconfirm>
+                      </div>
+                    </div>
+                  </div>
+                  <a-empty v-else description="暂无数据集" style="padding: 24px 0" />
+                </a-spin>
+
+                <div class="jsonl-hint">
+                  JSONL 格式：每行 <code>{"query":"...","gold_answer":"...","gold_chunk_ids":[]}</code>
+                </div>
+              </div>
+
+              <!-- Runs Panel -->
+              <div class="runs-panel">
+                <div class="panel-header">
+                  <h3>评估历史</h3>
+                  <a-button size="small" @click="loadRuns"><reload-outlined /> 刷新</a-button>
+                </div>
+
+                <a-spin :spinning="runsLoading">
+                  <div v-if="evalRuns.length" class="runs-list">
+                    <div
+                      v-for="run in evalRuns"
+                      :key="run.id"
+                      class="run-card"
+                      :class="{ expanded: expandedRun === run.id }"
+                    >
+                      <div class="run-header" @click="toggleRun(run)">
+                        <div class="run-left">
+                          <span class="run-name">{{ run.name }}</span>
+                          <a-tag :color="run.eval_type === 'ragas' ? 'purple' : run.eval_type === 'agent' ? 'orange' : 'cyan'" size="small">{{ run.eval_type || 'quick' }}</a-tag>
+                          <a-tag :color="runStatusColor(run.status)" size="small">{{ runStatusLabel(run.status) }}</a-tag>
+                        </div>
+                        <div class="run-right">
+                          <span v-if="run.overall_score !== null" class="run-score">总分 {{ (run.overall_score * 100).toFixed(1) }}%</span>
+                          <a-progress v-if="run.status === 'running'" :percent="runProgress(run)" size="small" style="width: 100px" />
+                          <a-popconfirm title="确定删除？" ok-type="danger" @confirm.stop="removeRun(run)">
+                            <a-button size="small" type="text" danger @click.stop><delete-outlined /></a-button>
+                          </a-popconfirm>
+                        </div>
+                      </div>
+
+                      <div v-if="run.metrics && Object.keys(run.metrics).length" class="run-metrics">
+                        <span v-if="run.metrics._avg_hops !== undefined" class="metric-chip metric-hop">
+                          平均跳数: {{ Number(run.metrics._avg_hops).toFixed(1) }}
+                        </span>
+                        <template v-for="(v, k) in run.metrics" :key="k">
+                          <span v-if="!k.startsWith('_')" class="metric-chip">
+                            {{ k }}: {{ (v * 100).toFixed(1) }}%
+                          </span>
+                        </template>
+                      </div>
+
+                      <div v-if="expandedRun === run.id" class="run-items">
+                        <a-spin :spinning="itemsLoading">
+                          <div v-if="runItems.length" class="items-table">
+                            <div class="items-header">
+                              <span style="flex: 2">问题</span>
+                              <span style="flex: 2">参考答案</span>
+                              <span v-if="expandedRunType === 'ragas' || expandedRunType === 'agent'" style="flex: 2">生成答案</span>
+                              <span v-if="expandedRunType === 'agent'" style="width: 48px; text-align: center">跳数</span>
+                              <span v-if="expandedRunType === 'agent'" style="flex: 2">工具链</span>
+                              <span v-for="k in metricKeys" :key="k" style="width: 80px; text-align: center">{{ k }}</span>
+                            </div>
+                            <div v-for="item in runItems" :key="item.id" class="items-row">
+                              <span style="flex: 2" class="item-text">{{ item.query }}</span>
+                              <span style="flex: 2" class="item-text">{{ item.gold_answer || '-' }}</span>
+                              <span v-if="expandedRunType === 'ragas' || expandedRunType === 'agent'" style="flex: 2" class="item-text">{{ item.generated_answer || '-' }}</span>
+                              <span v-if="expandedRunType === 'agent'" style="width: 48px; text-align: center; font-size: 12px">
+                                {{ item.metrics?._hops ?? '-' }}
+                              </span>
+                              <span v-if="expandedRunType === 'agent'" style="flex: 2; font-size: 11px; color: #888" class="item-text">
+                                {{ (item.metrics?._tools_used || []).join(' → ') || '-' }}
+                              </span>
+                              <span
+                                v-for="k in metricKeys" :key="k"
+                                style="width: 80px; text-align: center; font-size: 12px"
+                                :class="metricColor(item.metrics?.[k])"
+                              >
+                                {{ item.metrics?.[k] !== undefined ? (item.metrics[k] * 100).toFixed(0) + '%' : '-' }}
+                              </span>
+                            </div>
+                          </div>
+                          <a-empty v-else description="暂无逐条结果" style="padding: 16px 0" />
+                        </a-spin>
+                      </div>
+                    </div>
+                  </div>
+                  <a-empty v-else description="暂无评估运行" style="padding: 40px 0" />
+                </a-spin>
+              </div>
+            </div>
+          </div>
+        </a-tab-pane>
       </a-tabs>
 
       <!-- Query result detail modal -->
@@ -206,6 +403,151 @@
         </div>
       </a-modal>
 
+      <!-- KB settings modal -->
+      <a-modal
+        v-model:open="editOpen"
+        title="知识库设置"
+        ok-text="保存"
+        cancel-text="取消"
+        :confirm-loading="editSaving"
+        @ok="saveEdit"
+        width="440"
+      >
+        <a-form layout="vertical" style="margin-top: 16px">
+          <a-form-item label="名称" required>
+            <a-input v-model:value="editForm.name" placeholder="知识库名称" />
+          </a-form-item>
+          <a-form-item label="描述">
+            <a-textarea v-model:value="editForm.description" :rows="3" placeholder="可选" />
+          </a-form-item>
+        </a-form>
+      </a-modal>
+
+      <!-- Upload options modal -->
+      <a-modal
+        v-model:open="uploadModalOpen"
+        title="上传文档"
+        ok-text="上传"
+        cancel-text="取消"
+        :confirm-loading="uploadingFile"
+        @ok="confirmUpload"
+        @cancel="pendingFile = null"
+        width="400"
+      >
+        <a-form layout="vertical" style="margin-top: 16px">
+          <a-form-item label="文件">
+            <span style="color: #333">{{ pendingFile?.name }}</span>
+          </a-form-item>
+          <a-form-item label="PDF 解析器" v-if="isPdf(pendingFile)">
+            <a-select v-model:value="uploadPdfParser" style="width: 100%">
+              <a-select-option value="marker">Marker（高质量 OCR，推荐）</a-select-option>
+              <a-select-option value="mineru">MinerU（学术文档 OCR）</a-select-option>
+              <a-select-option value="markitdown">MarkItDown（快速，无 OCR）</a-select-option>
+            </a-select>
+          </a-form-item>
+        </a-form>
+      </a-modal>
+
+      <!-- Unified document preview modal -->
+      <a-modal
+        v-model:open="previewOpen"
+        :footer="null"
+        :closable="false"
+        :width="previewViewMode === 'source' ? '1200px' : '900px'"
+        :body-style="{ height: '80vh', padding: '0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }"
+        @after-close="closePreview"
+      >
+        <template #title>
+          <div class="pdf-modal-title">
+            <span class="pdf-modal-filename">{{ previewDoc?.filename }}</span>
+            <span class="pdf-modal-count" v-if="previewChunks.length">{{ previewChunks.length }} 个 Chunk</span>
+            <a-segmented
+              v-model:value="previewViewMode"
+              :options="previewViewOptions"
+              size="small"
+              style="margin-left: 16px"
+            />
+            <a-button type="text" size="small" style="margin-left: auto" @click="previewOpen = false">
+              <close-outlined />
+            </a-button>
+          </div>
+        </template>
+
+        <div v-if="previewLoading" class="pdf-loading">
+          <a-spin tip="加载中..." />
+        </div>
+
+        <!-- 源文件视图 -->
+        <div v-else-if="previewViewMode === 'source'" class="pdf-viewer-body">
+          <div class="pdf-left">
+            <template v-if="pdfBlobUrl">
+              <vue-pdf-embed
+                ref="pdfRef"
+                :source="pdfBlobUrl"
+                :page="currentPdfPage"
+                :text-layer="true"
+                class="pdf-embed"
+                @loaded="onPdfLoaded"
+              />
+              <div class="pdf-nav">
+                <a-button size="small" :disabled="currentPdfPage <= 1" @click="currentPdfPage--">‹</a-button>
+                <span class="pdf-nav-label">{{ currentPdfPage }} / {{ totalPdfPages }}</span>
+                <a-button size="small" :disabled="currentPdfPage >= totalPdfPages" @click="currentPdfPage++">›</a-button>
+              </div>
+            </template>
+            <div v-else class="pdf-error">
+              <file-text-outlined style="font-size: 32px; color: #ccc" />
+              <div style="margin-top: 8px; color: #999">源文件不存在，请重新上传文档以启用预览</div>
+            </div>
+          </div>
+          <div class="pdf-right">
+            <div class="pdf-chunk-list">
+              <div
+                v-for="chunk in previewChunks"
+                :key="chunk.id"
+                class="pdf-chunk-card"
+                :class="{ active: selectedPreviewChunkId === chunk.id }"
+                @click="selectPreviewChunk(chunk.id)"
+              >
+                <div class="pdf-chunk-header">
+                  <span class="pdf-chunk-index">#{{ chunk.chunk_index }}</span>
+                  <a-tag v-if="chunk.metadata?.page_num ?? chunk.metadata?.page" size="small" color="blue">
+                    第 {{ chunk.metadata.page_num ?? chunk.metadata.page }} 页
+                  </a-tag>
+                  <span class="pdf-chunk-tokens" v-if="chunk.token_count">{{ chunk.token_count }} tokens</span>
+                </div>
+                <div class="pdf-chunk-preview">{{ chunk.content.slice(0, 80).replace(/\n+/g, ' ') }}{{ chunk.content.length > 80 ? '…' : '' }}</div>
+              </div>
+              <a-empty v-if="!previewChunks.length" description="暂无 Chunk" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Markdown 视图 -->
+        <div v-else-if="previewViewMode === 'markdown'" class="fulltext-body markdown-body" v-html="previewFullTextHtml" />
+
+        <!-- Chunks 视图 -->
+        <div v-else-if="previewViewMode === 'chunks'" class="chunks-grid-panel">
+          <div class="chunks-grid">
+            <div v-for="chunk in previewChunks" :key="chunk.id" class="chunks-grid-card" @click="openChunkDetail(chunk)">
+              <div class="chunks-grid-header">
+                <span class="pdf-chunk-index">#{{ chunk.chunk_index }}</span>
+                <a-tag v-if="chunk.metadata?.page_num ?? chunk.metadata?.page" size="small" color="blue">
+                  第 {{ chunk.metadata.page_num ?? chunk.metadata.page }} 页
+                </a-tag>
+                <a-tag v-if="chunk.metadata?.content_type && chunk.metadata.content_type !== 'text'"
+                  :color="contentTypeColor(chunk.metadata.content_type)" size="small">
+                  {{ chunk.metadata.content_type }}
+                </a-tag>
+                <span class="pdf-chunk-tokens" v-if="chunk.token_count">{{ chunk.token_count }} tokens</span>
+              </div>
+              <div class="chunks-grid-content">{{ chunk.content.replace(/\n+/g, ' ') }}</div>
+            </div>
+          </div>
+          <a-empty v-if="!previewChunks.length" description="暂无 Chunk" style="padding: 40px 0" />
+        </div>
+      </a-modal>
+
       <!-- Chunk detail modal -->
       <a-modal v-model:open="chunkModalOpen" title="Chunk 详情" :footer="null" width="720">
         <div v-if="selectedChunk">
@@ -239,37 +581,331 @@
           </template>
         </div>
       </a-modal>
+
+      <!-- Entity extraction modal -->
+      <a-modal
+        v-model:open="entityModalOpen"
+        :title="entityModalDoc ? `实体抽取 — ${entityModalDoc.filename}` : '实体抽取'"
+        :footer="null"
+        width="680px"
+        @cancel="_stopEntityPoll"
+      >
+        <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+          <a-button type="primary" size="small" :loading="entityBuilding.has(entityModalDoc?.id)" @click="triggerDocGraphBuild">
+            {{ entityBuilding.has(entityModalDoc?.id) ? '抽取中…' : '重新抽取' }}
+          </a-button>
+          <span style="color: #999; font-size: 12px;">首次打开会自动触发抽取，完成后刷新查看结果</span>
+        </div>
+        <a-spin :spinning="entityLoading">
+          <div v-if="entityList.length === 0 && !entityLoading" style="color: #999; padding: 24px 0; text-align: center;">
+            暂无实体数据，点击「重新抽取」生成
+          </div>
+          <div v-else style="display: flex; flex-wrap: wrap; gap: 6px; max-height: 400px; overflow-y: auto; padding: 4px 0;">
+            <a-tag
+              v-for="e in entityList"
+              :key="e.name + e.label"
+              :color="entityLabelColor(e.label)"
+            >
+              {{ e.name }}
+              <span style="opacity: 0.65; font-size: 11px; margin-left: 3px;">({{ e.label }}) ×{{ e.mentions }}</span>
+            </a-tag>
+          </div>
+        </a-spin>
+      </a-modal>
+
+      <!-- Generate Dataset Modal -->
+      <a-modal
+        v-model:open="generateModalOpen"
+        title="自动生成评估数据集"
+        ok-text="开始生成"
+        cancel-text="取消"
+        :confirm-loading="generatingDataset"
+        @ok="submitGenerateDataset"
+        width="440"
+      >
+        <a-form layout="vertical" style="margin-top: 16px">
+          <a-form-item label="数据集名称">
+            <a-input v-model:value="generateForm.name" placeholder="留空自动命名" />
+          </a-form-item>
+          <a-form-item label="题目数量">
+            <a-input-number v-model:value="generateForm.n_questions" :min="5" :max="100" style="width:100%" />
+          </a-form-item>
+          <a-form-item label="单跳题比例">
+            <a-slider v-model:value="generateForm.simple_ratio" :min="0" :max="1" :step="0.1" :marks="{0:'0',0.5:'50%',1:'100%'}" />
+          </a-form-item>
+          <a-form-item label="多跳题比例">
+            <a-slider v-model:value="generateForm.multi_context_ratio" :min="0" :max="1" :step="0.1" :marks="{0:'0',0.5:'50%',1:'100%'}" />
+          </a-form-item>
+          <div style="font-size:12px;color:#aaa">推理题比例 = 1 − 单跳 − 多跳；由 RAGAS TestsetGenerator 自动生成，需要知识库已有文档</div>
+        </a-form>
+      </a-modal>
     </div>
   </app-layout>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, reactive, watch } from 'vue'
+import VuePdfEmbed from 'vue-pdf-embed'
+import 'vue-pdf-embed/dist/styles/textLayer.css'
+import 'vue-pdf-embed/dist/styles/annotationLayer.css'
 import { marked } from 'marked'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
-  ArrowLeftOutlined, UploadOutlined, FileTextOutlined, DatabaseOutlined, CaretRightOutlined
+  ArrowLeftOutlined, UploadOutlined, FileTextOutlined, DatabaseOutlined,
+  CaretRightOutlined, DeleteOutlined, ReloadOutlined, EditOutlined, CloseOutlined, ThunderboltOutlined
 } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
-import { listDocumentChunks, testQuery } from '@/apis/knowledge'
+import { useSettingsStore } from '@/stores/settings'
+import { apiPost } from '@/apis/base'
+import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats } from '@/apis/knowledge'
+import {
+  listDatasets, uploadDataset, deleteDataset, generateDataset,
+  listEvalRuns, createEvalRun, createRagasRun, createAgentRun, getEvalRun, deleteEvalRun
+} from '@/apis/knowledge'
 
 const route = useRoute()
 const router = useRouter()
 const kbStore = useKnowledgeStore()
+const settingsStore = useSettingsStore()
 
 const kbId = route.params.id
 const kb = computed(() => kbStore.current)
 
 const activeTab = ref('docs')
+
+// ── Documents ──
 const documents = ref([])
 const docsLoading = ref(false)
-
 const selectedDocId = ref(null)
 const docChunks = ref([])
 const chunksLoading = ref(false)
 
+// ── Unified preview modal ──
+const previewOpen = ref(false)
+const previewDoc = ref(null)
+const previewChunks = ref([])
+const previewLoading = ref(false)
+const previewViewMode = ref('markdown')
+const pdfBlobUrl = ref('')
+const selectedPreviewChunkId = ref(null)
+const pdfRef = ref(null)
+const currentPdfPage = ref(1)
+const totalPdfPages = ref(0)
+
+const isPdfDoc = computed(() => previewDoc.value?.filename?.toLowerCase().endsWith('.pdf'))
+
+const previewViewOptions = computed(() => {
+  const opts = []
+  if (isPdfDoc.value) opts.push({ label: '源文件', value: 'source' })
+  opts.push({ label: 'Markdown', value: 'markdown' })
+  opts.push({ label: 'Chunks', value: 'chunks' })
+  return opts
+})
+
+const previewImageTicket = ref('')
+
+function rewriteLocalImagePaths(md, ticket) {
+  if (!ticket) return md
+  return md.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
+    const decoded = decodeURIComponent(src)
+    const isLocal = /^[A-Za-z]:[\\/]/.test(decoded) || /^\/(?!\/)[^/]/.test(decoded)
+    if (!isLocal) return match
+    return `![${alt}](/api/rag/images?path=${encodeURIComponent(decoded)}&ticket=${encodeURIComponent(ticket)})`
+  })
+}
+
+const previewFullTextHtml = computed(() => {
+  if (!previewChunks.value.length) return ''
+  const sorted = [...previewChunks.value].sort((a, b) => a.chunk_index - b.chunk_index)
+  const raw = sorted.map(c => c.content).join('\n\n---\n\n')
+  return marked.parse(rewriteLocalImagePaths(raw, previewImageTicket.value))
+})
+
+async function openDocPreview(doc) {
+  previewDoc.value = doc
+  previewOpen.value = true
+  previewLoading.value = true
+  previewChunks.value = []
+  pdfBlobUrl.value = ''
+  previewImageTicket.value = ''
+  selectedPreviewChunkId.value = null
+  previewViewMode.value = doc.filename?.toLowerCase().endsWith('.pdf') ? 'source' : 'markdown'
+  try {
+    const isPdf = doc.filename?.toLowerCase().endsWith('.pdf')
+    const [chunks, ticketRes] = await Promise.all([
+      listDocumentChunks(kbId, doc.id),
+      apiPost('/api/rag/image-ticket', {}),
+    ])
+    previewChunks.value = chunks
+    previewImageTicket.value = ticketRes.ticket || ''
+    if (isPdf) {
+      try {
+        const blob = await getDocumentFileBlob(kbId, doc.id)
+        pdfBlobUrl.value = URL.createObjectURL(blob)
+      } catch (_) {
+        // 源文件不可用，模板已有"请重新上传"提示
+      }
+    }
+  } catch (e) {
+    message.error('加载预览失败：' + (e.message || ''))
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function selectPreviewChunk(id) {
+  selectedPreviewChunkId.value = id
+  const chunk = previewChunks.value.find(c => c.id === id)
+  const pageNum = chunk?.metadata?.page_num ?? chunk?.metadata?.page
+  if (pageNum) currentPdfPage.value = pageNum
+}
+
+function onPdfLoaded(pdf) {
+  totalPdfPages.value = pdf.numPages
+}
+
+function closePreview() {
+  if (pdfBlobUrl.value) {
+    URL.revokeObjectURL(pdfBlobUrl.value)
+    pdfBlobUrl.value = ''
+  }
+  previewDoc.value = null
+  previewChunks.value = []
+  selectedPreviewChunkId.value = null
+  currentPdfPage.value = 1
+  totalPdfPages.value = 0
+}
+
+async function downloadDoc(doc) {
+  try {
+    const blob = await getDocumentFileBlob(kbId, doc.id)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = doc.filename
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    message.error('下载失败：' + (e.message || ''))
+  }
+}
+
+// ── Entity extraction modal ──
+const entityModalOpen = ref(false)
+const entityModalDoc = ref(null)
+const entityList = ref([])
+const entityLoading = ref(false)
+const entityBuilding = ref(new Set())
+const _entityPollTimers = {}  // docId → intervalId
+
+const ENTITY_LABEL_COLORS = {
+  Method: 'blue', Model: 'geekblue', Dataset: 'cyan', Concept: 'purple',
+  Organization: 'orange', Person: 'gold', Term: 'green',
+}
+function entityLabelColor(label) {
+  return ENTITY_LABEL_COLORS[label] || 'default'
+}
+
+function _stopEntityPoll(docId) {
+  if (docId) {
+    if (_entityPollTimers[docId]) { clearInterval(_entityPollTimers[docId]); delete _entityPollTimers[docId] }
+  } else {
+    Object.keys(_entityPollTimers).forEach(id => { clearInterval(_entityPollTimers[id]); delete _entityPollTimers[id] })
+  }
+}
+
+async function openEntityModal(doc) {
+  entityModalDoc.value = doc
+  entityList.value = []
+  entityModalOpen.value = true
+  await loadDocEntities(doc)
+}
+
+async function loadDocEntities(doc) {
+  entityLoading.value = true
+  try {
+    const res = await getDocEntities(kbId, doc.id)
+    entityList.value = res.entities || []
+  } catch {
+    entityList.value = []
+  } finally {
+    entityLoading.value = false
+  }
+}
+
+async function triggerDocGraphBuild() {
+  if (!entityModalDoc.value) return
+  const docId = entityModalDoc.value.id
+  entityBuilding.value = new Set([...entityBuilding.value, docId])
+  _stopEntityPoll(docId)
+  try {
+    await buildDocGraph(kbId, docId)
+    message.info('抽取任务已提交，正在后台运行…')
+    const clearBuilding = (id) => {
+      const next = new Set(entityBuilding.value); next.delete(id); entityBuilding.value = next
+    }
+    let attempts = 0
+    _entityPollTimers[docId] = setInterval(async () => {
+      attempts++
+      try {
+        const res = await getDocEntities(kbId, docId)
+        const list = res.entities || []
+        if (list.length > 0) {
+          if (entityModalDoc.value?.id === docId) entityList.value = list
+          clearBuilding(docId)
+          _stopEntityPoll(docId)
+          message.success(`抽取完成，共 ${list.length} 个实体`)
+        }
+      } catch { /* ignore poll errors */ }
+      if (attempts >= 36) {
+        clearBuilding(docId)
+        _stopEntityPoll(docId)
+      }
+    }, 5000)
+  } catch (e) {
+    message.error('抽取失败：' + (e.message || ''))
+    const next = new Set(entityBuilding.value); next.delete(docId); entityBuilding.value = next
+  }
+}
+
+// ── Upload modal ──
+const uploadModalOpen = ref(false)
+const pendingFile = ref(null)
+const uploadPdfParser = ref('mineru')
+const uploadingFile = ref(false)
+
+function isPdf(file) {
+  if (!file) return false
+  return file.name?.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf'
+}
+
+function openUploadModal(file) {
+  pendingFile.value = file
+  uploadPdfParser.value = 'marker'
+  uploadModalOpen.value = true
+  return false  // prevent ant-design auto upload
+}
+
+async function confirmUpload() {
+  if (!pendingFile.value) return
+  uploadingFile.value = true
+  try {
+    const parser = isPdf(pendingFile.value) ? uploadPdfParser.value : 'markitdown'
+    await kbStore.uploadDoc(kbId, pendingFile.value, parser)
+    await loadDocs()
+    message.success(`${pendingFile.value.name} 上传成功，正在解析…`)
+    uploadModalOpen.value = false
+    pendingFile.value = null
+  } catch (e) {
+    message.error(e.message || '上传失败')
+  } finally {
+    uploadingFile.value = false
+  }
+}
+
+// ── Query ──
 const queryText = ref('')
 const queryTopK = ref(5)
 const queryMode = ref('hybrid')
@@ -281,30 +917,107 @@ const queryModeOptions = [
 const queryLoading = ref(false)
 const queryResults = ref([])
 const queryDone = ref(false)
-
 const chunkModalOpen = ref(false)
 const selectedChunk = ref(null)
 const resultDetailOpen = ref(false)
 const selectedResult = ref(null)
 const collapsedGroups = reactive(new Set())
 
+// ── Edit KB ──
+const editOpen = ref(false)
+const editSaving = ref(false)
+const editForm = reactive({ name: '', description: '' })
+
+function openEdit() {
+  editForm.name = kb.value?.name || ''
+  editForm.description = kb.value?.description || ''
+  editOpen.value = true
+}
+
+async function saveEdit() {
+  if (!editForm.name.trim()) { message.warning('请填写名称'); return }
+  editSaving.value = true
+  try {
+    await kbStore.update(kbId, { name: editForm.name, description: editForm.description || null })
+    editOpen.value = false
+    message.success('已保存')
+  } catch (e) {
+    message.error(e.message || '保存失败')
+  } finally {
+    editSaving.value = false
+  }
+}
+
+// ── Eval ──
+const ragasConfigOpen = ref([])
+const localRagasGen  = ref(null)
+const localRagasEval = ref(null)
+const ragasSaving    = ref(false)
+
+const graphToggleLoading = ref(false)
+const kbGraphBuilding = ref(false)
+const graphStats = ref(null)
+const graphStatsVisible = ref(false)
+
+const datasets = ref([])
+const datasetsLoading = ref(false)
+const selectedDataset = ref(null)
+const generateModalOpen = ref(false)
+const generatingDataset = ref(false)
+const generateForm = ref({ name: '', n_questions: 20, simple_ratio: 0.3, multi_context_ratio: 0.5 })
+const evalRuns = ref([])
+const runsLoading = ref(false)
+const startingRun = ref(null)
+const expandedRun = ref(null)
+const expandedRunType = ref('quick')
+const runItems = ref([])
+const itemsLoading = ref(false)
+
+const metricKeys = computed(() => {
+  const keys = new Set()
+  runItems.value.forEach(i => Object.keys(i.metrics || {}).forEach(k => {
+    if (!k.startsWith('_')) keys.add(k)
+  }))
+  return [...keys]
+})
+
 let pollTimer = null
+let evalPollTimer = null
 
 const docColumns = [
-  { title: '文件名', dataIndex: 'filename', key: 'filename' },
+  {
+    title: '文件名', dataIndex: 'filename', key: 'filename',
+    sorter: (a, b) => (a.filename || '').localeCompare(b.filename || '', 'zh-Hans-CN'),
+  },
   { title: '大小', key: 'file_size', width: 100 },
-  { title: 'Chunk 数', dataIndex: 'chunk_count', key: 'chunk_count', width: 100 },
+  { title: 'Chunk 数', dataIndex: 'chunk_count', key: 'chunk_count', width: 90 },
+  { title: '图片数', dataIndex: 'image_count', key: 'image_count', width: 80 },
   { title: '状态', key: 'status', width: 110 },
   { title: '操作', key: 'action', width: 180 },
 ]
 
 onMounted(async () => {
   await kbStore.fetchOne(kbId)
+  await settingsStore.fetchAll()
+  syncRagas()
   await loadDocs()
   startPoll()
+  // Load eval data when tab first activated
+  if (activeTab.value === 'eval') await loadEvalData()
 })
 
-onUnmounted(() => stopPoll())
+onUnmounted(() => {
+  stopPoll()
+  stopEvalPoll()
+})
+
+// Load eval data when switching to eval tab
+watch(activeTab, async (tab) => {
+  if (tab === 'eval' && !datasets.value.length && !evalRuns.value.length) {
+    await loadEvalData()
+    startEvalPoll()
+  }
+})
 
 async function loadDocs() {
   docsLoading.value = true
@@ -322,15 +1035,46 @@ function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
-async function handleUpload(file) {
+
+async function triggerKbGraphBuild() {
+  kbGraphBuilding.value = true
   try {
-    await kbStore.uploadDoc(kbId, file)
-    await loadDocs()
-    message.success(`${file.name} 上传成功，正在解析…`)
+    await buildKbGraph(kbId)
+    message.success('建图任务已启动，完成后图增强检索将自动开启')
+    let attempts = 0
+    const timer = setInterval(async () => {
+      attempts++
+      try {
+        const stats = await getGraphStats(kbId)
+        if (stats.entity_count > 0) {
+          graphStats.value = stats
+          await kbStore.fetchOne(kbId)
+          kbGraphBuilding.value = false
+          clearInterval(timer)
+          message.success(`建图完成，共 ${stats.entity_count} 个实体`)
+        }
+      } catch { /* ignore */ }
+      if (attempts >= 36) { // 6 min timeout
+        clearInterval(timer)
+        kbGraphBuilding.value = false
+      }
+    }, 10000)
   } catch (e) {
-    message.error(e.message || '上传失败')
+    message.error(e.message || '建图失败')
+    kbGraphBuilding.value = false
   }
-  return false // prevent default upload
+}
+
+async function toggleGraphExpansion(val) {
+  graphToggleLoading.value = true
+  try {
+    await kbStore.update(kbId, { enable_graph_expansion: val })
+    await kbStore.fetchOne(kbId)
+  } catch (e) {
+    message.error(e.message || '更新失败')
+  } finally {
+    graphToggleLoading.value = false
+  }
 }
 
 async function removeDoc(docId) {
@@ -378,6 +1122,211 @@ function toggleGroup(filename) {
   else collapsedGroups.add(filename)
 }
 
+function openResultDetail(r) {
+  selectedResult.value = r
+  resultDetailOpen.value = true
+}
+
+async function runQuery() {
+  if (!queryText.value.trim()) return
+  queryLoading.value = true
+  queryDone.value = false
+  queryResults.value = []
+  try {
+    const res = await testQuery(kbId, queryText.value, queryTopK.value, queryMode.value)
+    queryResults.value = res.results || []
+    queryDone.value = true
+  } catch (e) {
+    message.error(e.message || '检索失败')
+  } finally {
+    queryLoading.value = false
+  }
+}
+
+// ── Eval logic ──
+
+function syncRagas() {
+  localRagasGen.value  = settingsStore.ragasGeneratorModel
+  localRagasEval.value = settingsStore.ragasEvaluatorModel
+}
+
+async function saveRagasSettings() {
+  ragasSaving.value = true
+  try {
+    await settingsStore.saveRagasSettings({
+      generatorModel: localRagasGen.value,
+      evaluatorModel: localRagasEval.value,
+    })
+    message.success('评估配置已保存')
+  } catch (e) {
+    message.error('保存失败：' + (e.message || ''))
+  } finally {
+    ragasSaving.value = false
+  }
+}
+
+async function loadEvalData() {
+  await Promise.all([loadDatasets(), loadRuns()])
+}
+
+async function loadDatasets() {
+  datasetsLoading.value = true
+  try { datasets.value = await listDatasets(kbId) }
+  finally { datasetsLoading.value = false }
+}
+
+async function loadRuns() {
+  runsLoading.value = true
+  try { evalRuns.value = await listEvalRuns(kbId) }
+  finally { runsLoading.value = false }
+}
+
+function startEvalPoll() {
+  evalPollTimer = setInterval(() => {
+    if (evalRuns.value.some(r => r.status === 'running')) loadRuns()
+  }, 3000)
+}
+
+function stopEvalPoll() {
+  if (evalPollTimer) { clearInterval(evalPollTimer); evalPollTimer = null }
+}
+
+async function handleDatasetUpload(file) {
+  const name = file.name.replace(/\.jsonl$/, '')
+  try {
+    await uploadDataset(kbId, name, file)
+    await loadDatasets()
+    message.success('数据集上传成功')
+  } catch (e) {
+    message.error(e.message || '上传失败')
+  }
+  return false
+}
+
+async function submitGenerateDataset() {
+  generatingDataset.value = true
+  try {
+    await generateDataset(kbId, {
+      name: generateForm.value.name || undefined,
+      n_questions: generateForm.value.n_questions,
+      simple_ratio: generateForm.value.simple_ratio,
+      multi_context_ratio: generateForm.value.multi_context_ratio,
+      reasoning_ratio: Math.max(0, 1 - generateForm.value.simple_ratio - generateForm.value.multi_context_ratio),
+    })
+    generateModalOpen.value = false
+    message.success('数据集生成已启动，请稍后刷新')
+    setTimeout(() => loadDatasets(), 3000)
+  } catch (e) {
+    message.error(e.message || '生成失败')
+  } finally {
+    generatingDataset.value = false
+  }
+}
+
+async function removeDataset(id) {
+  try {
+    await deleteDataset(id)
+    datasets.value = datasets.value.filter(d => d.id !== id)
+    if (selectedDataset.value?.id === id) selectedDataset.value = null
+    message.success('已删除')
+  } catch (e) {
+    message.error(e.message || '删除失败')
+  }
+}
+
+async function startRun(ds) {
+  startingRun.value = ds.id + ':quick'
+  try {
+    const run = await createEvalRun(kbId, { dataset_id: ds.id, name: `${ds.name} - Quick`, top_k: 5 })
+    evalRuns.value.unshift(run)
+    if (!evalPollTimer) startEvalPoll()
+    message.success('Quick 评估已启动')
+  } catch (e) {
+    message.error(e.message || '启动失败')
+  } finally {
+    startingRun.value = null
+  }
+}
+
+async function startRagasRun(ds) {
+  startingRun.value = ds.id + ':ragas'
+  try {
+    const run = await createRagasRun(kbId, { dataset_id: ds.id, name: `${ds.name} - RAGAS`, top_k: 5 })
+    evalRuns.value.unshift(run)
+    if (!evalPollTimer) startEvalPoll()
+    message.success('RAGAS 评估已启动')
+  } catch (e) {
+    message.error(e.message || '启动失败')
+  } finally {
+    startingRun.value = null
+  }
+}
+
+async function startAgentRun(ds) {
+  startingRun.value = ds.id + ':agent'
+  try {
+    const run = await createAgentRun(kbId, { dataset_id: ds.id, name: `${ds.name} - Agent`, top_k: 5 })
+    evalRuns.value.unshift(run)
+    if (!evalPollTimer) startEvalPoll()
+    message.success('Agent 评估已启动')
+  } catch (e) {
+    message.error(e.message || '启动失败')
+  } finally {
+    startingRun.value = null
+  }
+}
+
+async function toggleRun(run) {
+  if (expandedRun.value === run.id) { expandedRun.value = null; return }
+  expandedRun.value = run.id
+  expandedRunType.value = run.eval_type || 'quick'
+  itemsLoading.value = true
+  try {
+    const detail = await getEvalRun(kbId, run.id)
+    runItems.value = detail.items || []
+  } finally {
+    itemsLoading.value = false
+  }
+}
+
+async function removeRun(run) {
+  try {
+    await deleteEvalRun(kbId, run.id)
+    evalRuns.value = evalRuns.value.filter(r => r.id !== run.id)
+    if (expandedRun.value === run.id) expandedRun.value = null
+    message.success('已删除')
+  } catch (e) {
+    message.error(e.message || '删除失败')
+  }
+}
+
+function runProgress(run) {
+  if (!run.total_items) return 0
+  return Math.round((run.completed_items / run.total_items) * 100)
+}
+
+function runStatusColor(s) {
+  return { pending: 'default', running: 'blue', completed: 'green', failed: 'red' }[s] || 'default'
+}
+
+function runStatusLabel(s) {
+  return { pending: '待运行', running: '运行中', completed: '完成', failed: '失败' }[s] || s
+}
+
+function metricColor(v) {
+  if (v === undefined) return ''
+  if (v >= 0.7) return 'metric-high'
+  if (v >= 0.4) return 'metric-mid'
+  return 'metric-low'
+}
+
+function fmtDate(iso) {
+  if (!iso) return ''
+  return new Date(iso).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+}
+
+// ── Shared helpers ──
+
 function contentTypeColor(type) {
   return { code: 'orange', table: 'green', list: 'cyan', text: 'default' }[type] || 'default'
 }
@@ -395,11 +1344,6 @@ function structuredMetaFields(meta) {
   return result
 }
 
-function openResultDetail(r) {
-  selectedResult.value = r
-  resultDetailOpen.value = true
-}
-
 function renderMarkdown(text) {
   return marked.parse(text || '')
 }
@@ -411,22 +1355,6 @@ function rawMetaRemainder(meta) {
     if (!knownKeys.has(k)) remainder[k] = v
   }
   return remainder
-}
-
-async function runQuery() {
-  if (!queryText.value.trim()) return
-  queryLoading.value = true
-  queryDone.value = false
-  queryResults.value = []
-  try {
-    const res = await testQuery(kbId, queryText.value, queryTopK.value, queryMode.value)
-    queryResults.value = res.results || []
-    queryDone.value = true
-  } catch (e) {
-    message.error(e.message || '检索失败')
-  } finally {
-    queryLoading.value = false
-  }
 }
 
 function statusColor(s) {
@@ -478,7 +1406,6 @@ function formatSize(bytes) {
 .chunk-list-panel { flex: 1; overflow-y: auto; padding: 12px; }
 .chunk-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: #bbb; font-size: 14px; }
 
-/* Chunk list */
 .chunk-items { display: flex; flex-direction: column; gap: 8px; }
 .chunk-item {
   border: 1px solid #f0f0f0; border-radius: 6px; padding: 10px 12px;
@@ -514,7 +1441,52 @@ function formatSize(bytes) {
 .result-rank { font-size: 12px; font-weight: 700; color: #1677ff; }
 .result-text { font-size: 13px; color: #444; line-height: 1.6; }
 
-/* Chunk modal */
+/* Eval tab */
+.eval-tab { max-width: 1100px; }
+.eval-layout { display: grid; grid-template-columns: 300px 1fr; gap: 24px; align-items: start; }
+
+.panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.panel-header h3 { font-size: 15px; font-weight: 700; margin: 0; }
+
+.datasets-panel { background: #fff; border: 1px solid #f0f0f0; border-radius: 10px; padding: 16px; }
+.dataset-list { display: flex; flex-direction: column; gap: 8px; }
+.dataset-item {
+  border: 1px solid #f0f0f0; border-radius: 8px; padding: 10px 12px;
+  cursor: pointer; transition: all 0.15s;
+}
+.dataset-item:hover { border-color: #91caff; background: #f0f8ff; }
+.dataset-item.active { border-color: #1677ff; background: #e6f4ff; }
+.ds-name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.ds-meta { font-size: 11px; color: #999; margin-bottom: 8px; }
+.ds-actions { display: flex; align-items: center; gap: 6px; }
+.jsonl-hint { font-size: 11px; color: #bbb; margin-top: 12px; line-height: 1.6; }
+.jsonl-hint code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+
+.runs-panel { background: #fff; border: 1px solid #f0f0f0; border-radius: 10px; padding: 16px; }
+.runs-list { display: flex; flex-direction: column; gap: 10px; }
+.run-card { border: 1px solid #f0f0f0; border-radius: 8px; overflow: hidden; }
+.run-card.expanded { border-color: #91caff; }
+.run-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; cursor: pointer; transition: background 0.15s;
+}
+.run-header:hover { background: #fafafa; }
+.run-left { display: flex; align-items: center; gap: 8px; }
+.run-name { font-size: 13px; font-weight: 600; }
+.run-right { display: flex; align-items: center; gap: 10px; }
+.run-score { font-size: 13px; font-weight: 700; color: #1677ff; }
+.run-metrics { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; }
+.metric-chip { font-size: 11px; background: #f0f8ff; border: 1px solid #91caff; border-radius: 4px; padding: 2px 8px; color: #1677ff; }
+.run-items { padding: 0 14px 12px; border-top: 1px solid #f0f0f0; }
+.items-table { font-size: 12px; }
+.items-header { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-weight: 600; color: #888; }
+.items-row { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid #fafafa; align-items: flex-start; }
+.item-text { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.metric-high { color: #52c41a; font-weight: 600; }
+.metric-mid  { color: #faad14; }
+.metric-low  { color: #ff4d4f; }
+
+/* Chunk / result modal */
 .chunk-meta-pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .meta-pill { font-size: 12px; color: #888; background: #f5f5f5; border-radius: 4px; padding: 2px 8px; }
 .chunk-content { background: #f8f8f8; border-radius: 6px; padding: 12px 16px; font-size: 13px; line-height: 1.7; max-height: 400px; overflow-y: auto; word-break: break-word; }
@@ -539,4 +1511,133 @@ function formatSize(bytes) {
 .meta-val { flex: 1; padding: 6px 10px; color: #333; word-break: break-all; }
 .meta-row-json { align-items: flex-start; }
 .meta-val-json { flex: 1; padding: 6px 10px; font-size: 11px; margin: 0; background: none; white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto; }
+
+/* PDF preview modal */
+.pdf-modal-title { display: flex; align-items: center; gap: 10px; width: 100%; }
+.pdf-modal-filename { font-size: 14px; font-weight: 600; color: #222; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 500px; }
+.pdf-modal-count { font-size: 12px; color: #999; flex-shrink: 0; }
+
+.pdf-viewer-body { display: flex; flex: 1; overflow: hidden; height: 100%; }
+
+.pdf-left {
+  flex: 1;
+  border-right: 1px solid #f0f0f0;
+  display: flex;
+  flex-direction: column;
+  background: #f0f0f0;
+  overflow: hidden;
+}
+.pdf-embed { flex: 1; overflow-y: auto; }
+.pdf-embed :deep(.vue-pdf-embed__page) { margin: 0 auto; display: block; }
+.pdf-embed :deep(.textLayer) { position: absolute; }
+.pdf-nav {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 6px 0; background: #fff; border-top: 1px solid #f0f0f0; flex-shrink: 0;
+}
+.pdf-nav-label { font-size: 13px; color: #555; min-width: 60px; text-align: center; }
+.pdf-loading { display: flex; align-items: center; justify-content: center; height: 100%; }
+.pdf-error { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #999; text-align: center; padding: 32px; }
+
+.pdf-right {
+  width: 340px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fafafa;
+  overflow: hidden;
+}
+.pdf-chunk-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.pdf-chunk-card {
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.pdf-chunk-card:hover { border-color: #91caff; background: #f0f8ff; }
+.pdf-chunk-card.active { border-color: #1677ff; background: #e6f4ff; box-shadow: 0 0 0 2px rgba(22,119,255,0.15); }
+.pdf-chunk-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+.pdf-chunk-index { font-size: 11px; font-weight: 700; color: #1677ff; background: #e6f4ff; border-radius: 4px; padding: 1px 6px; }
+.pdf-chunk-tokens { font-size: 11px; color: #bbb; margin-left: auto; }
+.pdf-chunk-preview {
+  font-size: 11px; color: #777; line-height: 1.4;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+
+/* Bottom: markdown preview of selected chunk */
+.pdf-chunk-md {
+  flex-shrink: 0;
+  height: 40%;
+  min-height: 120px;
+  border-top: 1px solid #e8e8e8;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  overflow: hidden;
+}
+.pdf-chunk-md-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 12px; font-size: 12px; font-weight: 600; color: #444;
+  background: #f5f5f5; border-bottom: 1px solid #eee; flex-shrink: 0;
+}
+.pdf-chunk-md-tokens { font-size: 11px; color: #aaa; font-weight: 400; }
+.pdf-chunk-md-body {
+  flex: 1; overflow-y: auto; padding: 10px 14px;
+  font-size: 12px; line-height: 1.6;
+}
+
+/* Chunks grid view */
+.chunks-grid-panel {
+  flex: 1; overflow-y: auto; padding: 16px;
+}
+.chunks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.chunks-grid-card {
+  border: 1px solid #f0f0f0; border-radius: 8px; padding: 12px;
+  cursor: pointer; transition: all 0.15s; background: #fff;
+}
+.chunks-grid-card:hover { border-color: #91caff; box-shadow: 0 2px 8px rgba(22,119,255,0.1); }
+.chunks-grid-header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.chunks-grid-content {
+  font-size: 12px; color: #666; line-height: 1.5;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+}
+
+/* Full text preview modal */
+.fulltext-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+  font-size: 14px;
+  line-height: 1.8;
+}
+.fulltext-body :deep(h1) { font-size: 20px; font-weight: 700; margin: 16px 0 8px; }
+.fulltext-body :deep(h2) { font-size: 17px; font-weight: 600; margin: 14px 0 6px; }
+.fulltext-body :deep(h3) { font-size: 15px; font-weight: 600; margin: 12px 0 4px; }
+.fulltext-body :deep(p) { margin: 6px 0; }
+.fulltext-body :deep(hr) { border: none; border-top: 1px dashed #e0e0e0; margin: 16px 0; }
+.fulltext-body :deep(pre) { background: #f5f5f5; border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 12px; }
+.fulltext-body :deep(code) { background: #f0f0f0; border-radius: 3px; padding: 1px 5px; font-size: 12px; }
+.fulltext-body :deep(pre code) { background: none; padding: 0; }
+.fulltext-body :deep(table) { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; }
+.fulltext-body :deep(th), .fulltext-body :deep(td) { border: 1px solid #ddd; padding: 6px 10px; }
+.fulltext-body :deep(th) { background: #f5f5f5; font-weight: 600; }
+.fulltext-body :deep(ul), .fulltext-body :deep(ol) { padding-left: 24px; margin: 4px 0; }
+.fulltext-body :deep(blockquote) { border-left: 3px solid #d0d0d0; margin: 6px 0; padding: 4px 12px; color: #666; }
+.fulltext-body :deep(img) { max-width: 100%; border-radius: 4px; margin: 8px 0; }
 </style>

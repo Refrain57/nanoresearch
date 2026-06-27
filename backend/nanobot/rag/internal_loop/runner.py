@@ -20,6 +20,7 @@ from loguru import logger
 
 # 指代词列表：需要上下文才能理解的词
 PRONOUN_KEYWORDS = ["它", "这个", "那个", "这些", "那些", "其", "上文", "上面", "之前"]
+COMPARISON_KEYWORDS = ["对比", "比较", "差异", "vs", "区别"]
 
 
 def classify_complexity(query: str, context: Optional[str]) -> str:
@@ -248,6 +249,13 @@ class RAGLoopRunner:
                     # No search executed, might be an error
                     break
 
+                # === Phase 2.5: expand_with_sections (comparison queries, before fuse) ===
+                if any(kw in query for kw in COMPARISON_KEYWORDS):
+                    await self.tools.expand_with_sections(
+                        round_id=round_state.round_id,
+                        collection=collection,
+                    )
+
                 # === Phase 3: Fuse + Verify (System Forced) ===
                 fused_chunks = await self.tools.fuse_results(
                     round_id=round_state.round_id,
@@ -283,6 +291,15 @@ class RAGLoopRunner:
                         iterations=iteration + 1,
                         summary=verify_result.get("summary", "Retrieval completed"),
                     )
+
+                # === Phase 3.5: expand_with_neighbors (verify failed, before next iteration) ===
+                neighbor_chunks = await self.tools.expand_with_neighbors(
+                    fused_chunks=fused_chunks,
+                    collection=collection,
+                )
+                if neighbor_chunks:
+                    fused_chunks = fused_chunks + neighbor_chunks
+                    logger.info(f"Expanded chunk pool to {len(fused_chunks)} with neighbors")
 
                 # Not sufficient: inject next_actions
                 next_actions = verify_result.get("next_actions", [])

@@ -92,7 +92,8 @@ class OpenAILLM(BaseLLM):
             if not self.api_version:
                 self.api_version = "2024-02-15-preview"
         else:
-            self.base_url = self.DEFAULT_BASE_URL
+            # Read base_url from settings (e.g. DashScope / other OpenAI-compat endpoints)
+            self.base_url = getattr(settings.llm, 'base_url', None) or self.DEFAULT_BASE_URL
             self._use_azure_auth = False
         
         # Store any additional kwargs for future use

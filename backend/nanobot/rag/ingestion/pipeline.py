@@ -16,9 +16,12 @@ Design Principles:
 - Idempotent: SHA256-based skip for unchanged files
 """
 
+import re
 from pathlib import Path
 from typing import Callable, List, Optional, Dict, Any, Literal
 import time
+
+_IMG_REF_RE = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
 
 from nanobot.rag.core.settings import Settings, load_settings, resolve_path
 from nanobot.rag.core.types import Document, Chunk
@@ -30,6 +33,7 @@ from nanobot.rag.libs.loader.file_integrity import SQLiteIntegrityChecker
 from nanobot.rag.libs.loader.pdf_loader import PdfLoader
 from nanobot.rag.libs.loader.markdown_loader import MarkdownLoader
 from nanobot.rag.libs.loader.marker_loader import MarkerLoader
+from nanobot.rag.libs.loader.mineru_loader import MinerULoader
 from nanobot.rag.libs.loader.base_loader import BaseLoader
 from nanobot.rag.libs.embedding.embedding_factory import EmbeddingFactory
 from nanobot.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
@@ -39,6 +43,7 @@ from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
 from nanobot.rag.ingestion.transform.chunk_refiner import ChunkRefiner
 from nanobot.rag.ingestion.transform.metadata_enricher import MetadataEnricher
 from nanobot.rag.ingestion.transform.image_captioner import ImageCaptioner
+from nanobot.rag.ingestion.transform.doc_metadata_extractor import DocumentMetadataExtractor
 from nanobot.rag.ingestion.embedding.dense_encoder import DenseEncoder
 from nanobot.rag.ingestion.embedding.sparse_encoder import SparseEncoder
 from nanobot.rag.ingestion.embedding.batch_processor import BatchProcessor
@@ -72,7 +77,8 @@ class PipelineResult:
         image_count: int = 0,
         vector_ids: Optional[List[str]] = None,
         error: Optional[str] = None,
-        stages: Optional[Dict[str, Any]] = None
+        stages: Optional[Dict[str, Any]] = None,
+        chunk_payloads: Optional[list] = None,
     ):
         self.success = success
         self.file_path = file_path
@@ -82,6 +88,7 @@ class PipelineResult:
         self.vector_ids = vector_ids or []
         self.error = error
         self.stages = stages or {}
+        self.chunk_payloads = chunk_payloads or []
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -174,7 +181,7 @@ class IngestionPipeline:
         settings: Settings,
         collection: str = "default",
         force: bool = False,
-        pdf_parser: Literal["markitdown", "marker"] = "marker",
+        pdf_parser: Literal["markitdown", "marker", "mineru"] = "marker",
         chunk_strategy_override: Optional[str] = None,
     ):
         """Initialize pipeline with all components.
@@ -184,7 +191,7 @@ class IngestionPipeline:
             collection: Collection name for organizing documents
             force: If True, re-process even if file was previously processed
             pdf_parser: PDF parser to use ("markitdown" or "marker")
-            chunk_strategy_override: Per-KB chunk strategy ("auto", "fixed", "document_based")
+            chunk_strategy_override: Per-KB chunk strategy ("auto", "fixed", "structured")
         """
         self.settings = settings
         self.collection = collection
@@ -216,6 +223,15 @@ class IngestionPipeline:
                     image_storage_dir=str(resolve_path(f"~/.nanoresearch/rag/images/{collection}"))
                 )
                 logger.info("  ✓ PDF Loader: MarkItDown (fallback)")
+        elif pdf_parser == "mineru":
+            mineru_url = getattr(settings, "mineru_url", None) or ""
+            mode = "http" if mineru_url else "local"
+            pdf_loader = MinerULoader(
+                mode=mode,
+                mineru_url=mineru_url,
+                image_storage_dir=str(resolve_path(f"~/.nanoresearch/rag/images/{collection}")),
+            )
+            logger.info(f"  ✓ PDF Loader: MinerU ({mode} mode)")
         else:
             pdf_loader = PdfLoader(
                 extract_images=True,
@@ -235,13 +251,17 @@ class IngestionPipeline:
         self.chunker = DocumentChunker(settings, chunk_strategy_override=chunk_strategy_override)
         logger.info("  ✓ DocumentChunker initialized")
         
+        # Stage 3.5: Document metadata extractor (title/authors/abstract)
+        self.doc_metadata_extractor = DocumentMetadataExtractor(settings)
+        logger.info("  ✓ DocumentMetadataExtractor initialized")
+
         # Stage 4: Transforms
         self.chunk_refiner = ChunkRefiner(settings)
         logger.info(f"  ✓ ChunkRefiner initialized (use_llm={self.chunk_refiner.use_llm})")
         
         self.metadata_enricher = MetadataEnricher(settings)
         logger.info(f"  ✓ MetadataEnricher initialized (use_llm={self.metadata_enricher.use_llm})")
-        
+
         self.image_captioner = ImageCaptioner(settings)
         has_vision = self.image_captioner.llm is not None
         logger.info(f"  ✓ ImageCaptioner initialized (vision_enabled={has_vision})")
@@ -387,9 +407,9 @@ class IngestionPipeline:
                 }, elapsed_ms=_elapsed)
 
             # ─────────────────────────────────────────────────────────────
-            # Stage 2.5: Domain Inference
+            # Stage 2.5: Domain Inference + Document Metadata Extraction
             # ─────────────────────────────────────────────────────────────
-            logger.info("\n🏷️  Stage 2.5: Domain Inference")
+            logger.info("\n🏷️  Stage 2.5: Domain Inference + Metadata Extraction")
             _notify("domain", 3)
 
             file_path_str = str(file_path)
@@ -397,7 +417,14 @@ class IngestionPipeline:
             document.metadata["domain"] = domain
             logger.info(f"  Inferred domain: '{domain}'")
 
-            stages["domain"] = {"domain": domain}
+            document = self.doc_metadata_extractor.extract(document)
+            logger.info(f"  Doc title: {document.metadata.get('title', '(none)')!r:.60}")
+
+            stages["domain"] = {
+                "domain": domain,
+                "title": document.metadata.get("title"),
+                "authors": document.metadata.get("authors"),
+            }
 
             # ─────────────────────────────────────────────────────────────
             # Stage 3: Chunking
@@ -418,6 +445,21 @@ class IngestionPipeline:
                 "chunk_count": len(chunks),
                 "avg_chunk_size": sum(len(c.text) for c in chunks) // len(chunks) if chunks else 0
             }
+
+            # Propagate MinerU image_types from document-level to each chunk.
+            # Each chunk gets only the entries for images it actually references,
+            # keyed by the exact path string that appears in the chunk's markdown.
+            _image_types = document.metadata.pop("image_types", {})
+            if _image_types:
+                for chunk in chunks:
+                    chunk_types: Dict[str, str] = {}
+                    for m in _IMG_REF_RE.finditer(chunk.text):
+                        ref = m.group(1)
+                        img_type = _image_types.get(ref) or _image_types.get(Path(ref).name)
+                        if img_type:
+                            chunk_types[ref] = img_type
+                    if chunk_types:
+                        chunk.metadata["image_types"] = chunk_types
             if trace is not None:
                 trace.record_stage("split", {
                     "method": "recursive",
@@ -456,8 +498,8 @@ class IngestionPipeline:
             enriched_by_llm = sum(1 for c in chunks if c.metadata.get("enriched_by") == "llm")
             enriched_by_rule = sum(1 for c in chunks if c.metadata.get("enriched_by") == "rule")
             logger.info(f"      LLM enriched: {enriched_by_llm}, Rule enriched: {enriched_by_rule}")
-            
-            # 4c: Image Captioning
+
+            # 4c: Image Captioning (entity extraction runs separately via graph/build)
             logger.info("  4c. Image Captioning...")
             chunks = self.image_captioner.transform(chunks, trace)
             captioned = sum(1 for c in chunks if c.metadata.get("image_captions"))
@@ -554,7 +596,7 @@ class IngestionPipeline:
             # 6a: Vector Upsert
             logger.info("  6a. Vector Storage (ChromaDB)...")
             _t0_storage = time.monotonic()
-            vector_ids = self.vector_upserter.upsert(chunks, dense_vectors, trace)
+            vector_ids, chunk_payloads = self.vector_upserter.upsert(chunks, dense_vectors, trace)
             logger.info(f"      Stored {len(vector_ids)} vectors")
 
             # Align BM25 chunk_ids with Chroma vector IDs so the SparseRetriever
@@ -660,7 +702,8 @@ class IngestionPipeline:
                 chunk_count=len(chunks),
                 image_count=len(images),
                 vector_ids=vector_ids,
-                stages=stages
+                stages=stages,
+                chunk_payloads=chunk_payloads,
             )
             
         except Exception as e:

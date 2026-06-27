@@ -17,7 +17,7 @@ Design Principles:
 import hashlib
 from typing import List, Dict, Any, Optional
 
-from nanobot.rag.core.types import Chunk
+from nanobot.rag.core.types import Chunk, ChunkPayload
 from nanobot.rag.core.settings import Settings
 from nanobot.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
 
@@ -75,27 +75,12 @@ class VectorUpserter:
         chunks: List[Chunk],
         vectors: List[List[float]],
         trace: Optional[Any] = None,
-    ) -> List[str]:
+    ) -> tuple[List[str], List[ChunkPayload]]:
         """Upsert chunks with their vectors to vector store.
-        
-        Args:
-            chunks: List of Chunk objects to store.
-            vectors: List of embedding vectors (same order and length as chunks).
-            trace: Optional TraceContext for observability (reserved for Stage F).
-        
+
         Returns:
-            List of generated chunk IDs (same order as input chunks).
-        
-        Raises:
-            ValueError: If chunks and vectors lengths don't match, or if required
-                       metadata fields are missing.
-            RuntimeError: If vector store upsert operation fails.
-        
-        Example:
-            >>> chunks = [Chunk(...), Chunk(...)]
-            >>> vectors = [[0.1, 0.2], [0.3, 0.4]]
-            >>> chunk_ids = upserter.upsert(chunks, vectors)
-            >>> len(chunk_ids) == len(chunks)  # True
+            Tuple of (chunk_ids, chunk_payloads) — payloads carry text and
+            metadata so callers can persist PG rows without reading ChromaDB.
         """
         # Validate input lengths match
         if len(chunks) != len(vectors):
@@ -109,12 +94,13 @@ class VectorUpserter:
         # Generate stable chunk IDs and build records
         records = []
         chunk_ids = []
-        
+        chunk_payloads = []
+
         for chunk, vector in zip(chunks, vectors):
             # Generate deterministic chunk ID
             chunk_id = self._generate_chunk_id(chunk)
             chunk_ids.append(chunk_id)
-            
+
             # Build storage record
             record = {
                 "id": chunk_id,
@@ -126,7 +112,17 @@ class VectorUpserter:
                 },
             }
             records.append(record)
-        
+
+            # Build ChunkPayload for caller-side PG persistence
+            chunk_payloads.append(ChunkPayload(
+                chroma_id=chunk_id,
+                text=chunk.text,
+                token_count=max(1, len(chunk.text) // 4),
+                char_start=chunk.start_offset,
+                char_end=chunk.end_offset,
+                metadata=dict(chunk.metadata),
+            ))
+
         # Perform idempotent upsert
         try:
             self.vector_store.upsert(records, trace=trace)
@@ -134,8 +130,8 @@ class VectorUpserter:
             raise RuntimeError(
                 f"Vector store upsert failed: {str(e)}"
             ) from e
-        
-        return chunk_ids
+
+        return chunk_ids, chunk_payloads
     
     def _generate_chunk_id(self, chunk: Chunk) -> str:
         """Generate deterministic chunk ID from content.
@@ -171,25 +167,14 @@ class VectorUpserter:
         self,
         batches: List[tuple[List[Chunk], List[List[float]]]],
         trace: Optional[Any] = None,
-    ) -> List[str]:
+    ) -> tuple[List[str], List[ChunkPayload]]:
         """Upsert multiple batches of chunks and vectors.
-        
-        This is a convenience method for processing outputs from BatchProcessor.
+
         All batches are flattened and processed in a single upsert operation
         to maintain ordering and reduce vector store round trips.
-        
-        Args:
-            batches: List of (chunks, vectors) tuples from batch processing.
-            trace: Optional TraceContext for observability.
-        
+
         Returns:
-            List of all generated chunk IDs in order.
-        
-        Example:
-            >>> batch1 = ([chunk1, chunk2], [[0.1, 0.2], [0.3, 0.4]])
-            >>> batch2 = ([chunk3], [[0.5, 0.6]])
-            >>> chunk_ids = upserter.upsert_batch([batch1, batch2])
-            >>> len(chunk_ids)  # 3
+            Tuple of (all_chunk_ids, all_chunk_payloads) in order.
         """
         # Flatten all batches
         all_chunks = []

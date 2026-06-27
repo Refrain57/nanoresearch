@@ -124,11 +124,20 @@ class ResearchRefiner:
         synthesis: SynthesisResult,
         iteration: int,
         config: ResearchConfig,
+        prev_coverage: float | None = None,
     ) -> bool:
         """Quick check — can we stop iterating?"""
         if iteration >= config.max_iterations:
             return False
         if synthesis.coverage_score >= config.min_coverage_threshold:
+            return False
+        # Stop if coverage is stagnating or declining — adding more sub-questions
+        # dilutes the average score, creating a mathematical dead loop otherwise.
+        if prev_coverage is not None and prev_coverage - synthesis.coverage_score >= config.coverage_decline_threshold:
+            logger.info(
+                "ResearchRefiner: coverage declining ({:.2f} → {:.2f}), stopping early",
+                prev_coverage, synthesis.coverage_score,
+            )
             return False
         return True
 
@@ -199,15 +208,16 @@ class ResearchRefiner:
             return None
 
         # Apply refinements
-        new_plan = self._apply_refinements(plan, args)
+        new_plan = self._apply_refinements(plan, args, max_new=config.max_new_sub_questions_per_iteration)
         new_plan.iteration = plan.iteration + 1
         return new_plan
 
-    def _apply_refinements(self, plan: ResearchPlan, args: dict[str, Any]) -> ResearchPlan:
+    def _apply_refinements(self, plan: ResearchPlan, args: dict[str, Any], max_new: int = 3) -> ResearchPlan:
         """Apply LLM-suggested refinements to the plan."""
-        # Add new sub-questions
+        # Add new sub-questions, capped to avoid mathematical coverage dilution
         next_id = max((sq.id for sq in plan.sub_questions), default=0) + 1
-        for sq_data in args.get("new_sub_questions") or []:
+        new_sqs = (args.get("new_sub_questions") or [])[:max_new]
+        for sq_data in new_sqs:
             plan.sub_questions.append(
                 SubQuestion(
                     id=next_id,

@@ -38,6 +38,18 @@ def _get_round_manager():
     from nanobot.rag.mcp_server.tools.agentic.round_state import RoundStateManager
     return RoundStateManager
 
+def _get_fetch_section_tool():
+    from nanobot.rag.mcp_server.tools.agentic.retrieval import get_fetch_section_tool
+    return get_fetch_section_tool()
+
+def _get_fetch_neighbors_tool():
+    from nanobot.rag.mcp_server.tools.agentic.retrieval import get_fetch_neighbors_tool
+    return get_fetch_neighbors_tool()
+
+
+# Keywords that trigger fetch_section for comparison queries
+_COMPARISON_SECTION_KEYWORDS = ["对比", "比较", "vs", "comparison", "区别", "差异"]
+
 
 class InternalTools:
     """Wrapper for internal RAG loop tools.
@@ -45,8 +57,10 @@ class InternalTools:
     Provides a unified interface for:
     - plan_query: Query analysis and planning
     - execute_batch: Batch retrieval execution
+    - expand_with_sections: Fetch comparison-relevant sections (before fuse)
     - fuse_results: Result fusion
     - verify_results: Verification
+    - expand_with_neighbors: Context expansion on verify failure (after fuse)
     - rerank_results: Reranking
     - build_citations: Citation building
     """
@@ -294,6 +308,103 @@ class InternalTools:
         except Exception as e:
             logger.error(f"execute_batch failed: {e}")
             return {"error": str(e), "results": {}, "total_chunks": 0}
+
+    async def expand_with_sections(
+        self,
+        round_id: str,
+        collection: str = "default",
+    ) -> int:
+        """Fetch comparison-relevant sections and add to round (call BEFORE fuse).
+
+        Tries each comparison keyword as a section_path filter.
+        New chunks are added to the round state so they participate in fuse.
+
+        Returns:
+            Number of new chunks added to the round.
+        """
+        self._ensure_initialized()
+
+        fetch_tool = _get_fetch_section_tool()
+        added = 0
+
+        for keyword in _COMPARISON_SECTION_KEYWORDS:
+            try:
+                result = await fetch_tool.execute(
+                    section_path=keyword,
+                    collection=collection,
+                    include_neighbors=False,
+                    max_chunks=5,
+                )
+                if result.is_empty:
+                    continue
+
+                data = json.loads(result.content)
+                chunks = data.get("chunks", [])
+                if not chunks:
+                    continue
+
+                import uuid as _uuid
+                task_id = f"section_{keyword}_{_uuid.uuid4().hex[:6]}"
+                self._round_manager.add_results(round_id, task_id, chunks)
+                added += len(chunks)
+                logger.info(f"expand_with_sections: added {len(chunks)} chunks for keyword='{keyword}'")
+            except Exception as e:
+                logger.warning(f"expand_with_sections failed for keyword '{keyword}': {e}")
+
+        return added
+
+    async def expand_with_neighbors(
+        self,
+        fused_chunks: List[Dict[str, Any]],
+        collection: str = "default",
+        top_n: int = 5,
+        window: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Expand context by fetching neighbors of top fused chunks (call AFTER fuse).
+
+        Does NOT touch round state (round is already fused).
+        Returns new chunks only (dedup against existing fused_chunks by chunk_id).
+
+        Args:
+            fused_chunks: Already-fused chunks from the round.
+            collection: Collection name.
+            top_n: How many top chunks to expand around.
+            window: Neighbor window size.
+
+        Returns:
+            List of new chunks not already in fused_chunks.
+        """
+        self._ensure_initialized()
+
+        fetch_tool = _get_fetch_neighbors_tool()
+        existing_ids = {c.get("chunk_id") for c in fused_chunks}
+        new_chunks: List[Dict[str, Any]] = []
+
+        candidates = fused_chunks[:top_n]
+        for chunk in candidates:
+            chunk_id = chunk.get("chunk_id")
+            if not chunk_id:
+                continue
+            try:
+                result = await fetch_tool.execute(
+                    chunk_id=chunk_id,
+                    collection=collection,
+                    window=window,
+                )
+                if result.is_empty:
+                    continue
+
+                data = json.loads(result.content)
+                for c in data.get("chunks", []):
+                    cid = c.get("chunk_id")
+                    if cid and cid not in existing_ids:
+                        existing_ids.add(cid)
+                        new_chunks.append(c)
+            except Exception as e:
+                logger.warning(f"expand_with_neighbors failed for chunk '{chunk_id}': {e}")
+
+        logger.info(f"expand_with_neighbors: added {len(new_chunks)} new neighbor chunks")
+        return new_chunks
 
     async def fuse_results(
         self,

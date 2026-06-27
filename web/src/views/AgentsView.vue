@@ -61,7 +61,13 @@
           <a-textarea v-model:value="createForm.description" :rows="2" />
         </a-form-item>
         <a-form-item label="默认模型">
-          <a-input v-model:value="createForm.default_model" placeholder="例：anthropic/claude-opus-4-5" />
+          <a-auto-complete
+            v-model:value="createForm.default_model"
+            :options="settingsStore.allModelOptions"
+            placeholder="例：anthropic/claude-opus-4-5"
+            allow-clear
+            style="width: 100%"
+          />
         </a-form-item>
         <a-form-item label="最大迭代次数">
           <a-input-number v-model:value="createForm.max_iterations" :min="1" :max="100" style="width: 100%" />
@@ -95,10 +101,12 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import AgentCard from '@/components/AgentCard.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
+import { useSettingsStore } from '@/stores/settings'
 
 const router = useRouter()
 const agentStore = useAgentStore()
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 
 const createOpen = ref(false)
 const creating = ref(false)
@@ -109,6 +117,7 @@ const createForm = reactive({
 onMounted(() => {
   agentStore.fetchList()
   agentStore.fetchSkills()
+  settingsStore.fetchAll()
 })
 
 function openCreate() {

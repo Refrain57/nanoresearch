@@ -49,6 +49,7 @@ class EvalRepository:
                 query=item.get("query", ""),
                 gold_chunk_ids=item.get("gold_chunk_ids"),
                 gold_answer=item.get("gold_answer"),
+                question_type=item.get("question_type"),
             )
             for i, item in enumerate(items)
         ]
@@ -134,6 +135,7 @@ class EvalRepository:
                 generated_answer=item.get("generated_answer"),
                 retrieved_contexts=item.get("retrieved_contexts"),
                 item_metrics=item.get("metrics", {}),
+                question_type=item.get("question_type"),
             )
             for item in items
         ]

@@ -77,6 +77,8 @@ class HybridSearchConfig:
     enable_sparse: bool = True
     parallel_retrieval: bool = True
     metadata_filter_post: bool = True
+    enable_graph_expansion: bool = False
+    graph_expansion_score: float = 0.1
 
 
 @dataclass
@@ -144,6 +146,8 @@ class HybridSearch:
         sparse_retriever: Optional[SparseRetriever] = None,
         fusion: Optional[RRFFusion] = None,
         config: Optional[HybridSearchConfig] = None,
+        session_factory: Any = None,
+        kb_id: Any = None,
     ) -> None:
         """Initialize HybridSearch with components.
         
@@ -164,7 +168,9 @@ class HybridSearch:
         self.dense_retriever = dense_retriever
         self.sparse_retriever = sparse_retriever
         self.fusion = fusion
-        
+        self._session_factory = session_factory
+        self._kb_id = kb_id
+
         # Extract config from settings or use provided/default
         self.config = config or self._extract_config(settings)
         
@@ -207,6 +213,7 @@ class HybridSearch:
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         return_details: bool = False,
+        precomputed_query_embedding: Optional[List[float]] = None,
     ) -> List[RetrievalResult] | HybridSearchResult:
         """Perform hybrid search combining Dense and Sparse retrieval.
         
@@ -257,6 +264,7 @@ class HybridSearch:
             processed_query=processed_query,
             filters=merged_filters,
             trace=trace,
+            precomputed_query_embedding=precomputed_query_embedding,
         )
         
         # Step 3: Handle fallback scenarios
@@ -361,6 +369,7 @@ class HybridSearch:
         processed_query: ProcessedQuery,
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
+        precomputed_query_embedding: Optional[List[float]] = None,
     ) -> Tuple[
         Optional[List[RetrievalResult]],
         Optional[List[RetrievalResult]],
@@ -405,13 +414,13 @@ class HybridSearch:
         if self.config.parallel_retrieval and run_dense and run_sparse:
             # Run in parallel
             dense_results, sparse_results, dense_error, sparse_error = (
-                self._run_parallel_retrievals(processed_query, filters, trace)
+                self._run_parallel_retrievals(processed_query, filters, trace, precomputed_query_embedding)
             )
         else:
             # Run sequentially
             if run_dense:
                 dense_results, dense_error = self._run_dense_retrieval(
-                    processed_query.original_query, filters, trace
+                    processed_query.original_query, filters, trace, precomputed_query_embedding
                 )
             
             if run_sparse:
@@ -426,6 +435,7 @@ class HybridSearch:
         processed_query: ProcessedQuery,
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
+        precomputed_query_embedding: Optional[List[float]] = None,
     ) -> Tuple[
         Optional[List[RetrievalResult]],
         Optional[List[RetrievalResult]],
@@ -456,6 +466,7 @@ class HybridSearch:
                 processed_query.original_query,
                 filters,
                 trace,
+                precomputed_query_embedding,
             )
             
             # Submit sparse retrieval
@@ -491,6 +502,7 @@ class HybridSearch:
         query: str,
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
+        precomputed_query_embedding: Optional[List[float]] = None,
     ) -> Tuple[Optional[List[RetrievalResult]], Optional[str]]:
         """Run dense retrieval with error handling.
         
@@ -512,6 +524,7 @@ class HybridSearch:
                 top_k=self.config.dense_top_k,
                 filters=filters,
                 trace=trace,
+                precomputed_query_embedding=precomputed_query_embedding,
             )
             _elapsed = (time.monotonic() - _t0) * 1000.0
             if trace is not None:
@@ -784,15 +797,20 @@ class HybridSearch:
         expanded_ids = set(r.chunk_id for r in results)
         expanded_results = list(results)
 
-        # Collect neighbor IDs from all results
+        # Collect neighbor IDs from all results — use a seen set to prevent
+        # the same neighbor being requested twice when adjacent main chunks
+        # share a common neighbor (e.g. chunk_3.next == chunk_5.prev == chunk_4).
+        neighbor_ids_seen: set = set()
         neighbor_ids = []
         for result in results:
             prev_id = result.metadata.get("prev_chunk_id")
             next_id = result.metadata.get("next_chunk_id")
-            if prev_id and prev_id not in expanded_ids:
+            if prev_id and prev_id not in expanded_ids and prev_id not in neighbor_ids_seen:
                 neighbor_ids.append(prev_id)
-            if next_id and next_id not in expanded_ids:
+                neighbor_ids_seen.add(prev_id)
+            if next_id and next_id not in expanded_ids and next_id not in neighbor_ids_seen:
                 neighbor_ids.append(next_id)
+                neighbor_ids_seen.add(next_id)
 
         # Fetch neighbor chunks from vector store
         if neighbor_ids and self.dense_retriever is not None:
@@ -870,6 +888,148 @@ class HybridSearch:
             logger.warning(f"Failed to fetch chunks by IDs: {e}")
 
         return []
+
+    async def async_search(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        trace: Optional[Any] = None,
+        return_details: bool = False,
+    ):
+        """Async wrapper around search() that appends graph-expanded results.
+
+        Runs the synchronous search() in an executor, then queries the knowledge
+        graph for cross-document neighbors if enable_graph_expansion is True.
+        Graph neighbors are appended after all normal results (not interleaved).
+        """
+        import asyncio
+        import hashlib
+        import json
+        loop = asyncio.get_running_loop()
+        effective_top_k = top_k or self.config.fusion_top_k
+
+        # Embedding cache: Redis GET → hit → skip embedding API
+        precomputed_embedding = None
+        _redis = None
+        text_hash = hashlib.sha256(query.encode()).hexdigest()[:32]
+        try:
+            from nanobot.bus.redis_client import get_redis
+            from nanobot.bus.redis_keys import RedisKeys
+            _redis = get_redis()
+            cached = await _redis.get(RedisKeys.embedding(text_hash))
+            if cached:
+                precomputed_embedding = json.loads(cached)
+                logger.debug(
+                    "embedding cache hit for hash %s",
+                    text_hash,
+                    extra={"event": "embedding_cache_hit", "cache_layer": "embedding_cache"},
+                )
+        except Exception:
+            pass
+
+        # Cache miss: compute embedding in executor before search()
+        if precomputed_embedding is None and self.dense_retriever is not None:
+            logger.debug(
+                "embedding cache miss for hash %s — computing",
+                text_hash,
+                extra={"event": "embedding_cache_miss", "cache_layer": "embedding_cache"},
+            )
+            try:
+                vecs = await loop.run_in_executor(
+                    None, self.dense_retriever.embedding_client.embed, [query]
+                )
+                precomputed_embedding = vecs[0]
+                if _redis is not None:
+                    from nanobot.bus.redis_keys import RedisKeys
+                    await _redis.set(
+                        RedisKeys.embedding(text_hash),
+                        json.dumps(precomputed_embedding),
+                        ex=RedisKeys.EMBEDDING_TTL,
+                    )
+            except Exception:
+                pass
+
+        base = await loop.run_in_executor(
+            None, lambda: self.search(query, top_k, filters, trace, return_details, precomputed_embedding)
+        )
+        results: List[RetrievalResult] = base.results if return_details else base
+
+        if (
+            self.config.enable_graph_expansion
+            and self._session_factory is not None
+            and self._kb_id is not None
+        ):
+            try:
+                graph_extra = await self._expand_with_graph(results)
+                results = results + graph_extra
+            except Exception as e:
+                logger.warning("Graph expansion failed, skipping: {}", e)
+
+        results = results[:effective_top_k]
+        if return_details:
+            base.results = results
+            return base
+        return results
+
+    async def _expand_with_graph(
+        self,
+        seed_results: List[RetrievalResult],
+        top_k: int = 3,
+    ) -> List[RetrievalResult]:
+        """Query knowledge graph for chunks sharing entities with seed results.
+
+        Returns additional RetrievalResult objects (cross-document neighbors)
+        that are not already in seed_results. Score is fixed at
+        config.graph_expansion_score so they always rank below normal results.
+        """
+        from nanobot.storage.repositories.graph_repo import GraphRepository
+        from nanobot.storage.repositories.knowledge_repo import KnowledgeRepository
+
+        kb_repo = KnowledgeRepository(self._session_factory)
+        graph_repo = GraphRepository(self._session_factory)
+
+        # chroma_id (str) → PG chunk rows
+        chroma_ids = [r.chunk_id for r in seed_results if r.chunk_id]
+        if not chroma_ids:
+            return []
+
+        pg_chunks = await kb_repo.get_chunks_by_chroma_ids(chroma_ids)
+        seed_pg_ids = [c.id for c in pg_chunks]
+        if not seed_pg_ids:
+            return []
+
+        neighbors = await graph_repo.get_neighbor_chunks_via_entities(
+            seed_pg_ids, self._kb_id, top_k=top_k
+        )
+        if not neighbors:
+            return []
+
+        # str keys for safe comparison regardless of UUID vs str type
+        entity_map = {str(cid): ename for cid, ename in neighbors}
+        neighbor_pg_ids = [cid for cid, _ in neighbors]
+
+        neighbor_chunks = await kb_repo.get_chunks_by_ids(neighbor_pg_ids)
+
+        existing_chroma = {r.chunk_id for r in seed_results}
+        extra: List[RetrievalResult] = []
+        for chunk in neighbor_chunks:
+            chroma_id = chunk.chroma_id or str(chunk.id)
+            if chroma_id in existing_chroma:
+                continue
+            existing_chroma.add(chroma_id)
+            extra.append(RetrievalResult(
+                chunk_id=chroma_id,
+                score=self.config.graph_expansion_score,
+                text=chunk.content,
+                metadata={
+                    **(chunk.chunk_metadata or {}),
+                    "is_graph_neighbor": True,
+                    "graph_via_entity": entity_map.get(str(chunk.id), ""),
+                },
+            ))
+
+        return extra
 
 
 def create_hybrid_search(

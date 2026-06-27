@@ -90,6 +90,18 @@ async def check_schema_migrations() -> None:
         ("optimization_proposals", "id"),
         # Phase 0: context trace (migrate_phase0_context_trace.sql)
         ("agent_run_snapshots", "context_trace"),
+        # Phase 1: structured root-cause pointer + tunable version registry
+        ("agent_run_snapshots", "classification_layer"),
+        ("agent_run_snapshots", "classification_target_kind"),
+        ("agent_run_snapshots", "classification_target_id"),
+        ("tunable_object_versions", "id"),
+        # Phase 2: regression set separation (migrate_phase2_health_set.sql)
+        ("agent_test_cases", "set_kind"),
+        ("agent_test_cases", "tool_recordings"),
+        ("kb_documents", "content_hash"),
+        # Phase 5: baseline anchor + deployment gate (migrate_phase5_baseline_gate.sql)
+        ("optimization_proposals", "baseline_score"),
+        ("optimization_proposals", "baseline_version_id"),
     ]
     missing = []
     async with _engine.connect() as conn:

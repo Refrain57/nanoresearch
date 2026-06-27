@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import tempfile
 import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from nanobot.server.middleware.auth import get_current_user
@@ -148,6 +150,16 @@ async def upload_document(
     repo = _kb_repo(request)
 
     content = await file.read()
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    # Dedup: if an indexed copy already exists, skip without creating a new record.
+    existing = await repo.find_by_content_hash(uuid.UUID(kb_id), content_hash)
+    if existing is not None and existing.status == "indexed":
+        return JSONResponse(
+            status_code=200,
+            content={"status": "skipped_duplicate", **_doc_to_dict(existing)},
+        )
+
     suffix = os.path.splitext(file.filename or "upload")[1] or ".bin"
 
     # Save to temp file; background task takes ownership and deletes it
@@ -163,6 +175,7 @@ async def upload_document(
         file_size=len(content),
         mime_type=file.content_type,
         pdf_parser=pdf_parser,
+        content_hash=content_hash,
     )
 
     await request.app.state.arq_pool.enqueue_job(
@@ -175,6 +188,7 @@ async def upload_document(
         chunk_strategy=kb.chunk_strategy or "auto",
         pdf_parser=pdf_parser,
         uid=uid,
+        content_hash=content_hash,
     )
     return _doc_to_dict(doc)
 
@@ -338,10 +352,12 @@ async def get_document_file(
     if not media_type:
         guessed, _ = mimetypes.guess_type(doc.filename or "")
         media_type = guessed or "application/octet-stream"
+    from urllib.parse import quote
+    encoded_name = quote(doc.filename or "", safe="")
     return FileResponse(
         doc.file_path,
         media_type=media_type,
-        headers={"Content-Disposition": f"inline; filename=\"{doc.filename}\""},
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_name}"},
     )
 
 

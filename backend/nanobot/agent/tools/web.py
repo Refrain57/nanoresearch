@@ -76,11 +76,8 @@ class WebSearchTool(Tool):
     """Search the web using configured provider."""
 
     name = "web_search"
-    description = (
-        "Search the web for current information, news, and quick fact-checking. "
-        "For in-depth knowledge questions requiring synthesis and multi-source analysis, "
-        "first check RAG (research_claims/research_insights), then use the research tool if needed."
-    )
+    description = "Search the web for current information, news, and quick fact-checking."
+    side_effect = False  # read-only network query
     parameters = {
         "type": "object",
         "properties": {
@@ -233,6 +230,7 @@ class WebFetchTool(Tool):
 
     name = "web_fetch"
     description = "Fetch URL and extract readable content (HTML → markdown/text)."
+    side_effect = False  # read-only network fetch
     parameters = {
         "type": "object",
         "properties": {

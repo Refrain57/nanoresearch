@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,9 +26,19 @@ class EvalRunConfig:
     test_case_ids: list[uuid.UUID] | None = None
     use_judge: bool = False
     judge_model: str = "claude-sonnet-4-6"
+    judge_consistency_runs: int = 3    # set to 1 to skip consistency voting
     sandbox_mode: str = "record"  # passthrough / record / replay
     max_iterations: int = 20           # lower than production to save tokens
     baseline_run_id: uuid.UUID | None = None
+    concurrency: int = 5               # concurrent test cases
+    enable_flywheel: bool = False
+    flywheel_thresholds: dict = field(default_factory=lambda: {
+        "retrieval_failure": 0.20,
+        "hallucination": 0.15,
+        "reasoning_failure": 0.25,
+        "tool_skip": 0.30,
+    })
+    flywheel_adversarial_per_run: int = 0  # 0 = disabled; N = generate N adversarial cases per run
 
 
 @dataclass
@@ -55,12 +66,14 @@ class TestRunner:
         repo: "AgentEvalRepository",
         model: str | None = None,
         judge: "LLMJudge | None" = None,
+        embedding_fn: Any | None = None,  # Callable[[list[str]], list[list[float]]]
     ) -> None:
         self._provider = provider
         self._tools = tools
         self._repo = repo
         self._model = model or provider.get_default_model()
         self._judge = judge
+        self._embedding_fn = embedding_fn
 
     async def run_all(
         self,
@@ -100,8 +113,7 @@ class TestRunner:
             )
             return EvalRunSummary(eval_run_id=eval_run_id, total=0, passed=0, failed=0, avg_scores={})
 
-        runner = AgentRunner(self._provider)
-        evaluator = RuleEvaluator()
+        evaluator = RuleEvaluator(embedding_fn=self._embedding_fn)
         detector = BadcaseDetector(p95_tokens=None)
 
         # Auto-calibrate judge before scoring if there are calibration samples
@@ -151,148 +163,210 @@ class TestRunner:
                             cal_result.mad, eval_run_id,
                         )
 
+        semaphore = asyncio.Semaphore(config.concurrency)
+        lock = asyncio.Lock()
         snapshot_ids: list[uuid.UUID] = []
         all_scores: list[dict[str, float]] = []
         passed_count = 0
         failed_count = 0
+        completed_count = 0
+        total = len(test_cases)
 
-        for idx, tc in enumerate(test_cases, 1):
-            logger.info("TestRunner: [{}/{}] running test case {} — {!r}", idx, len(test_cases), tc.id, (tc.user_input or "")[:60])
-            try:
-                # Wrap tools with sandbox if requested
-                if config.sandbox_mode == "passthrough":
-                    tools = self._tools
-                else:
-                    tools = SandboxedToolRegistry(self._tools, mode=config.sandbox_mode)
+        async def run_one(idx: int, tc: Any) -> None:
+            nonlocal passed_count, failed_count, completed_count
+            from nanobot.agent.runner import AgentRunner, AgentRunSpec
+            from nanobot.agent.hook import AgentHook, AgentHookContext
 
-                collector = RunSnapshotCollector()
-                initial_messages = []
-                if tc.session_history:
-                    initial_messages.extend(tc.session_history)
-                initial_messages.append({"role": "user", "content": tc.user_input})
-
-                from nanobot.agent.hook import AgentHook, AgentHookContext
-
-                class _TtftHook(AgentHook):
-                    def wants_streaming(self) -> bool:
-                        return True
-
-                    async def on_stream(self, context: AgentHookContext, delta: str) -> None:
-                        collector.on_first_token()
-
-                spec = AgentRunSpec(
-                    initial_messages=initial_messages,
-                    tools=tools,
-                    model=self._model,
-                    max_iterations=config.max_iterations,
-                    concurrent_tools=True,
-                    snapshot_collector=collector,
-                    hook=_TtftHook(),
-                )
-
-                result = await runner.run(spec)
-
-                if result.stop_reason in ("error", "tool_error", "consecutive_failures"):
-                    status = "failed"
-                elif result.stop_reason == "max_iterations":
-                    status = "max_iterations"
-                else:
-                    status = "success"
-
-                snapshot_data = collector.build(
-                    run_id=str(uuid.uuid4()),
-                    user_input=tc.user_input,
-                    final_response=result.final_content,
-                    status=status,
-                )
-
-                # Rule scoring
-                rule_scores = evaluator.evaluate(snapshot_data, tc)
-                passed, failed_dims = evaluator.is_passed(rule_scores)
-
-                # LLM judge (optional)
-                judge_scores: dict[str, float] = {}
-                judge_raw_output: str | None = None
-                hallucination: float | None = None
-                if config.use_judge and self._judge is not None:
-                    judge_scores, judge_raw_output = await self._judge.score(
-                        snapshot_data,
-                        tc,
-                        session_history=tc.session_history or None,
-                    )
-                    # hallucination is non-blocking — exclude from pass/fail
-                    hallucination = judge_scores.pop("hallucination", None)
-
-                combined_scores = {**rule_scores, **judge_scores}
-
-                # Badcase detection
-                detection = detector.detect(snapshot_data, combined_scores)
-
-                # Persist tool recordings when in record mode
-                tool_recordings_json: str | None = None
-                if config.sandbox_mode == "record" and hasattr(tools, "export_recordings"):
-                    tool_recordings_json = tools.export_recordings()
-
-                snap_id = await self._repo.save_snapshot(
-                    snapshot_data,
-                    uid=uid,
-                    eval_run_id=eval_run_id,
-                    system_prompt_version="production",
-                    tool_recordings=tool_recordings_json,
-                )
-                judge_metadata: dict[str, Any] | None = None
-                if judge_raw_output is not None:
-                    judge_metadata = {"judge_model": config.judge_model, "raw_output": judge_raw_output}
-                    if hallucination is not None:
-                        judge_metadata["hallucination"] = hallucination
-                await self._repo.write_scores(
-                    snap_id, combined_scores, passed, failed_dims,
-                    judge_metadata=judge_metadata,
-                )
-                if detection:
-                    trigger, category = detection
-                    await self._repo.mark_badcase(snap_id, trigger, category)
-
-                await self._repo.touch_test_case(tc.id)
-
-                snapshot_ids.append(snap_id)
-                all_scores.append(combined_scores)
-                if passed:
-                    passed_count += 1
-                else:
-                    failed_count += 1
-
-            except Exception as exc:
-                import traceback
-                tb = traceback.format_exc()
-                logger.warning(
-                    "TestRunner: test case {} failed with exception:\n{}",
-                    tc.id, tb,
-                )
-                failed_count += 1
-                # Save a failed snapshot so the eval run detail always has records
+            async with semaphore:
+                logger.info("TestRunner: [{}/{}] running test case {} — {!r}", idx, total, tc.id, (tc.user_input or "")[:60])
+                runner = AgentRunner(self._provider)
                 try:
-                    error_response = f"[EXCEPTION] {type(exc).__name__}: {exc}"
+                    if config.sandbox_mode == "passthrough":
+                        tools = self._tools
+                    else:
+                        tools = SandboxedToolRegistry(self._tools, mode=config.sandbox_mode)
+
+                    collector = RunSnapshotCollector()
+                    initial_messages = []
+                    if tc.session_history:
+                        initial_messages.extend(tc.session_history)
+                    initial_messages.append({"role": "user", "content": tc.user_input})
+
+                    class _TtftHook(AgentHook):
+                        def wants_streaming(self) -> bool:
+                            return True
+
+                        async def on_stream(self, context: AgentHookContext, delta: str) -> None:
+                            collector.on_first_token()
+
+                    spec = AgentRunSpec(
+                        initial_messages=initial_messages,
+                        tools=tools,
+                        model=self._model,
+                        max_iterations=config.max_iterations,
+                        concurrent_tools=True,
+                        snapshot_collector=collector,
+                        hook=_TtftHook(),
+                    )
+
+                    result = await runner.run(spec)
+
+                    if result.stop_reason in ("error", "tool_error", "consecutive_failures"):
+                        status = "failed"
+                    elif result.stop_reason == "max_iterations":
+                        status = "max_iterations"
+                    else:
+                        status = "success"
+
                     snapshot_data = collector.build(
                         run_id=str(uuid.uuid4()),
                         user_input=tc.user_input,
-                        final_response=error_response,
-                        status="failed",
+                        final_response=result.final_content,
+                        status=status,
                     )
+
+                    if tc.dataset_type == "calibration":
+                        # Calibration cases are for judge training only — skip rule eval.
+                        # passed=None excludes them from pass/fail statistics.
+                        rule_scores: dict[str, float] = {}
+                        passed: bool | None = None
+                        failed_dims: list[str] = []
+                    else:
+                        rule_scores = await evaluator.evaluate(snapshot_data, tc)
+                        passed, failed_dims = evaluator.is_passed(rule_scores, tc)
+
+                    judge_scores: dict[str, float] = {}
+                    judge_raw_output: str | None = None
+                    judge_low_confidence: bool = False
+                    if config.use_judge and self._judge is not None:
+                        if config.judge_consistency_runs > 1:
+                            judge_scores, judge_raw_output, judge_low_confidence = (
+                                await self._judge.score_with_consistency(
+                                    snapshot_data, tc,
+                                    session_history=tc.session_history or None,
+                                    runs=config.judge_consistency_runs,
+                                )
+                            )
+                        else:
+                            judge_scores, judge_raw_output = await self._judge.score(
+                                snapshot_data, tc,
+                                session_history=tc.session_history or None,
+                            )
+
+                    combined_scores = {**rule_scores, **judge_scores}
+
+                    detections = detector.detect(snapshot_data, combined_scores, passed=passed, tc=tc)
+
+                    tool_recordings_json: str | None = None
+                    if config.sandbox_mode == "record" and hasattr(tools, "export_recordings"):
+                        tool_recordings_json = tools.export_recordings()
+
                     snap_id = await self._repo.save_snapshot(
                         snapshot_data, uid=uid, eval_run_id=eval_run_id,
                         system_prompt_version="production",
+                        tool_recordings=tool_recordings_json,
                     )
-                    await self._repo.write_scores(snap_id, {}, False, ["exception"])
-                    snapshot_ids.append(snap_id)
-                except Exception:
-                    pass
-                # Write error back to eval run
-                try:
-                    error_msg = f"[{tc.name or str(tc.id)}] {type(exc).__name__}: {exc}\n{tb}"
-                    await self._repo.update_eval_run(eval_run_id, error=error_msg[:2000])
-                except Exception:
-                    pass
+                    judge_metadata: dict[str, Any] | None = None
+                    if judge_raw_output is not None:
+                        judge_metadata = {"judge_model": config.judge_model, "raw_output": judge_raw_output}
+                        if judge_low_confidence:
+                            judge_metadata["low_confidence"] = True
+                    await self._repo.write_scores(
+                        snap_id, combined_scores, passed, failed_dims,
+                        judge_metadata=judge_metadata,
+                    )
+                    # mark_badcase uses the primary detection only (quality > tool_skip).
+                    # tool_skip is persisted separately via failed_dimensions JSONB.
+                    if detections:
+                        trigger, category = detections[0]
+                        await self._repo.mark_badcase(snap_id, trigger, category)
+
+                    await self._repo.touch_test_case(tc.id)
+
+                    # ---- [TEMPORARY] Write to production conversation tables ----
+                    try:
+                        from nanobot.storage.database import get_session_factory
+                        from nanobot.storage.repositories.conversation_repo import ConversationRepository
+                        from nanobot.storage.repositories.run_repo import RunRepository
+
+                        _sf = get_session_factory()
+                        conv_repo = ConversationRepository(_sf)
+                        run_repo = RunRepository(_sf)
+                        session_key = f"eval:{tc.id}"
+                        conv = await conv_repo.create(
+                            key=session_key, uid=uid,
+                            title=f"[Eval] {tc.name}",
+                        )
+                        msgs = [{"role": "user", "content": tc.user_input}]
+                        if result.final_content:
+                            msgs.append({"role": "assistant", "content": result.final_content})
+                        await conv_repo.replace_messages(conv.id, msgs)
+                        ar = await run_repo.create(conversation_id=conv.id, uid=uid)
+                        await run_repo.update(
+                            ar.id, status=status,
+                            tool_calls=snapshot_data.tool_call_chain or [],
+                            tokens_used={
+                                "input": snapshot_data.total_input_tokens,
+                                "output": snapshot_data.total_output_tokens,
+                            },
+                            duration_ms=int(snapshot_data.total_duration_ms) if snapshot_data.total_duration_ms else None,
+                            finished_at=_utcnow(),
+                        )
+                    except Exception:
+                        pass
+                    # ---- END TEMPORARY ----
+
+                    async with lock:
+                        snapshot_ids.append(snap_id)
+                        all_scores.append(combined_scores)
+                        if passed is True:
+                            passed_count += 1
+                        elif passed is False:
+                            failed_count += 1
+                        # passed=None (calibration) is excluded from both counts.
+                        completed_count += 1
+                        if completed_count % 5 == 0 or completed_count == total:
+                            await self._repo.update_eval_run(
+                                eval_run_id,
+                                passed=passed_count,
+                                failed=failed_count,
+                            )
+
+                except Exception as exc:
+                    import traceback
+                    tb = traceback.format_exc()
+                    logger.warning(
+                        "TestRunner: test case {} failed with exception:\n{}",
+                        tc.id, tb,
+                    )
+                    async with lock:
+                        failed_count += 1
+                        completed_count += 1
+                    try:
+                        error_response = f"[EXCEPTION] {type(exc).__name__}: {exc}"
+                        snapshot_data = collector.build(
+                            run_id=str(uuid.uuid4()),
+                            user_input=tc.user_input,
+                            final_response=error_response,
+                            status="failed",
+                        )
+                        snap_id = await self._repo.save_snapshot(
+                            snapshot_data, uid=uid, eval_run_id=eval_run_id,
+                            system_prompt_version="production",
+                        )
+                        await self._repo.write_scores(snap_id, {}, False, ["exception"])
+                        async with lock:
+                            snapshot_ids.append(snap_id)
+                    except Exception:
+                        pass
+                    try:
+                        error_msg = f"[{tc.name or str(tc.id)}] {type(exc).__name__}: {exc}\n{tb}"
+                        await self._repo.update_eval_run(eval_run_id, error=error_msg[:2000])
+                    except Exception:
+                        pass
+
+        tasks = [run_one(i, tc) for i, tc in enumerate(test_cases, 1)]
+        await asyncio.gather(*tasks)
 
         # Aggregate average scores per dimension
         avg_scores: dict[str, float] = {}
@@ -335,6 +409,15 @@ class TestRunner:
                         )
             except Exception as _exc:
                 logger.warning("TestRunner: regression comparison failed: {}", _exc)
+
+        # Data flywheel: generate pending cases from badcase patterns
+        if config.enable_flywheel:
+            try:
+                from nanobot.eval.data_flywheel import DataFlywheel, run_flywheel
+                flywheel = DataFlywheel(self._provider, model=config.judge_model)
+                await run_flywheel(flywheel, self._repo, eval_run_id, uid, config)
+            except Exception as _exc:
+                logger.warning("TestRunner: flywheel post-processing failed: {}", _exc)
 
         return EvalRunSummary(
             eval_run_id=eval_run_id,

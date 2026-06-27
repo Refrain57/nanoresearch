@@ -11,10 +11,11 @@ All tools are atomic and composable by agents for iterative retrieval.
 """
 
 from nanobot.rag.mcp_server.tools.agentic import (
-    # Retrieval
-    RetrieveDenseTool,
-    RetrieveSparseTool,
-    RetrieveHybridTool,
+    # Retrieval (internal loop tools)
+    FetchSectionTool,
+    FetchNeighborsTool,
+    get_fetch_section_tool,
+    get_fetch_neighbors_tool,
     register_retrieval_tools,
     # Fusion
     FuseResultsTool,
@@ -55,10 +56,11 @@ from nanobot.rag.mcp_server.tools.rag_search import (
 )
 
 __all__ = [
-    # Retrieval
-    "RetrieveDenseTool",
-    "RetrieveSparseTool",
-    "RetrieveHybridTool",
+    # Retrieval (internal loop tools)
+    "FetchSectionTool",
+    "FetchNeighborsTool",
+    "get_fetch_section_tool",
+    "get_fetch_neighbors_tool",
     "register_retrieval_tools",
     # Fusion
     "FuseResultsTool",

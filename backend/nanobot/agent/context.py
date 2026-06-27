@@ -107,7 +107,8 @@ class ContextBuilder:
             content = "\n".join(lines)
             return self._truncate_to_budget(content, token_budget)
 
-        except Exception:
+        except Exception as e:
+            logger.warning("build_history_context: memory retrieval failed, degrading to empty. uid={!r} query={!r} error={!r}", uid, query[:120], e)
             return ""
 
     def build_system_prompt(
@@ -269,14 +270,14 @@ Skills with available="false" need dependencies installed first - you can try in
                 name = kb.get("name", "")
                 desc = kb.get("description", "")
                 kid = kb.get("id", "")
-                line = f"- **{name}**"
+                line = f"- **{name}** (kb_id: `{kid}`)"
                 if desc:
-                    line += f"：{desc}"
-                line += f"（ID: `{kid}`）"
+                    line += f" — {desc}"
                 kb_lines.append(line)
             kb_lines.extend([
                 "",
                 "To search a specific knowledge base, use `rag_search` with its `kb_id` parameter.",
+                "Pass the exact kb_id value shown above. Do NOT prepend the KB name — the ID is the UUID alone.",
                 "If you don't know which KB to use, pick the one whose description best matches the user's question.",
             ])
             parts.append("\n".join(kb_lines))

@@ -189,6 +189,16 @@ class Tool(ABC):
                 )
         return errors
 
+    @property
+    def side_effect(self) -> bool:
+        """Whether this tool modifies external state. Default True (conservative).
+
+        Override to False only for confirmed read-only query tools.
+        Misclassifying a write tool as query would cause real external writes during
+        sandbox evaluation — the cost is much higher than the reverse error.
+        """
+        return True
+
     def to_schema(self) -> dict[str, Any]:
         """Convert tool to OpenAI function schema format."""
         return {

@@ -621,16 +621,17 @@ class ChromaStore(BaseVectorStore):
         # Ensure all IDs are strings
         str_ids = [str(id_) for id_ in ids]
         
-        try:
-            # ChromaDB's get method retrieves records by IDs
-            results = self.collection.get(
-                ids=str_ids,
-                include=["metadatas", "documents"]
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to get records by IDs from ChromaDB: {e}"
-            ) from e
+        with self._acquire_lock():
+            try:
+                # ChromaDB's get method retrieves records by IDs
+                results = self.collection.get(
+                    ids=str_ids,
+                    include=["metadatas", "documents"]
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to get records by IDs from ChromaDB: {e}"
+                ) from e
         
         # Build a mapping from ID to result for O(1) lookup
         id_to_result: Dict[str, Dict[str, Any]] = {}

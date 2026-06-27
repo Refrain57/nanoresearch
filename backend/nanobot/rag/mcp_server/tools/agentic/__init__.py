@@ -13,11 +13,10 @@ Tools are designed to be composed by agents for iterative retrieval.
 """
 
 from nanobot.rag.mcp_server.tools.agentic.retrieval import (
-    RetrieveDenseTool,
-    RetrieveSparseTool,
-    RetrieveHybridTool,
     FetchSectionTool,
     FetchNeighborsTool,
+    get_fetch_section_tool,
+    get_fetch_neighbors_tool,
     register_tools as register_retrieval_tools,
 )
 
@@ -81,12 +80,11 @@ def register_all_agentic_tools(protocol_handler) -> None:
 
 
 __all__ = [
-    # Retrieval
-    "RetrieveDenseTool",
-    "RetrieveSparseTool",
-    "RetrieveHybridTool",
+    # Retrieval (internal loop tools, not MCP-exposed)
     "FetchSectionTool",
     "FetchNeighborsTool",
+    "get_fetch_section_tool",
+    "get_fetch_neighbors_tool",
     "register_retrieval_tools",
     # Fusion
     "FuseResultsTool",

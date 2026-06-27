@@ -15,13 +15,59 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function selectConversation(id) {
-    currentConvId.value = id
-    messages.value = await getMessages(id, { limit: 100 })
+    streaming.value = false
     streamingText.value = ''
+    currentConvId.value = id
+    messages.value = []
+    try {
+      const raw = await getMessages(id, { limit: 100 })
+      // Guard against race: if user switched again while fetching, discard stale result
+      if (currentConvId.value !== id) {
+        console.warn('[chat] selectConversation stale result discarded: wanted', id, 'but now on', currentConvId.value)
+        return
+      }
+      console.log('[chat] selectConversation loaded', raw.length, 'msgs for', id,
+        raw.map(m => ({ role: m.role, contentType: typeof m.content, hasToolCalls: !!(m.content?.tool_calls?.length) }))
+      )
+      const mapped = raw.map(m => {
+        const stored = m.content
+        const text = typeof stored === 'string'
+          ? stored
+          : (stored?.text ?? stored?.content ?? '')
+        const tool_calls = m.tool_calls ?? stored?.tool_calls
+        return {
+          ...m,
+          content: { text },
+          tool_calls,
+          toolCalls: _normalizeToolCalls(tool_calls),
+        }
+      })
+
+      // Merge tool-call-only assistant messages into the following text assistant message.
+      // DB stores them as separate messages (tool_calls message then text message), but
+      // the streaming path combines them into one — this makes loaded history match.
+      const merged = []
+      let pendingTc = null
+      for (const m of mapped) {
+        if (m.role === 'assistant' && !m.content.text && m.toolCalls?.length) {
+          pendingTc = m.toolCalls // hold, skip this message
+        } else if (m.role === 'assistant' && m.content.text) {
+          merged.push(pendingTc ? { ...m, toolCalls: pendingTc } : m)
+          pendingTc = null
+        } else {
+          merged.push(m)
+          // non-assistant messages (tool results etc.) don't reset pendingTc
+        }
+      }
+      messages.value = merged
+    } catch (e) {
+      console.error('[chat] selectConversation failed:', e)
+      if (currentConvId.value === id) messages.value = []
+    }
   }
 
-  async function newConversation(title = null, agentId = null) {
-    const conv = await createConversation({ title, agent_id: agentId })
+  async function newConversation(title = null, agentId = null, model = null) {
+    const conv = await createConversation({ title, agent_id: agentId, model })
     conversations.value.unshift(conv)
     return conv
   }
@@ -35,9 +81,9 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function sendMessage(content) {
+  async function sendMessage(content, ragMode = 'agentic', kbId = null) {
     if (!currentConvId.value) return null
-    const run = await createRun(currentConvId.value, content)
+    const run = await createRun(currentConvId.value, content, ragMode, kbId)
     streaming.value = true
     streamingText.value = ''
     return run
@@ -47,12 +93,13 @@ export const useChatStore = defineStore('chat', () => {
     streamingText.value += chunk
   }
 
-  function finalizeStream() {
+  function finalizeStream(toolCalls = []) {
     if (streamingText.value) {
       messages.value.push({
         id: `stream-${Date.now()}`,
         role: 'assistant',
         content: { text: streamingText.value },
+        toolCalls: toolCalls.length ? [...toolCalls] : undefined,
         seq: messages.value.length
       })
     }
@@ -66,3 +113,13 @@ export const useChatStore = defineStore('chat', () => {
     sendMessage, appendDelta, finalizeStream
   }
 })
+
+function _normalizeToolCalls(tc) {
+  if (!tc || !tc.length) return undefined
+  return tc.map(t => ({
+    name: t.function?.name || t.name || '?',
+    input: (() => { try { return JSON.parse(t.function?.arguments || '{}') } catch { return {} } })(),
+    output_summary: '',
+    status: 'success',
+  }))
+}

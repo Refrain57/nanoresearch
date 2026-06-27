@@ -14,11 +14,16 @@ Design Principles:
 """
 
 import json
+import logging
 import math
 import os
-import threading
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
+
+from filelock import FileLock
+
+logger = logging.getLogger(__name__)
 
 
 class BM25Indexer:
@@ -93,7 +98,6 @@ class BM25Indexer:
         self.index_dir = Path(index_dir)
         self.k1 = k1
         self.b = b
-        self._lock = threading.Lock()  # Lock for concurrent write protection
 
         # In-memory index structure
         self._index: Dict[str, Dict[str, Any]] = {}
@@ -211,18 +215,25 @@ class BM25Indexer:
         try:
             with open(index_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
-            # Validate structure
+
             if "metadata" not in data or "index" not in data:
-                raise ValueError(f"Invalid index file structure: missing metadata or index")
-            
+                raise ValueError("invalid structure: missing metadata or index")
+
             self._metadata = data["metadata"]
             self._index = data["index"]
-            
             return True
-            
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Corrupted index file at {index_path}: {e}")
+
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(
+                f"BM25 index corrupted at {index_path}, rebuilding from scratch: {e}"
+            )
+            try:
+                index_path.unlink()
+            except Exception:
+                pass
+            self._metadata = {}
+            self._index = {}
+            return False
     
     def query(
         self,
@@ -336,32 +347,35 @@ class BM25Indexer:
 
         self._validate_term_stats(term_stats)
 
-        # Load existing index (ignore if missing – will start fresh)
-        if not self._index:
+        with self._collection_filelock(collection):
+            # Force reload under lock to pick up any writes from other instances.
+            self._index = {}
+            self._metadata = {}
             self.load(collection)
 
-        # Remove stale postings for this document (re-ingest case)
-        if doc_id and self._index:
-            self.remove_document(doc_id, collection)
+            # Remove stale postings for this document (re-ingest case).
+            # Use inplace helper to avoid an extra save within the same lock.
+            if doc_id and self._index:
+                self._remove_postings_inplace(doc_id)
 
-        # Reconstruct existing term_stats from current index postings
-        existing_stats: Dict[str, Dict[str, Any]] = {}  # chunk_id -> stat
-        for term, term_data in self._index.items():
-            for posting in term_data["postings"]:
-                cid = posting["chunk_id"]
-                if cid not in existing_stats:
-                    existing_stats[cid] = {
-                        "chunk_id": cid,
-                        "term_frequencies": {},
-                        "doc_length": posting["doc_length"],
-                    }
-                existing_stats[cid]["term_frequencies"][term] = posting["tf"]
+            # Reconstruct existing term_stats from current index postings
+            existing_stats: Dict[str, Dict[str, Any]] = {}
+            for term, term_data in self._index.items():
+                for posting in term_data["postings"]:
+                    cid = posting["chunk_id"]
+                    if cid not in existing_stats:
+                        existing_stats[cid] = {
+                            "chunk_id": cid,
+                            "term_frequencies": {},
+                            "doc_length": posting["doc_length"],
+                        }
+                    existing_stats[cid]["term_frequencies"][term] = posting["tf"]
 
-        # Merge: existing + new
-        combined = list(existing_stats.values()) + list(term_stats)
+            # Merge: existing + new
+            combined = list(existing_stats.values()) + list(term_stats)
 
-        # Rebuild full index from combined stats
-        self.build(combined, collection, trace)
+            # Rebuild full index from combined stats (also calls _save internally)
+            self.build(combined, collection, trace)
 
     def remove_document(
         self,
@@ -385,67 +399,37 @@ class BM25Indexer:
         Returns:
             ``True`` if any postings were removed, ``False`` otherwise.
         """
-        if not self._index:
+        with self._collection_filelock(collection):
+            self._index = {}
+            self._metadata = {}
             if not self.load(collection):
                 return False
 
-        # Normalize doc_id:
-        # 1. Full SHA-256 hash (64 chars): Use first 8 chars as prefix
-        # 2. doc_{hash[:16]} format (20 chars): Extract the hash part
-        # 3. Already a short prefix (8 chars): Use directly
-        normalized_id = doc_id
-        if len(normalized_id) == 64 and all(c in '0123456789abcdef' for c in normalized_id.lower()):
-            normalized_id = normalized_id[:8]
-        elif normalized_id.startswith('doc_'):
-            # Extract hash part from "doc_{hash[:16]}" format
-            normalized_id = normalized_id[4:12]  # "doc_" = 4, hash[:16] -> hash[:8]
+            removed_any = self._remove_postings_inplace(doc_id)
 
-        removed_any = False
-        terms_to_delete: list[str] = []
+            if removed_any:
+                all_chunk_ids: set[str] = set()
+                total_length = 0
+                for td in self._index.values():
+                    for p in td["postings"]:
+                        all_chunk_ids.add(p["chunk_id"])
+                        total_length += p["doc_length"]
 
-        for term, term_data in self._index.items():
-            original_len = len(term_data["postings"])
-            term_data["postings"] = [
-                p for p in term_data["postings"]
-                if not p["chunk_id"].startswith(normalized_id)
-            ]
-            if len(term_data["postings"]) < original_len:
-                removed_any = True
-            # Mark empty terms for cleanup
-            if not term_data["postings"]:
-                terms_to_delete.append(term)
-            else:
-                term_data["df"] = len(term_data["postings"])
+                num_docs = len(all_chunk_ids)
+                avg_doc_length = total_length / num_docs if num_docs else 0.0
 
-        # Remove empty terms
-        for term in terms_to_delete:
-            del self._index[term]
+                for td in self._index.values():
+                    td["idf"] = self._calculate_idf(num_docs, td["df"])
 
-        if removed_any:
-            # Recalculate global metadata
-            all_chunk_ids: set[str] = set()
-            total_length = 0
-            for td in self._index.values():
-                for p in td["postings"]:
-                    all_chunk_ids.add(p["chunk_id"])
-                    total_length += p["doc_length"]
+                self._metadata = {
+                    "num_docs": num_docs,
+                    "avg_doc_length": avg_doc_length,
+                    "total_terms": len(self._index),
+                    "collection": collection,
+                }
+                self._save(collection)
 
-            num_docs = len(all_chunk_ids)
-            avg_doc_length = total_length / num_docs if num_docs else 0.0
-
-            # Recalculate IDF values
-            for td in self._index.values():
-                td["idf"] = self._calculate_idf(num_docs, td["df"])
-
-            self._metadata = {
-                "num_docs": num_docs,
-                "avg_doc_length": avg_doc_length,
-                "total_terms": len(self._index),
-                "collection": collection,
-            }
-            self._save(collection)
-
-        return removed_any
+            return removed_any
     
     # ===== Private Helper Methods =====
     
@@ -520,9 +504,44 @@ class BM25Indexer:
                     f"got {stat['doc_length']}"
                 )
     
+    def _collection_filelock(self, collection: str) -> FileLock:
+        """Return a FileLock for the given collection (cross-process, cross-thread)."""
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.index_dir / f"{collection}_bm25.lock"
+        return FileLock(str(lock_path), timeout=120)
+
+    def _remove_postings_inplace(self, doc_id: str) -> bool:
+        """Remove postings from in-memory index. Caller must hold the collection filelock."""
+        normalized_id = doc_id
+        if len(normalized_id) == 64 and all(c in "0123456789abcdef" for c in normalized_id.lower()):
+            normalized_id = normalized_id[:8]
+        elif normalized_id.startswith("doc_"):
+            normalized_id = normalized_id[4:12]
+
+        removed_any = False
+        terms_to_delete: list[str] = []
+
+        for term, term_data in self._index.items():
+            original_len = len(term_data["postings"])
+            term_data["postings"] = [
+                p for p in term_data["postings"]
+                if not p["chunk_id"].startswith(normalized_id)
+            ]
+            if len(term_data["postings"]) < original_len:
+                removed_any = True
+            if not term_data["postings"]:
+                terms_to_delete.append(term)
+            else:
+                term_data["df"] = len(term_data["postings"])
+
+        for term in terms_to_delete:
+            del self._index[term]
+
+        return removed_any
+
     def _get_index_path(self, collection: str) -> Path:
         """Get file path for index file.
-        
+
         Args:
             collection: Collection name
         
@@ -537,29 +556,22 @@ class BM25Indexer:
         Args:
             collection: Collection name
         """
-        # Ensure directory exists
+        # Caller must hold the collection filelock before calling _save.
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        
         index_path = self._get_index_path(collection)
+        data = {"metadata": self._metadata, "index": self._index}
 
-        # Prepare data
-        data = {
-            "metadata": self._metadata,
-            "index": self._index
-        }
-
-        # Write atomically with lock for concurrent write protection
-        with self._lock:
-            temp_path = index_path.with_suffix('.tmp')
-            try:
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-
-                # Atomic rename
-                temp_path.replace(index_path)
-
-            except Exception as e:
-                # Clean up temp file if write failed
-                if temp_path.exists():
-                    temp_path.unlink()
-                raise
+        tmp_file = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8",
+            dir=self.index_dir, suffix=".tmp",
+            delete=False,
+        )
+        tmp_path = Path(tmp_file.name)
+        try:
+            json.dump(data, tmp_file, indent=2, ensure_ascii=False)
+            tmp_file.close()
+            tmp_path.replace(index_path)
+        except Exception:
+            tmp_file.close()
+            tmp_path.unlink(missing_ok=True)
+            raise

@@ -168,7 +168,8 @@ class KnowledgeLint:
         Note: Newly created claims may legitimately be orphans until
         they're referenced by an insight. This check reports only.
         """
-        # ChromaDB doesn't match empty strings well, use get_all_documents
+        if not hasattr(self.ks, "claim_store"):
+            return []
         claims = self.ks.claim_store.get_all_documents()
         if not claims:
             return []
@@ -193,6 +194,8 @@ class KnowledgeLint:
 
     async def _check_broken_refs(self, fix: bool = False) -> list[LintIssue]:
         """Check for insights referencing non-existent claims."""
+        if not hasattr(self.ks, "insight_store") or not hasattr(self.ks, "claim_store"):
+            return []
         insights = self.ks.insight_store.get_all_documents()
         if not insights:
             return []
@@ -238,8 +241,8 @@ class KnowledgeLint:
 
     async def _check_missing_evidence(self) -> list[LintIssue]:
         """Check for research claims without evidence_ids."""
-        # ChromaDB doesn't support multi-condition AND in simple query
-        # First get research claims, then filter in memory
+        if not hasattr(self.ks, "claim_store"):
+            return []
         claims = self.ks.claim_store.query_by_metadata(
             filters={"source": "research"},
             limit=500,
@@ -264,7 +267,8 @@ class KnowledgeLint:
 
     async def _check_empty_domains(self) -> list[LintIssue]:
         """Check for insights without applicable_domains."""
-        # ChromaDB doesn't match empty strings well, use get_all_documents
+        if not hasattr(self.ks, "insight_store"):
+            return []
         insights = self.ks.insight_store.get_all_documents()
         if not insights:
             return []
@@ -286,6 +290,8 @@ class KnowledgeLint:
 
     async def _check_invalid_confidence(self, fix: bool = False) -> list[LintIssue]:
         """Check for confidence values outside [0, 1] range."""
+        if not hasattr(self.ks, "claim_store"):
+            return []
         claims = self.ks.claim_store.get_all_documents()
         issues = []
         to_update = []
@@ -327,7 +333,8 @@ class KnowledgeLint:
         """
         self._require_provider()
 
-        # Get conversation claims (not research-verified)
+        if not hasattr(self.ks, "claim_store"):
+            return SemanticLintResult(issues=[], total_checked=0)
         claims = self.ks.claim_store.query_by_metadata(
             filters={"source": "conversation"},
             limit=limit,
@@ -451,6 +458,10 @@ class KnowledgeLint:
         """
         to_demote = [i for i in issues if i.verdict == LintVerdict.DEMOTE]
         to_delete = [i for i in issues if i.verdict == LintVerdict.DELETE]
+
+        if not hasattr(self.ks, "claim_store"):
+            logger.warning("Lint: claim_store not available, cannot apply fixes")
+            return 0, 0
 
         # Demote: confidence halved, mark needs_review
         if to_demote:

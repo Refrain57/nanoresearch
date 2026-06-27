@@ -38,6 +38,8 @@ def _register_vision_providers() -> None:
         from nanobot.rag.libs.llm.openai_vision_llm import OpenAIVisionLLM
         from nanobot.rag.libs.llm.llm_factory import LLMFactory
         LLMFactory.register_vision_provider("openai", OpenAIVisionLLM)
+        # DashScope uses OpenAI-compatible API — same class, different base_url/key
+        LLMFactory.register_vision_provider("dashscope", OpenAIVisionLLM)
     except ImportError:
         pass
 

@@ -3,7 +3,8 @@ import { useUserStore } from '@/stores/user'
 export function useRunStream() {
   let controller = null
 
-  async function start(runId, { onDelta, onToolHint, onEnd } = {}) {
+  async function start(runId, { onDelta, onToolHint, onEnd, onToolCall, onMessageComplete, onSubagentResult } = {}) {
+    console.log('[SSE] start v3', runId)
     stop()
     controller = new AbortController()
     const userStore = useUserStore()
@@ -29,8 +30,12 @@ export function useRunStream() {
         const text = dataLines.join('\n')
         try {
           const event = JSON.parse(text)
+          console.log('[SSE] event:', event.type)
           if (event.type === 'message_delta') onDelta?.(event.chunk)
           else if (event.type === 'tool_hint') onToolHint?.(event.content)
+          else if (event.type === 'tool_call') onToolCall?.(event)
+          else if (event.type === 'message_complete') { onMessageComplete?.() }
+          else if (event.type === 'subagent_result') onSubagentResult?.(event)
           else if (event.type === 'run_end') onEnd?.(event.status)
         } catch (e) {
           console.warn('SSE parse error:', e, text)
@@ -41,7 +46,11 @@ export function useRunStream() {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        buffer += decoder.decode(value, { stream: true })
+        const chunk = decoder.decode(value, { stream: true })
+        if (chunk.includes('message_complete') || chunk.includes('heartbeat')) {
+          console.log('[SSE] raw chunk:', JSON.stringify(chunk))
+        }
+        buffer += chunk
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
 

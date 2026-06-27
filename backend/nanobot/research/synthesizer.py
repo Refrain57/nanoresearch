@@ -333,7 +333,7 @@ ID: {i}
 URL: {r.url}
 类型: {r.source_type}
 评分: 可靠性={r.credibility_score:.1f}, 相关度={r.relevance_score:.1f}, 时效性={r.recency_score:.1f}
-内容: {r.content[:10000]}
+内容: {r.content[:20000]}
 """
             blocks.append(block)
         return "\n".join(blocks)

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from nanobot.server.middleware.auth import get_current_user
 from nanobot.storage.repositories.agent_repo import AgentRepository
+from nanobot.storage.repositories.knowledge_repo import KnowledgeRepository
 from nanobot.storage.repositories.run_repo import RunRepository
 
 router = APIRouter()
@@ -159,11 +160,18 @@ async def get_agent_prompt_preview(
     builder = ContextBuilder(workspace)
     skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
     harness = agent.harness or {}
+    # Load bound KBs for prompt preview
+    _kbs = await AgentRepository(factory).list_bound_kbs(agent.id)
+    _kb_bindings = [
+        {"id": str(kb.id), "name": kb.name, "description": kb.description or ""}
+        for kb in _kbs
+    ] if _kbs else None
     workspace_text = builder._build_workspace_block(tool_names=None)
     agent_text = builder._build_agent_block(
         skill_names=skill_names,
         custom_persona=agent.persona or None,
         agents_registry=None,
+        kb_bindings=_kb_bindings,
     )
     static = "\n\n---\n\n".join(p for p in [workspace_text, agent_text] if p)
     return {
@@ -229,6 +237,57 @@ def _run_to_dict(run) -> dict:
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "created_at": run.created_at.isoformat() if run.created_at else None,
     }
+
+
+class BindKnowledgeRequest(BaseModel):
+    kb_id: str
+
+
+@router.get("/api/agents/{agent_id}/knowledge")
+async def list_bound_knowledge(
+    agent_id: str,
+    request: Request,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await _get_agent_or_404(agent_id, factory)
+    kbs = await AgentRepository(factory).list_bound_kbs(agent.id)
+    return [
+        {"id": str(kb.id), "name": kb.name, "description": kb.description or ""}
+        for kb in kbs
+    ]
+
+
+@router.post("/api/agents/{agent_id}/knowledge", status_code=201)
+async def bind_knowledge(
+    agent_id: str,
+    body: BindKnowledgeRequest,
+    request: Request,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await _get_agent_or_404(agent_id, factory)
+    kb_id = uuid.UUID(body.kb_id)
+    # Verify KB exists
+    kb = await KnowledgeRepository(factory).get(kb_id)
+    if kb is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    await AgentRepository(factory).bind_kb(agent.id, kb_id)
+    return {"status": "ok"}
+
+
+@router.delete("/api/agents/{agent_id}/knowledge/{kb_id}", status_code=204)
+async def unbind_knowledge(
+    agent_id: str,
+    kb_id: str,
+    request: Request,
+    _uid: str = Depends(get_current_user),
+):
+    factory = request.app.state.session_factory
+    agent = await _get_agent_or_404(agent_id, factory)
+    ok = await AgentRepository(factory).unbind_kb(agent.id, uuid.UUID(kb_id))
+    if not ok:
+        raise HTTPException(status_code=404, detail="绑定不存在")
 
 
 async def _get_agent_or_404(agent_id: str, factory):

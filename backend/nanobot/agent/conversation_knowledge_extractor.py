@@ -102,11 +102,13 @@ class ConversationKnowledgeExtractor:
     async def extract_from_messages(
         self,
         messages: list[dict[str, Any]],
+        uid: str | None = None,
     ) -> int:
         """Extract user information from conversation messages.
 
         Args:
             messages: List of message dicts with 'role' and 'content' keys.
+            uid: User ID to associate with extracted memories.
 
         Returns:
             Number of user info items written to user_memory.
@@ -135,7 +137,7 @@ class ConversationKnowledgeExtractor:
             for ui in user_infos
         ]
 
-        written, skipped = await self.knowledge_search.write_user_memory(memories)
+        written, skipped = await self.knowledge_search.write_user_memory(memories, uid=uid)
 
         logger.info(
             f"ConversationKnowledgeExtractor: wrote {written} user info items, skipped {skipped} duplicates"
@@ -181,13 +183,23 @@ class ConversationKnowledgeExtractor:
             # Parse JSON response
             import re
             json_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", response.content)
-            if json_match:
-                data = json.loads(json_match.group(1))
-            else:
-                data = json.loads(response.content.strip())
+            try:
+                if json_match:
+                    data = json.loads(json_match.group(1))
+                else:
+                    data = json.loads(response.content.strip())
+            except json.JSONDecodeError:
+                logger.debug("User info extraction: LLM returned invalid JSON: {:.200}", response.content)
+                return []
+
+            if not isinstance(data, dict):
+                logger.debug("User info extraction: expected dict, got {}", type(data).__name__)
+                return []
 
             user_infos = []
             for item in data.get("user_info", []):
+                if not isinstance(item, dict):
+                    continue
                 user_infos.append(ExtractedUserInfo(
                     content=item.get("content", ""),
                     type=item.get("type", "preference"),
