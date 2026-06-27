@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import ARRAY, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import ARRAY, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -381,6 +381,22 @@ class AgentTestCase(Base):
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)  # active | pending_review | rejected
     generated_from_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"), nullable=True)
     generation_reason: Mapped[str | None] = mapped_column(Text)
+
+    # B4 metadata (Phase 1 of A1 tool-layer harness refactor)
+    origin_badcase_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    target_dimension: Mapped[str] = mapped_column(Text, nullable=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    added_by: Mapped[str] = mapped_column(Text, nullable=False)
+    coverage_tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+
+    __table_args__ = (
+        Index("idx_agent_test_cases_target_dimension", "target_dimension"),
+        Index("idx_agent_test_cases_origin_badcase_id", "origin_badcase_id"),
+    )
 
 
 class JudgeCalibrationLog(Base):
