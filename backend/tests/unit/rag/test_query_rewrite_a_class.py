@@ -74,3 +74,20 @@ def test_runner_run_signature_has_session_key():
 def test_run_rag_loop_signature_has_session_key():
     sig = inspect.signature(run_rag_loop)
     assert "session_key" in sig.parameters
+
+
+def test_plan_tool_schema_has_session_key():
+    from nanoresearch.rag.internal_loop.tools import InternalTools
+
+    tools = InternalTools()
+    schema = tools.get_plan_tool_schema()
+    params = schema["function"]["parameters"]
+    assert "session_key" in params["properties"]
+
+
+def test_plan_query_signature_has_session_key():
+    from nanoresearch.rag.internal_loop.tools import InternalTools
+
+    sig = inspect.signature(InternalTools.plan_query)
+    assert "session_key" in sig.parameters
+    assert sig.parameters["session_key"].default is None

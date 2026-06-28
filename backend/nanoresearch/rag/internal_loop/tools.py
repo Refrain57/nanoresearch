@@ -115,6 +115,10 @@ class InternalTools:
                             "type": "string",
                             "description": "外部上下文（可选）",
                         },
+                        "session_key": {
+                            "type": "string",
+                            "description": "外层 agent session key (channel:chat_id)，用于多轮指代消解（可选）",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -216,12 +220,14 @@ class InternalTools:
         self,
         query: str,
         context: Optional[str] = None,
+        session_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute plan_query tool.
 
         Args:
             query: The user query
             context: External context (optional)
+            session_key: Outer agent session key for history-based rewrite (optional)
 
         Returns:
             Plan result with sub_queries and strategy annotations
@@ -232,6 +238,7 @@ class InternalTools:
             result = await self._plan_tool.execute(
                 query=query,
                 context=context,
+                session_key=session_key,
             )
 
             # Parse result
