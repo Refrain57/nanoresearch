@@ -53,3 +53,24 @@ def test_no_reasoning_fields_returns_none():
     resp = _resp([_msg()])
     parsed = OpenAICompatProvider._parse_response(resp)
     assert parsed.reasoning_content is None
+
+
+def test_dict_branch_falls_back_to_thinking_field():
+    """Cover _parse's dict-branch path (HTTP responses parsed as raw dict)."""
+    provider = OpenAICompatProvider(api_key="test-key")
+    response_dict = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "hi",
+                    "thinking": "raw-dict-thought",
+                    "tool_calls": None,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+    parsed = provider._parse(response_dict)
+    assert parsed.reasoning_content == "raw-dict-thought"
