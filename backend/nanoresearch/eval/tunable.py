@@ -16,12 +16,10 @@ PersonaObject note (SDD §6 Phase 1 #4 rationale):
   This is an intentional constraint, NOT an incomplete implementation.
   Optimizing the other segments requires code changes — not this object.
 
-ToolDescriptionObject note:
-  generate_candidates produces candidate description text (LLM call only).
-  Scoring candidates by running the agent requires Phase 4 sandbox layering.
-  Until Phase 4, OptimizationAgent._score_candidate raises NotImplementedError
-  for tool_description targets.  The interface is complete; the scoring path is not.
-  PHASE_STATUS.md documents this explicitly.
+ToolDescriptionObject scoring:
+  Scoring of tool_description candidates runs through SandboxedToolRegistry
+  in side_effect_only mode (see sandbox.py:126-161 and optimizer.py:_score_candidate_set).
+  No NotImplementedError path remains.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ class OptimizationCandidate:
     # Phase 2: dual-set scores.  Structure:
     #   {"fix_set": {"keyword_coverage": 0.8, ...}, "health_set": {"keyword_coverage": 0.9, ...}}
     # Populated by OptimizationAgent after scoring on both sets.
-    # Empty dict means scoring was skipped (e.g. tool_description before Phase 4).
+    # Empty dict means scoring was skipped (e.g. test case had no recordings and no expected_tools).
     scores: dict = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -279,13 +277,10 @@ _TOOL_DESC_GENERATE_SYSTEM = """\
 class ToolDescriptionObject(TunableTextObject):
     """Tunable object for a tool's description field in agents.tools_config.
 
-    SCORING NOTE (Phase 1 constraint):
-    generate_candidates produces candidate text (LLM only, no agent run).
-    Evaluating candidates by running the agent through a sandboxed replay requires
-    Phase 4 sandbox layering.  Until Phase 4, OptimizationAgent._score_candidate
-    raises NotImplementedError for tool_description targets — this is explicit
-    and intentional, not a silent failure.
-    See PHASE_STATUS.md: "ToolDescriptionObject scoring blocked until Phase 4".
+    generate_candidates produces candidate text via LLM call.
+    Scoring is performed by OptimizationAgent._score_candidate_set using
+    SandboxedToolRegistry in side_effect_only mode (live evaluation against
+    recorded tool calls; description swap, no real side effects).
     """
 
     kind = "tool_description"

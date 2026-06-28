@@ -30,5 +30,10 @@ jobs:
     - name: Install all dependencies
       run: uv sync --all-extras
 
+    - name: Check case metadata on added fixtures (B4 gate)
+      run: |
+        git fetch origin main:refs/remotes/origin/main
+        cd backend && uv run python scripts/ci/check_case_metadata_pr.py
+
     - name: Run tests
       run: uv run pytest tests/
