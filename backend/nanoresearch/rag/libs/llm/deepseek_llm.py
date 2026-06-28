@@ -7,7 +7,6 @@ its own endpoint and authentication.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional
 
 from nanoresearch.rag.libs.llm.base_llm import BaseLLM, ChatResponse, Message
@@ -55,19 +54,18 @@ class DeepSeekLLM(BaseLLM):
             **kwargs: Additional configuration overrides.
         
         Raises:
-            ValueError: If API key is not provided and not found in environment.
+            RuntimeError: If API key is not provided and not found in environment,
+                or if NANORESEARCH_MODE=server (env fallback disabled).
         """
         self.model = settings.llm.model
         self.default_temperature = settings.llm.temperature
         self.default_max_tokens = settings.llm.max_tokens
-        
-        # API key: explicit > env var
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+
+        # API key: explicit > env var (gated by NANORESEARCH_MODE)
+        self.api_key = api_key
         if not self.api_key:
-            raise ValueError(
-                "DeepSeek API key not provided. Set DEEPSEEK_API_KEY environment variable "
-                "or pass api_key parameter."
-            )
+            from nanoresearch.config.loader import env_key_or_raise
+            self.api_key = env_key_or_raise("DEEPSEEK_API_KEY", role="ingestion_llm")
         
         # Base URL: explicit > default
         self.base_url = base_url or self.DEFAULT_BASE_URL

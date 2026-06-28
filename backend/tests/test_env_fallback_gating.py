@@ -38,3 +38,17 @@ def test_openai_embedding_raises_in_server_mode(monkeypatch):
     mock_settings = SimpleNamespace(embedding=mock_embedding)
     with pytest.raises(RuntimeError, match="server mode"):
         OpenAIEmbedding(settings=mock_settings, api_key=None)
+
+
+def test_deepseek_llm_raises_in_server_mode(monkeypatch):
+    """deepseek_llm must refuse env-var fallback in server mode."""
+    monkeypatch.setenv("NANORESEARCH_MODE", "server")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "leaked-host-key")
+
+    from types import SimpleNamespace
+    from nanoresearch.rag.libs.llm.deepseek_llm import DeepSeekLLM
+
+    mock_llm = SimpleNamespace(model="deepseek-chat", temperature=0.7, max_tokens=2048)
+    mock_settings = SimpleNamespace(llm=mock_llm)
+    with pytest.raises(RuntimeError, match="ingestion_llm"):
+        DeepSeekLLM(mock_settings)

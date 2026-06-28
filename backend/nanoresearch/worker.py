@@ -480,11 +480,21 @@ async def ingest_document_task(
     repo = KnowledgeRepository(factory)
 
     if uid:
-        try:
-            from nanoresearch.providers.model_factory import ModelFactory, ModelRole
-            from nanoresearch.storage.repositories.user_settings_repo import UserSettingsRepository
+        from nanoresearch.providers.model_factory import (
+            ModelFactory,
+            ModelResolutionError,
+            ModelRole,
+        )
+        from nanoresearch.storage.repositories.user_settings_repo import UserSettingsRepository
 
+        user_cfg = None
+        try:
             user_cfg = await UserSettingsRepository(factory).get(uid)
+        except Exception:
+            # Settings lookup is best-effort; fall through to factory defaults.
+            pass
+
+        if user_cfg is not None or get_mode() == "server":
             user_model = user_cfg.model if user_cfg else None
             user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
             spec = ModelFactory.resolve(
@@ -496,8 +506,6 @@ async def ingest_document_task(
                 mode=get_mode(),
             )
             settings = ModelFactory.patch_settings(settings, ModelRole.INGESTION_LLM, spec)
-        except Exception:
-            pass
 
     await repo.update_document_status(doc_uuid, "parsing")
 
