@@ -123,3 +123,14 @@ def test_default_settings_path_follows_nanoresearch_home(monkeypatch, tmp_path):
     monkeypatch.setenv("NANORESEARCH_HOME", str(tmp_path / "rag_tenant"))
 
     assert default_settings_path() == tmp_path / "rag_tenant" / "settings.yaml"
+
+
+def test_get_config_path_follows_nanoresearch_home(monkeypatch, tmp_path):
+    from nanoresearch.config import loader
+    from nanoresearch.config.loader import get_config_path
+
+    monkeypatch.setattr(loader, "_current_config_path", None)
+    monkeypatch.delenv("NANOBOT_HOME", raising=False)
+    monkeypatch.setenv("NANORESEARCH_HOME", str(tmp_path / "tenant_cfg"))
+
+    assert get_config_path() == tmp_path / "tenant_cfg" / "config.json"

@@ -14,6 +14,7 @@ import yaml
 # Anchored to this file's location: <repo>/nanoresearch/rag/core/settings.py → parents[3]
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
+
 # Default settings path - user-level config (lazy so NANORESEARCH_HOME overrides take effect)
 def default_settings_path() -> Path:
     """Return the active default ``settings.yaml`` path under the current NANORESEARCH_HOME."""

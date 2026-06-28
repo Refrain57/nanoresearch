@@ -29,9 +29,9 @@ services:
     volumes:
       - ~/.nanoresearch:/root/.nanoresearch
     # Multi-tenant / custom-base example:
-    #   environment:
+    #   add NANORESEARCH_HOME under the existing environment: block above
     #     NANORESEARCH_HOME: /data/tenant_x
-    #   volumes:
+    #   replace the bind under the existing volumes: block above
     #     - ./tenant_x:/data/tenant_x
     command: ["gateway"]
     restart: unless-stopped
@@ -61,6 +61,12 @@ services:
       - cli
     volumes:
       - ~/.nanoresearch:/root/.nanoresearch
+    # Multi-tenant / custom-base example:
+    #   add an environment: block (not present by default):
+    #     environment:
+    #       NANORESEARCH_HOME: /data/tenant_x
+    #   replace the bind under the existing volumes: block above
+    #     - ./tenant_x:/data/tenant_x
     command: ["status"]
     stdin_open: true
     tty: true

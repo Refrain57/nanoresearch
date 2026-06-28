@@ -3,7 +3,9 @@ import asyncio, json, os
 
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:123456@localhost:5432/nanoresearch"
 
-with open("C:/Users/Augix/.nanoresearch/config.json") as f:
+from nanoresearch.config.loader import get_nanoresearch_home
+
+with open(get_nanoresearch_home() / "config.json") as f:
     cfg = json.load(f)
 
 deepseek_key = cfg["providers"]["deepseek"]["apiKey"]

@@ -1036,6 +1036,12 @@ docker run -v ~/.nanoresearch:/root/.nanoresearch -p 18790:18790 nanoresearch ga
 docker compose up -d nanoresearch-gateway
 ```
 
+**Custom base directory in docker-compose:**
+
+Set `NANORESEARCH_HOME` and bind-mount it instead of `~/.nanoresearch`. See
+the commented `Multi-tenant / custom-base example` block under each service in
+`docker-compose.yml`.
+
 ## 🐧 Linux Service
 
 ```bash

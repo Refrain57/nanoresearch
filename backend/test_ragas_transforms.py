@@ -11,6 +11,8 @@ from ragas.testset.transforms import default_transforms_for_prechunked, apply_tr
 from ragas.run_config import RunConfig
 from langchain_core.documents import Document as LCDocument
 
+from nanoresearch.config.loader import get_nanoresearch_home
+
 FAKE_CHUNKS = [
     "深度学习是机器学习的一个分支，使用多层神经网络来学习数据的特征表示。",
     "Transformer 架构由 Attention Is All You Need 论文提出，已成为 NLP 的基础模型。",
@@ -19,7 +21,7 @@ FAKE_CHUNKS = [
     "BM25 是一种基于词频和逆文档频率的稀疏检索算法，在关键词匹配上效果优异。",
 ]
 
-with open("C:/Users/Augix/.nanoresearch/config.json") as f:
+with open(get_nanoresearch_home() / "config.json") as f:
     cfg = json.load(f)
 
 deepseek_key = cfg["providers"]["deepseek"]["apiKey"]
