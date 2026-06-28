@@ -73,13 +73,14 @@ class PlanResult:
 class SessionState:
     """State for an entire RAG search session.
 
-    This holds all state for a single rag_search call,
+    This holds all state for a single kb_search call,
     including the original query, context, and all rounds.
 
     Attributes:
         session_id: Unique identifier for this session
         original_query: The user's original query
         context: External context from main agent (optional)
+        caller_session_key: Outer agent's session key (channel:chat_id) for multi-turn context
         plan: Result from plan_query
         rounds: List of round states
         current_phase: Current phase in the loop
@@ -88,6 +89,7 @@ class SessionState:
     session_id: str
     original_query: str
     context: Optional[str] = None
+    caller_session_key: Optional[str] = None
     plan: Optional[PlanResult] = None
     rounds: List["RoundState"] = field(default_factory=list)
     current_phase: str = "plan"  # "plan" | "search" | "verify" | "finalize"
@@ -212,6 +214,7 @@ class SessionStateManager:
         query: str,
         context: Optional[str] = None,
         max_iterations: int = 5,
+        caller_session_key: Optional[str] = None,
     ) -> SessionState:
         """Create a new session.
 
@@ -219,6 +222,7 @@ class SessionStateManager:
             query: The original query
             context: External context (optional)
             max_iterations: Maximum iterations
+            caller_session_key: Outer agent session key (channel:chat_id), propagated for rewrite
 
         Returns:
             New SessionState
@@ -228,6 +232,7 @@ class SessionStateManager:
             session_id=session_id,
             original_query=query,
             context=context,
+            caller_session_key=caller_session_key,
             max_iterations=max_iterations,
         )
         self._sessions[session_id] = session

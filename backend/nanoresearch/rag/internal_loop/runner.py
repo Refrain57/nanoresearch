@@ -193,6 +193,7 @@ class RAGLoopRunner:
         context: Optional[str] = None,
         collection: str = "default",
         max_iterations: int = 5,
+        session_key: Optional[str] = None,
     ) -> RAGLoopResult:
         """Run the RAG loop.
 
@@ -201,6 +202,8 @@ class RAGLoopRunner:
             context: External context from main agent
             collection: Collection to search
             max_iterations: Maximum iterations
+            session_key: Outer agent session key (channel:chat_id); propagated to
+                plan_query for history-based rewrite. None disables rewrite.
 
         Returns:
             RAGLoopResult with chunks and citations
@@ -215,6 +218,7 @@ class RAGLoopRunner:
             query=query,
             context=context,
             max_iterations=max_iterations,
+            caller_session_key=session_key,
         )
 
         logger.info(f"Starting RAG loop for query: {query[:50]}...")
@@ -399,6 +403,7 @@ class RAGLoopRunner:
         plan_dict = await self.tools.plan_query(
             query=session.original_query,
             context=session.context,
+            session_key=session.caller_session_key,
         )
 
         # Convert to PlanResult
@@ -484,6 +489,7 @@ async def run_rag_loop(
     context: Optional[str] = None,
     collection: str = "default",
     max_iterations: int = 5,
+    session_key: Optional[str] = None,
 ) -> RAGLoopResult:
     """Run the RAG loop.
 
@@ -492,6 +498,7 @@ async def run_rag_loop(
         context: External context
         collection: Collection to search
         max_iterations: Maximum iterations
+        session_key: Outer agent session key
 
     Returns:
         RAGLoopResult
@@ -502,4 +509,5 @@ async def run_rag_loop(
         context=context,
         collection=collection,
         max_iterations=max_iterations,
+        session_key=session_key,
     )

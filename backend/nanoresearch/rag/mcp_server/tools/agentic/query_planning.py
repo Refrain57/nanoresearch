@@ -18,17 +18,58 @@ from nanoresearch.rag.mcp_server.tools.agentic.shared import (
 
 logger = logging.getLogger(__name__)
 
-# Rewrite prompt for resolving pronouns and references
-REWRITE_PROMPT = """对话历史：
-{history}
+# Subprocess-side PG-backed SessionManager
+# MCP server is an independent stdio subprocess (see §8 #1 of spec).
+# Module-level globals in the main process are invisible here. We rely on
+# DATABASE_URL/REDIS_URL transported via _stdio_env (§8 #6) to connect to the
+# SAME PG/Redis the main process uses. JSONL fallback is forbidden — that
+# would create an orphan store with no sync to the main session.
 
-当前问题：{query}
+_subprocess_session_manager = None
+
+
+def _get_subprocess_session_manager():
+    """Lazy-init a PG-backed SessionManager in the MCP subprocess.
+
+    Returns None on any init failure; callers must degrade (return empty
+    history) rather than fall back to JSONL.
+    """
+    global _subprocess_session_manager
+    if _subprocess_session_manager is not None:
+        return _subprocess_session_manager
+    try:
+        from nanoresearch.storage.database import get_session_factory, init_engine
+        from nanoresearch.session.manager import SessionManager
+        from nanoresearch.config.paths import get_workspace_path
+
+        try:
+            factory = get_session_factory()
+        except RuntimeError:
+            # Engine not initialized yet in this subprocess — initialize it.
+            init_engine()
+            factory = get_session_factory()
+
+        _subprocess_session_manager = SessionManager(
+            workspace=get_workspace_path(),
+            session_factory=factory,
+        )
+        logger.info("Subprocess PG-backed SessionManager initialized")
+        return _subprocess_session_manager
+    except Exception as e:
+        logger.warning(f"Subprocess SessionManager init failed: {e}; query rewrite degraded")
+        return None
+
+
+# Rewrite prompt for resolving pronouns and references
+REWRITE_PROMPT = """{history_section}{retrieval_section}当前问题：{query}
 
 将当前问题改写为独立完整的检索查询，解析所有指代和省略。
 
-注意：如果最近的对话已经切换了话题，优先使用最近的上下文解析指代词，
-忽略更早的话题锚点。
-如果问题已经完整清晰，原样返回。
+注意：
+- 指代词（"它"、"那篇"、"上面那个"）优先用最近的上下文解析。
+- 如果"上一轮检索到"列出了具体论文/文档，且当前问题用"那篇""上面"等指代，优先指向其中一篇。
+- 如果话题已切换，忽略更早的话题锚点。
+- 如果问题已经完整清晰，原样返回。
 
 只输出改写后的查询，不要其他内容。"""
 
@@ -213,11 +254,14 @@ Returns:
                 is_empty=True,
             )
 
-        # 1. Get conversation history for query rewriting
-        history = self._get_conversation_history(session_key) if session_key else []
+        # 1. Get conversation history for query rewriting (async)
+        history = await self._get_conversation_history(session_key) if session_key else []
 
-        # 2. Rewrite query to resolve pronouns
-        rewritten_query = await self._rewrite_query(query, history)
+        # 2. Extract retrieval titles from last RAG tool message (B class data)
+        retrieval_titles = self._get_retrieval_titles(history)
+
+        # 3. Rewrite query to resolve pronouns
+        rewritten_query = await self._rewrite_query(query, history, retrieval_titles)
 
         # Use rewritten query for subsequent analysis
         analysis_query = rewritten_query
@@ -290,105 +334,132 @@ Returns:
         else:
             raise ValueError("Unknown LLM client type")
 
-    def _get_conversation_history(self, session_key: str) -> List[str]:
-        """Get conversation history from main Agent session.
+    async def _get_conversation_history(self, session_key: str) -> list[dict]:
+        """Fetch conversation history from main agent's PG-backed session store.
 
-        Strategy:
-        1. Always include initial_query (first user message) as topic anchor
-        2. Get recent 5 rounds
-        3. Deduplicate if initial_query is already in recent 5
+        Returns list[dict] — raw messages with role/content/tool_calls/etc.
+        No role filtering: tool messages are preserved for §3.4 A4 layering.
+        Render layer (_render_history_for_prompt) skips tool when rendering
+        to prompt; B class's _get_retrieval_titles reads them for chunk titles.
 
-        User message content field can be:
-        1. String: use directly
-        2. List: extract {"type": "text", "text": "..."} blocks
+        Degrades to [] when subprocess SessionManager init fails — caller
+        falls back to original query without rewrite.
         """
-        logger.info(f"_get_conversation_history called: session_key='{session_key}'")
+        manager = _get_subprocess_session_manager()
+        if manager is None:
+            logger.warning(
+                f"No SessionManager available in subprocess for {session_key!r}; "
+                "query rewrite degraded"
+            )
+            return []
         try:
-            from nanoresearch.session.manager import SessionManager
-            from nanoresearch.config.paths import get_workspace
-
-            manager = SessionManager(get_workspace())
-            session = manager.get_or_create(session_key)
-
-            # Get history messages
-            history = session.get_history()
-
-            # Extract user message text content
-            user_messages = []
-            for msg in history:
-                if msg.get("role") != "user":
-                    continue
-
-                content = msg.get("content")
-                if isinstance(content, str):
-                    user_messages.append(content)
-                elif isinstance(content, list):
-                    # Multimodal list: extract text blocks
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                    if text_parts:
-                        user_messages.append(" ".join(text_parts))
-
-            if not user_messages:
-                return []
-
-            # Get initial_query (first user message)
-            initial_query = user_messages[0]
-
-            # Get recent 5 rounds
-            recent = user_messages[-5:]
-
-            # Combine: initial_query + recent, deduplicate
-            if initial_query in recent:
-                # initial_query already in window, return as is
-                return recent
-            else:
-                # initial_query outside window, prepend to beginning
-                return [initial_query] + recent
-
+            session = await manager.get_or_create(session_key)
+            # Return raw messages (no legal-start filtering) so tool messages
+            # survive for the B-class retrieval titles path (§3.4 A4 layering).
+            # session.get_history() strips orphaned tool messages via
+            # _find_legal_start; we need the unfiltered slice instead.
+            return list(session.messages[-20:])
         except Exception as e:
-            logger.warning(f"Failed to get conversation history: {e}")
+            logger.warning(f"Failed to fetch history for {session_key!r}: {e}")
             return []
 
-    async def _rewrite_query(self, query: str, history: List[str]) -> str:
-        """Rewrite query to resolve pronouns using conversation history."""
-        if not history:
+    _RAG_TOOL_NAMES = ("kb_search", "rag_search", "kb_retrieve")
+
+    @staticmethod
+    def _extract_text_from_content(content) -> str:
+        """Flatten str / multimodal list to text."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            return " ".join(parts)
+        return ""
+
+    def _render_history_for_prompt(self, history: list[dict]) -> list[str]:
+        """Render user + assistant turns as `[用户]/[助手] text` lines.
+
+        - Skip tool messages (B class reads them via _get_retrieval_titles).
+        - Truncate assistant content to 200 chars to bound prompt size.
+        - Multimodal assistant content (list of blocks) is flattened to text.
+        - Window: last 6 user+assistant messages (tool not counted).
+        """
+        rendered: list[str] = []
+        for msg in history:
+            role = msg.get("role")
+            if role == "user":
+                text = self._extract_text_from_content(msg.get("content", ""))
+                rendered.append(f"[用户] {text}")
+            elif role == "assistant":
+                text = self._extract_text_from_content(msg.get("content", ""))
+                if len(text) > 200:
+                    text = text[:200] + "..."
+                rendered.append(f"[助手] {text}")
+            # tool 跳过：A4 数据保留 vs 渲染过滤分层
+        return rendered[-6:]
+
+    def _get_retrieval_titles(self, history: list[dict]) -> list[str]:
+        """Read `_chunk_titles` sidecar from the most recent RAG tool message.
+
+        Written by B class (§4.2 _save_turn sidecar). In A class period this
+        field is never present — returns []. Caller renders retrieval_section
+        as empty string in that case.
+        """
+        for msg in reversed(history):
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("name") not in self._RAG_TOOL_NAMES:
+                continue
+            titles = msg.get("_chunk_titles")
+            if isinstance(titles, list) and titles:
+                return [str(t) for t in titles]
+            return []
+        return []
+
+    async def _rewrite_query(
+        self,
+        query: str,
+        history: list[dict],
+        retrieval_titles: list[str],
+    ) -> str:
+        """Rewrite query to resolve pronouns using history + last RAG titles."""
+        rendered_history = self._render_history_for_prompt(history)
+
+        if not rendered_history and not retrieval_titles:
             return query
 
-        import asyncio
+        history_section = ""
+        if rendered_history:
+            history_section = "对话历史：\n" + "\n".join(
+                f"{i+1}. {line}" for i, line in enumerate(rendered_history)
+            ) + "\n\n"
 
-        # Format history
-        history_text = "\n".join(
-            f"{i+1}. {q}" for i, q in enumerate(history)
-        )
+        retrieval_section = ""
+        if retrieval_titles:
+            retrieval_section = "上一轮检索到：\n" + "\n".join(
+                f"- {t}" for t in retrieval_titles
+            ) + "\n\n"
 
         prompt = REWRITE_PROMPT.format(
-            history=history_text,
-            query=query
+            history_section=history_section,
+            retrieval_section=retrieval_section,
+            query=query,
         )
 
-        # Call LLM asynchronously
+        import asyncio
         try:
-            # Ensure LLM is initialized
             await asyncio.to_thread(self._ensure_initialized)
-
             if not self._llm_client:
                 return query
-
             response = await asyncio.to_thread(self._call_llm, prompt)
-
-            # Parse returned text
             rewritten = response.strip()
-
-            # Fallback to original query if empty or only punctuation
             if not rewritten or rewritten in [".", "。"]:
                 return query
-
             return rewritten
         except Exception as e:
-            logger.warning(f"Query rewrite failed: {e}")
+            logger.warning(f"Query rewrite failed, falling back to original: {e}")
             return query
 
     def _parse_llm_response(self, response: str, query: str) -> Dict[str, Any]:

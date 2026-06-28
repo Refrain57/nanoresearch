@@ -129,6 +129,10 @@ class RAGSearchTool:
                     "type": "string",
                     "description": "知识库 ID，不传时自动搜索默认知识库",
                 },
+                "session_key": {
+                    "type": "string",
+                    "description": "Main agent session key (channel:chat_id) for multi-turn context",
+                },
             },
             "required": ["query"],
         }
@@ -139,6 +143,7 @@ class RAGSearchTool:
         collection: str = "default",
         context: Optional[str] = None,
         max_iterations: int = 5,
+        session_key: Optional[str] = None,
     ) -> "MCPToolResponse":
         """Execute RAG search.
 
@@ -147,6 +152,8 @@ class RAGSearchTool:
             collection: Collection to search
             context: External context for query rewriting
             max_iterations: Maximum iterations for complex queries
+            session_key: Outer agent session key (channel:chat_id), forwarded to
+                internal loop / plan_query for history-based query rewrite
 
         Returns:
             MCPToolResponse with retrieval results
@@ -170,7 +177,7 @@ class RAGSearchTool:
             # Complex path: Internal loop
             _log("Taking complex path (internal loop)")
             return await self._execute_complex(
-                query, collection, context, max_iterations
+                query, collection, context, max_iterations, session_key
             )
 
     async def _execute_simple(
@@ -258,6 +265,7 @@ class RAGSearchTool:
         collection: str,
         context: Optional[str],
         max_iterations: int,
+        session_key: Optional[str] = None,
     ) -> "MCPToolResponse":
         """Execute complex query: Internal loop with verification.
 
@@ -266,6 +274,7 @@ class RAGSearchTool:
             collection: Collection to search
             context: External context
             max_iterations: Maximum iterations
+            session_key: Outer agent session key for multi-turn context
 
         Returns:
             MCPToolResponse with results
@@ -280,6 +289,7 @@ class RAGSearchTool:
                 context=context,
                 collection=collection,
                 max_iterations=max_iterations,
+                session_key=session_key,
             )
 
             _log(f"Loop completed: success={result.success}, chunks={len(result.chunks)}")
@@ -302,8 +312,9 @@ async def rag_search_handler(
     context: Optional[str] = None,
     max_iterations: int = 5,
     kb_id: Optional[str] = None,
+    session_key: Optional[str] = None,
 ) -> "MCPToolResponse":
-    """Handler for rag_search MCP tool.
+    """Handler for kb_search MCP tool.
 
     Note: 'collection' is injected by the main process (mcp.py) and
     should NOT be passed by the Agent. The Agent should use 'kb_id' instead.
@@ -314,6 +325,7 @@ async def rag_search_handler(
         collection=collection,
         context=context,
         max_iterations=max_iterations,
+        session_key=session_key,
     )
 
 

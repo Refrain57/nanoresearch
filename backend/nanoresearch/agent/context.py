@@ -276,7 +276,7 @@ Skills with available="false" need dependencies installed first - you can try in
                 kb_lines.append(line)
             kb_lines.extend([
                 "",
-                "To search a specific knowledge base, use `rag_search` with its `kb_id` parameter.",
+                "To search a specific knowledge base, use `kb_search` with its `kb_id` parameter.",
                 "Pass the exact kb_id value shown above. Do NOT prepend the KB name — the ID is the UUID alone.",
                 "If you don't know which KB to use, pick the one whose description best matches the user's question.",
             ])
