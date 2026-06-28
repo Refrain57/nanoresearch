@@ -10,6 +10,7 @@ import re
 import time
 import uuid as _uuid_mod
 from contextlib import AsyncExitStack, nullcontext
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -19,7 +20,6 @@ from loguru import logger
 _EVAL_SAMPLING_RATE = float(os.environ.get("EVAL_SAMPLING_RATE", "0.2"))
 _EVAL_BADCASE_DETECTION = os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "true").lower() == "true"
 
-from datetime import timedelta
 STARTUP_CONSOLIDATION_IDLE_SECONDS = int(os.environ.get("STARTUP_CONSOLIDATION_IDLE_SECONDS", "1800"))
 STARTUP_MIN_PENDING_TURNS = int(os.environ.get("STARTUP_MIN_PENDING_TURNS", "2"))
 

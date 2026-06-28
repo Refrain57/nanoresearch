@@ -34,7 +34,7 @@ CONSOLIDATION_TAIL_PROTECT = int(os.environ.get("CONSOLIDATION_TAIL_PROTECT", "8
 TOKEN_CONSOLIDATION_TARGET_RATIO = float(os.environ.get("TOKEN_CONSOLIDATION_TARGET_RATIO", "0.5"))
 CONSOLIDATION_SUMMARY_CONFIDENCE = float(os.environ.get("CONSOLIDATION_SUMMARY_CONFIDENCE", "0.7"))
 
-from nanoresearch.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
+from nanoresearch.utils.helpers import as_aware_utc, ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
 
 if TYPE_CHECKING:
     from nanoresearch.providers.base import LLMProvider
@@ -661,8 +661,6 @@ def plan_startup_consolidation(
     when the session is too active (idle gate), has too few turns, or no safe
     tail-protected boundary exists.
     """
-    from nanoresearch.utils.helpers import as_aware_utc
-
     if now_utc - as_aware_utc(session.updated_at) < idle_threshold:
         return None
 
