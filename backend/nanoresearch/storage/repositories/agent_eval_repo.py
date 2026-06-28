@@ -692,6 +692,7 @@ class AgentEvalRepository:
         baseline_score: dict | None = None,
         baseline_version_id: uuid.UUID | None = None,
         status: str = "pending",
+        score_sample: dict | None = None,        # B2: per-candidate per-case ScoreSample statistics
     ) -> OptimizationProposal:
         prop = OptimizationProposal(
             category=category,
@@ -701,6 +702,7 @@ class AgentEvalRepository:
             created_by=created_by,
             baseline_score=baseline_score,
             baseline_version_id=baseline_version_id,
+            score_sample=score_sample,           # B2: persist σ statistics for gate
         )
         async with self._factory() as session:
             session.add(prop)

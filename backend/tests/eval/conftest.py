@@ -71,6 +71,7 @@ class InMemoryAgentEvalRepo:
         baseline_score=None,
         baseline_version_id=None,
         status: str = "pending",
+        score_sample=None,       # B2: per-candidate per-case ScoreSample statistics
     ):
         prop = type("Proposal", (), {
             "id": uuid.uuid4(),
@@ -82,6 +83,7 @@ class InMemoryAgentEvalRepo:
             "created_by": created_by,
             "baseline_score": baseline_score,
             "baseline_version_id": baseline_version_id,
+            "score_sample": score_sample,
         })()
         self._proposals.append(prop)
         return prop

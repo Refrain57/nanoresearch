@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 # OptimizationCandidate is defined in tunable.py — import here for callers that
 # previously imported it from optimizer.py.
 from nanoresearch.eval.tunable import OptimizationCandidate  # noqa: F401  (re-export)
+from nanoresearch.eval.score_sample import ScoreSample
 
 # ---------------------------------------------------------------------------
 # Phase 5: deployment gate thresholds (hardcoded — no dynamic threshold yet;
@@ -54,10 +55,13 @@ from nanoresearch.eval.tunable import OptimizationCandidate  # noqa: F401  (re-e
 _GATE_IMPROVE = 0.05   # fix_set delta must be ≥ this (candidate beats baseline on fix set)
 _GATE_TOLERATE = 0.02  # health_set delta must be ≥ -this (candidate doesn't wreck health set)
 
+# B2: each (candidate, case) scored this many times to estimate σ for σ-weighted gate.
+_SCORE_REPEAT_N = 3
 
-def _dict_mean(d: dict) -> float:
-    """Mean of dict values. Returns 0.0 for empty dict (scores absent = neutral)."""
-    return round(sum(d.values()) / len(d), 4) if d else 0.0
+
+def _dict_mean(d: dict[str, ScoreSample]) -> float:
+    """Mean of ScoreSample means. Returns 0.0 for empty dict (scores absent = neutral)."""
+    return round(sum(ss.mean for ss in d.values()) / len(d), 4) if d else 0.0
 
 
 class OptimizationAgent:
@@ -143,14 +147,22 @@ class OptimizationAgent:
         baseline_health = await self._score_candidate_set(
             target, baseline_candidate, health_test_cases, health_recordings
         )
-        baseline_score = {"fix_set": baseline_fix, "health_set": baseline_health}
+        # baseline_score: store as serializable dict for the JSONB column
+        baseline_score = {
+            "fix_set": {k: ss.to_dict() for k, ss in baseline_fix.items()},
+            "health_set": {k: ss.to_dict() for k, ss in baseline_health.items()},
+        }
 
         baseline_fix_mean = _dict_mean(baseline_fix)
         baseline_health_mean = _dict_mean(baseline_health)
 
         # ---- score candidates ----
         scored: list[dict[str, Any]] = []
-        for candidate in candidates:
+        # Accumulate per-candidate score_sample data: {cand_idx: {case_id: ScoreSample}}
+        fix_score_samples: dict[int, dict[str, ScoreSample]] = {}
+        health_score_samples: dict[int, dict[str, ScoreSample]] = {}
+
+        for cand_idx, candidate in enumerate(candidates):
             try:
                 fix_scores = await self._score_candidate_set(
                     target, candidate, fix_test_cases, fix_recordings
@@ -167,9 +179,16 @@ class OptimizationAgent:
                 fix_scores = {}
                 health_scores = {}
 
-            dual_scores = {"fix_set": fix_scores, "health_set": health_scores}
+            fix_score_samples[cand_idx] = fix_scores
+            health_score_samples[cand_idx] = health_scores
+
+            # For backward compat: compute mean scores using ScoreSample.mean
+            dual_scores = {
+                "fix_set": {k: ss.to_dict() for k, ss in fix_scores.items()},
+                "health_set": {k: ss.to_dict() for k, ss in health_scores.items()},
+            }
             fix_mean = (
-                round(sum(fix_scores.values()) / len(fix_scores), 4)
+                round(sum(ss.mean for ss in fix_scores.values()) / len(fix_scores), 4)
                 if fix_scores else 0.0
             )
 
@@ -205,6 +224,19 @@ class OptimizationAgent:
         )
         proposal_status = "gate_all_rejected" if all_rejected else "pending"
 
+        # ---- build score_sample payload: {fix/health: {cand_idx: {case_id: dict}}} ----
+        # Explicit two-shape: fix and health sets separated, keyed by candidate index then case_id.
+        score_sample_payload: dict[str, Any] = {
+            "fix": {
+                str(cand_idx): {case_id: ss.to_dict() for case_id, ss in per_case.items()}
+                for cand_idx, per_case in fix_score_samples.items()
+            },
+            "health": {
+                str(cand_idx): {case_id: ss.to_dict() for case_id, ss in per_case.items()}
+                for cand_idx, per_case in health_score_samples.items()
+            },
+        }
+
         return await self._repo.create_optimization_proposal(
             category=f"{target.kind}:{target.target_id}",
             proposals=scored,
@@ -212,6 +244,7 @@ class OptimizationAgent:
             baseline_score=baseline_score,
             baseline_version_id=baseline_version_id,
             status=proposal_status,
+            score_sample=score_sample_payload,
         )
 
     async def _gather_recordings(
@@ -239,14 +272,108 @@ class OptimizationAgent:
                 result[tc.id] = json.dumps(snap.tool_recordings)
         return result
 
+    async def _score_one(
+        self,
+        target: "TunableTextObject",
+        candidate: "OptimizationCandidate",
+        tc: "AgentTestCase",
+        recordings_map: dict[uuid.UUID, str],
+        tool_desc_system_prompt: str | None = None,
+    ) -> float | None:
+        """Score a single (candidate, test_case) pair. Returns a scalar score or None on failure.
+
+        Extracted from the inner body of _score_candidate_set's per-case loop so that
+        the N-repeat loop can call it without duplicating the sandbox dispatch logic.
+        """
+        import json
+
+        from nanoresearch.agent.runner import AgentRunner, AgentRunSpec
+        from nanoresearch.eval.evaluator import RuleEvaluator
+        from nanoresearch.eval.sandbox import SandboxedToolRegistry
+        from nanoresearch.eval.snapshot import RunSnapshotCollector
+
+        runner = AgentRunner(self._provider)
+        evaluator = RuleEvaluator()
+
+        recordings_json = recordings_map.get(tc.id)
+        use_sandbox = recordings_json is not None
+        if not use_sandbox and tc.expected_tools:
+            logger.warning(
+                "OptimizationAgent: test case {} has expected_tools but no recordings — skipping",
+                tc.id,
+            )
+            return None
+
+        try:
+            recorded = json.loads(recordings_json) if recordings_json else {}
+
+            if target.kind == "tool_description":
+                tools: Any = SandboxedToolRegistry(
+                    registry=self._registry,
+                    mode="side_effect_only",
+                    recorded=recorded,
+                    description_overrides={target.target_id: candidate.prompt},
+                )
+                system_content: Any = tool_desc_system_prompt or ""
+            else:
+                tools = (
+                    SandboxedToolRegistry.from_recordings_json(self._registry, recordings_json)
+                    if use_sandbox
+                    else self._registry
+                )
+                system_content = candidate.prompt
+
+            collector = RunSnapshotCollector()
+            initial_messages = [{"role": "system", "content": system_content}]
+            if tc.session_history:
+                initial_messages.extend(tc.session_history)
+            initial_messages.append({"role": "user", "content": tc.user_input})
+
+            spec = AgentRunSpec(
+                initial_messages=initial_messages,
+                tools=tools,
+                model=self._model,
+                max_iterations=10,
+                concurrent_tools=False,
+                snapshot_collector=collector,
+            )
+            result = await runner.run(spec)
+            status = (
+                "failed"
+                if result.stop_reason in ("error", "tool_error", "consecutive_failures")
+                else "success"
+            )
+            snapshot_data = collector.build(
+                run_id=str(uuid.uuid4()),
+                user_input=tc.user_input,
+                final_response=result.final_content,
+                status=status,
+            )
+            scores = await evaluator.evaluate(snapshot_data, tc)
+            # Return mean of all dimension scores for this case.
+            # If no dimensions are configured (no expected_tools/keywords/intent),
+            # return completion score: 1.0 = agent ran successfully, 0.0 = error.
+            if not scores:
+                completion_score = 0.0 if status == "failed" else 1.0
+                return completion_score
+            return round(sum(scores.values()) / len(scores), 4)
+        except Exception as exc:
+            logger.warning(
+                "OptimizationAgent._score_one: test case {} failed: {}", tc.id, exc
+            )
+            return None
+
     async def _score_candidate_set(
         self,
         target: "TunableTextObject",
         candidate: "OptimizationCandidate",
         test_cases: "list[AgentTestCase]",
         recordings_map: dict[uuid.UUID, str],
-    ) -> dict[str, float]:
+    ) -> dict[str, "ScoreSample"]:
         """Score a candidate against one test set (fix or health).
+
+        Each (candidate, case) pair is scored _SCORE_REPEAT_N times to estimate σ
+        for the B2 σ-weighted gate. Returns dict[case_id_str, ScoreSample].
 
         system_prompt assembly:
           - system_prompt (kind="tool_description"): built via ContextBuilder with agent
@@ -266,17 +393,6 @@ class OptimizationAgent:
         health cases that are purely text-based (no expected_tools). Fix cases without
         recordings are skipped with a warning.
         """
-        import json
-
-        from nanoresearch.agent.runner import AgentRunner, AgentRunSpec
-        from nanoresearch.eval.evaluator import RuleEvaluator
-        from nanoresearch.eval.sandbox import SandboxedToolRegistry
-        from nanoresearch.eval.snapshot import RunSnapshotCollector
-
-        runner = AgentRunner(self._provider)
-        evaluator = RuleEvaluator()
-        all_scores: list[dict[str, float]] = []
-
         # --- tool_description: build system prompt once via ContextBuilder ---
         tool_desc_system_prompt: str | None = None
         if target.kind == "tool_description":
@@ -284,78 +400,20 @@ class OptimizationAgent:
                 target, self._registry.tool_names
             )
 
+        result: dict[str, ScoreSample] = {}
         for tc in test_cases:
-            recordings_json = recordings_map.get(tc.id)
-            use_sandbox = recordings_json is not None
-            if not use_sandbox and tc.expected_tools:
-                logger.warning(
-                    "OptimizationAgent: test case {} has expected_tools but no recordings — skipping",
-                    tc.id,
+            observations: list[float] = []
+            for _ in range(_SCORE_REPEAT_N):
+                score = await self._score_one(
+                    target, candidate, tc, recordings_map,
+                    tool_desc_system_prompt=tool_desc_system_prompt,
                 )
+                if score is not None:
+                    observations.append(score)
+            if not observations:
                 continue
-
-            try:
-                recorded = json.loads(recordings_json) if recordings_json else {}
-
-                if target.kind == "tool_description":
-                    tools: Any = SandboxedToolRegistry(
-                        registry=self._registry,
-                        mode="side_effect_only",
-                        recorded=recorded,
-                        description_overrides={target.target_id: candidate.prompt},
-                    )
-                    system_content: Any = tool_desc_system_prompt or ""
-                else:
-                    tools = (
-                        SandboxedToolRegistry.from_recordings_json(self._registry, recordings_json)
-                        if use_sandbox
-                        else self._registry
-                    )
-                    system_content = candidate.prompt
-
-                collector = RunSnapshotCollector()
-                initial_messages = [{"role": "system", "content": system_content}]
-                if tc.session_history:
-                    initial_messages.extend(tc.session_history)
-                initial_messages.append({"role": "user", "content": tc.user_input})
-
-                spec = AgentRunSpec(
-                    initial_messages=initial_messages,
-                    tools=tools,
-                    model=self._model,
-                    max_iterations=10,
-                    concurrent_tools=False,
-                    snapshot_collector=collector,
-                )
-                result = await runner.run(spec)
-                status = (
-                    "failed"
-                    if result.stop_reason in ("error", "tool_error", "consecutive_failures")
-                    else "success"
-                )
-                snapshot_data = collector.build(
-                    run_id=str(uuid.uuid4()),
-                    user_input=tc.user_input,
-                    final_response=result.final_content,
-                    status=status,
-                )
-                scores = await evaluator.evaluate(snapshot_data, tc)
-                all_scores.append(scores)
-            except Exception as exc:
-                logger.warning(
-                    "OptimizationAgent._score_candidate_set: test case {} failed: {}", tc.id, exc
-                )
-
-        if not all_scores:
-            return {}
-
-        all_dims = set(d for s in all_scores for d in s)
-        avg: dict[str, float] = {}
-        for dim in all_dims:
-            vals = [s[dim] for s in all_scores if dim in s]
-            if vals:
-                avg[dim] = round(sum(vals) / len(vals), 4)
-        return avg
+            result[str(tc.id)] = ScoreSample.from_observations(observations)
+        return result
 
 
 async def _build_tool_desc_system_prompt(target: Any, tool_names: list[str]) -> str:

@@ -421,6 +421,12 @@ class OptimizationProposal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, ForeignKey("users.uid"), nullable=True)
+    baseline_score: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+    baseline_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, default=None)
+
+    # B2: per-case repeat statistics for σ-weighted gate (Phase 1 of A1).
+    # Shape: {"fix": {cand_idx: {case_id: {"mean": float, "std": float, "n": int}}}, "health": {...}}
+    score_sample: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
 
 
 class TunableObjectVersion(Base):

@@ -36,6 +36,7 @@ class _MockRepo:
     async def create_optimization_proposal(
         self, category, proposals, created_by,
         baseline_score=None, baseline_version_id=None, status="pending",
+        score_sample=None,
     ):
         p = type("P", (), {
             "id": uuid.uuid4(),
@@ -47,6 +48,7 @@ class _MockRepo:
             "created_by": created_by,
             "baseline_score": baseline_score,
             "baseline_version_id": baseline_version_id,
+            "score_sample": score_sample,
         })()
         self.created_proposals.append(p)
         return p
@@ -201,6 +203,39 @@ class TestGenerateProposalsFullPath:
                 fix_test_cases=[],
                 health_test_cases=[_make_case_with_metadata(dimension="general_health")],
             )
+
+    @pytest.mark.asyncio
+    async def test_full_path_persists_score_sample(
+        self, in_memory_repo, fake_llm_provider, seeded_tool_registry
+    ):
+        """score_sample must be persisted on the proposal with the correct shape and n==3."""
+        from nanoresearch.eval.optimizer import OptimizationAgent
+
+        agent = OptimizationAgent(
+            provider=fake_llm_provider,
+            repo=in_memory_repo,
+            registry=seeded_tool_registry,
+        )
+        target = _MockToolTarget()
+        fix_cases = [_make_case_with_metadata(dimension="tool_schema_correctness")]
+        health_cases = [_make_case_with_metadata(dimension="general_health")]
+
+        proposal = await agent.generate_proposals(
+            target=target,
+            representative_snapshots=[],
+            fix_test_cases=fix_cases,
+            health_test_cases=health_cases,
+        )
+
+        assert proposal.score_sample is not None, "score_sample must be persisted"
+        assert "fix" in proposal.score_sample
+        assert "health" in proposal.score_sample
+        # Drill into first candidate, first case — verify mean / std / n all present
+        first_cand_fix = next(iter(proposal.score_sample["fix"].values()))
+        first_case_sample = next(iter(first_cand_fix.values()))
+        assert "mean" in first_case_sample and first_case_sample["mean"] is not None
+        assert "std" in first_case_sample and first_case_sample["std"] is not None
+        assert "n" in first_case_sample and first_case_sample["n"] == 3
 
     @pytest.mark.asyncio
     async def test_full_path_raises_on_empty_health_set(
