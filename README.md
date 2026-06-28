@@ -880,6 +880,18 @@ The directory is created automatically on first write. The legacy
 `NANOBOT_HOME` environment variable is also accepted for backward
 compatibility and will be removed in v0.3.0.
 
+### NANORESEARCH_MODE
+
+控制部署形态：
+
+- `local`（默认）：单用户本地开发，凭证按 `user_settings > config.json > settings.yaml > env var` 链路兜底
+- `server`：多租户部署，凭证唯一来源 `user_settings.extra.providers`；用户没填 key 时返回 422 `{"error":"missing_provider","role":"<chat|embedding|...>"}`，不读 `config.json` 也不读 `OPENAI_API_KEY` 等 env
+
+切换示例：
+```bash
+NANORESEARCH_MODE=server ./backend/.venv/Scripts/python -m nanoresearch serve
+```
+
 ### Providers
 
 | Provider | Purpose | Get API Key |
