@@ -24,7 +24,8 @@ def _repo(request: Request) -> UserSettingsRepository:
 class ProviderIn(BaseModel):
     id: str | None = None
     name: str
-    api_key: str | None = None   # None = keep existing; "" = clear
+    provider: str | None = None   # preset key: deepseek/openai/anthropic/dashscope/azure_openai/siliconflow/openai_compatible
+    api_key: str | None = None    # None = keep existing; "" = clear
     api_base: str | None = None
     models: list[str] = []
 
@@ -35,6 +36,7 @@ class UserSettingsUpdate(BaseModel):
     fast_model: str | None = None
     max_iterations: int | None = None
     providers: list[ProviderIn] | None = None
+    roles: dict[str, dict | None] | None = None
     ragas_generator_model: str | None = None
     ragas_evaluator_model: str | None = None
     ragas_embedding_model: str | None = None
@@ -55,6 +57,7 @@ def _mask_providers(providers: list[dict]) -> list[dict]:
         {
             "id": p.get("id"),
             "name": p.get("name", ""),
+            "provider": p.get("provider"),
             "api_base": p.get("api_base"),
             "api_key_set": bool(p.get("api_key")),
             "api_key_hint": _mask_key(p.get("api_key") or ""),
@@ -79,6 +82,7 @@ def _merge_providers(existing: list[dict], incoming: list[ProviderIn]) -> list[d
         result.append({
             "id": pid,
             "name": p.name,
+            "provider": p.provider if p.provider is not None else base.get("provider"),
             "api_base": p.api_base,
             "models": p.models,
             "api_key": api_key,
@@ -93,6 +97,7 @@ def _to_dict(row, defaults: dict) -> dict:
         "fast_model": extra.get("fast_model"),
         "max_iterations": (row.max_iterations if row else None) or defaults.get("max_iterations"),
         "providers": _mask_providers(extra.get("providers", [])),
+        "roles": extra.get("roles") or {},
         "ragas_generator_model": extra.get("ragas_generator_model") or defaults.get("ragas_generator_model"),
         "ragas_evaluator_model": extra.get("ragas_evaluator_model") or defaults.get("ragas_evaluator_model"),
         "ragas_embedding_model": extra.get("ragas_embedding_model") or defaults.get("ragas_embedding_model"),
@@ -146,6 +151,10 @@ async def update_settings(
 
     if "providers" in sent and body.providers is not None:
         extra["providers"] = _merge_providers(extra.get("providers", []), body.providers)
+        extra_changed = True
+
+    if "roles" in sent and body.roles is not None:
+        extra["roles"] = body.roles
         extra_changed = True
 
     for field, key in [
