@@ -352,10 +352,10 @@ class OptimizationAgent:
             scores = await evaluator.evaluate(snapshot_data, tc)
             # Return mean of all dimension scores for this case.
             # If no dimensions are configured (no expected_tools/keywords/intent),
-            # return completion score: 1.0 = agent ran successfully, 0.0 = error.
+            # return None so the caller's "if not observations: continue" skips
+            # this case — avoids polluting σ-weighted gate with binary liveness signal.
             if not scores:
-                completion_score = 0.0 if status == "failed" else 1.0
-                return completion_score
+                return None
             return round(sum(scores.values()) / len(scores), 4)
         except Exception as exc:
             logger.warning(

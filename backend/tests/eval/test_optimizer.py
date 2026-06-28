@@ -280,7 +280,9 @@ def _make_case_with_metadata(dimension: str):
         # Fields required by optimizer._gather_recordings and _score_candidate_set:
         tool_recordings=None,    # no pre-recorded tool calls
         expected_tools=None,     # no tool-presence assertion → no sandbox, no skip
-        expected_keywords=None,
+        # Real criterion: fake_llm_provider's default stop response is
+        # "I understand your question." — "question" is always present.
+        expected_keywords=["question"],
         expected_intent=None,
         token_budget=None,
         session_history=None,
