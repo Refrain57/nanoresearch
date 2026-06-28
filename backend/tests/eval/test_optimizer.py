@@ -403,7 +403,8 @@ def _patch_score_one_for_target(agent, target: _ScorePatternTarget):
             else:
                 obs = [mean - std, mean, mean + std]
             result[str(tc.id)] = _ScoreSample.from_observations(obs)
-        return result
+        # Return tuple (scores, fuzzy_ratio) to match the real _score_candidate_set signature.
+        return result, 0.0
 
     # Store baseline text on target after read() is called.
     # We patch target.read() to record what it returns.
@@ -502,9 +503,8 @@ def _make_case_with_metadata(dimension: str):
     attributes needed by the optimizer.
 
     Uses SimpleNamespace instead of the SQLAlchemy AgentTestCase ORM class because
-    AgentTestCase.tool_recordings is not yet added to the model (fixed in Task 6).
-    The optimizer uses duck typing throughout, so this is safe and correct for unit
-    and integration tests.
+    it avoids a real DB connection. The optimizer uses duck typing throughout,
+    so this is safe and correct for unit and integration tests.
     """
     import types
     from datetime import datetime, timezone
@@ -529,3 +529,281 @@ def _make_case_with_metadata(dimension: str):
         session_history=None,
         human_score=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (B2-Fuzzy): fuzzy-match-driven signal_unreliable tests
+# ---------------------------------------------------------------------------
+
+def _make_high_fuzzy_recordings() -> dict:
+    """Build a recordings dict whose keys are in the JSON-object format with
+    extra whitespace in values — exact match will fail; fuzzy match will succeed.
+
+    Returns a dict: {case_id_str: recordings_json_str}
+    used by the seeded_tool_registry_high_fuzzy fixture / _MockHighFuzzyRepo.
+    """
+    import json
+    # Recorded with whitespace padding in value → exact match fails; fuzzy strips it.
+    recorded_dict = {
+        '{"tool":"weather_tool","params":{"location":"  Paris  "}}': "Weather: cloudy",
+    }
+    return json.dumps(recorded_dict)
+
+
+class _MockHighFuzzyRepo:
+    """In-memory repo that returns recordings whose keys only fuzzy-match, not exact-match."""
+
+    def __init__(self):
+        self.created_proposals = []
+
+    async def create_optimization_proposal(
+        self, category, proposals, created_by,
+        baseline_score=None, baseline_version_id=None, status="pending",
+        score_sample=None,
+    ):
+        p = type("P", (), {
+            "id": uuid.uuid4(),
+            "category": category,
+            "proposals": proposals,
+            "status": status,
+            "created_at": None,
+            "approved_at": None,
+            "created_by": created_by,
+            "baseline_score": baseline_score,
+            "baseline_version_id": baseline_version_id,
+            "score_sample": score_sample,
+        })()
+        self.created_proposals.append(p)
+        return p
+
+    async def get_latest_snapshot_with_recordings(self, user_input, uid=None):
+        return None
+
+
+def _make_high_fuzzy_case(dimension: str):
+    """Build a test case whose tool_recordings will only fuzzy-match in the sandbox.
+
+    The recordings dict uses whitespace-padded param values so the exact key
+    (built from the unpadded agent call) misses, triggering the fuzzy path.
+    """
+    import types, json
+    from datetime import datetime, timezone
+
+    # Recorded with padded location; agent will call with "Paris" (no padding)
+    recorded_dict = {
+        '{"tool":"weather_tool","params":{"location":"  Paris  "}}': "Weather: cloudy",
+    }
+    recordings_json = json.dumps(recorded_dict)
+
+    return types.SimpleNamespace(
+        id=uuid.uuid4(),
+        dataset_type="fix" if dimension == "tool_schema_correctness" else "health",
+        name=f"high_fuzzy_case_for_{dimension}",
+        user_input="What is the weather in Paris?",
+        target_dimension=dimension,
+        added_at=datetime.now(timezone.utc),
+        added_by="test:integration",
+        coverage_tags=[dimension],
+        tool_recordings=recorded_dict,   # dict stored directly (as in TC row)
+        expected_tools=["weather_tool"],
+        expected_keywords=["question"],
+        expected_intent=None,
+        token_budget=None,
+        session_history=None,
+        human_score=None,
+    )
+
+
+class _MockHighFuzzyLLMProvider:
+    """LLM provider for high-fuzzy tests.
+
+    First call: returns candidate JSON (for generate_candidates).
+    Subsequent calls (AgentRunner): returns a response that triggers the weather_tool,
+    so that the sandbox path (fuzzy hit) is exercised.
+    """
+
+    def __init__(self):
+        # Queue of responses: first is candidate JSON, then tool-calling responses
+        self._call_count = 0
+
+    def get_default_model(self) -> str:
+        return "test-model"
+
+    async def chat_with_retry(self, messages, tools=None, model=None, **kwargs):
+        from nanoresearch.eval.sandbox import SandboxedToolRegistry  # noqa
+        self._call_count += 1
+        if self._call_count == 1:
+            # Candidate generation call
+            content = '[{"prompt": "Retrieve weather data for any city", "rationale": "improved"}]'
+        else:
+            # AgentRunner scoring call — return tool call for weather_tool with "Paris"
+            # to trigger the fuzzy match path (recorded has "  Paris  ", agent calls "Paris")
+            import json as _json
+            tool_call = {
+                "id": f"call_{self._call_count}",
+                "type": "function",
+                "function": {"name": "weather_tool", "arguments": _json.dumps({"location": "Paris"})},
+            }
+
+            class _ToolResponse:
+                content = ""
+                finish_reason = "tool_calls"
+                usage = {}
+                reasoning_content = None
+                thinking_blocks = None
+
+                @property
+                def has_tool_calls(self):
+                    return True
+
+                @property
+                def tool_calls(self):
+                    return [type("TC", (), {
+                        "id": tool_call["id"],
+                        "function": type("F", (), {
+                            "name": tool_call["function"]["name"],
+                            "arguments": tool_call["function"]["arguments"],
+                        })(),
+                    })()]
+
+            if self._call_count % 2 == 0:
+                return _ToolResponse()
+            else:
+                # After tool call, return final stop response
+                class _StopResponse:
+                    content = "The weather in Paris: cloudy. Does this answer your question?"
+                    finish_reason = "stop"
+                    usage = {}
+                    reasoning_content = None
+                    thinking_blocks = None
+                    tool_calls = []
+
+                    @property
+                    def has_tool_calls(self):
+                        return False
+
+                return _StopResponse()
+
+
+class TestFuzzyMatchSignalUnreliable:
+    """Tests for the fuzzy-match ratio gate (B2-Fuzzy): proposal gets status=signal_unreliable
+    when sandbox fuzzy_match_ratio > _FUZZY_UNRELIABLE_THRESHOLD (0.30)."""
+
+    @pytest.mark.asyncio
+    async def test_high_fuzzy_ratio_marks_signal_unreliable(
+        self, in_memory_repo, seeded_tool_registry
+    ):
+        """When sandbox fuzzy_match_ratio > 0.30, proposal status = signal_unreliable.
+
+        Uses _ScorePatternTarget with monkey-patched _score_candidate_set that
+        also sets a high fuzzy_match_ratio on the sandbox, verifying the status
+        propagates to the proposal.
+        """
+        from nanoresearch.eval.optimizer import OptimizationAgent, _FUZZY_UNRELIABLE_THRESHOLD
+        from nanoresearch.eval.score_sample import ScoreSample
+        import types as _types
+
+        provider = _MockHighFuzzyLLMProvider()
+        agent = OptimizationAgent(
+            provider=provider,
+            repo=in_memory_repo,
+            registry=seeded_tool_registry,
+        )
+        target = _ScorePatternTarget()
+        target.set_score_pattern(
+            baseline_mean=0.5, baseline_std=0.0,
+            candidate_mean=0.5, candidate_std=0.0,
+        )
+        # Store baseline text early so patch can detect it
+        target._baseline_text = "original weather tool desc"
+
+        # Patch _score_candidate_set to return a high fuzzy ratio along with scores
+        async def _fake_score_set_high_fuzzy(self_inner, tgt, candidate, test_cases, recordings_map):
+            result = {}
+            for tc in test_cases:
+                result[str(tc.id)] = ScoreSample.from_observations([0.5, 0.5, 0.5])
+            # Return tuple: (scores, fuzzy_ratio)
+            fuzzy_ratio = 0.80  # well above 0.30 threshold
+            return result, fuzzy_ratio
+
+        agent._score_candidate_set = _types.MethodType(_fake_score_set_high_fuzzy, agent)
+
+        fix_cases = [_make_case_with_metadata("tool_schema_correctness")]
+        health_cases = [_make_case_with_metadata("general_health")]
+
+        proposal = await agent.generate_proposals(
+            target=target,
+            representative_snapshots=[],
+            fix_test_cases=fix_cases,
+            health_test_cases=health_cases,
+        )
+        assert proposal.status == "signal_unreliable", (
+            f"Expected signal_unreliable when fuzzy_ratio > {_FUZZY_UNRELIABLE_THRESHOLD}, "
+            f"got {proposal.status!r}"
+        )
+        for c in proposal.proposals:
+            assert "fuzzy_match_ratio" in c, f"fuzzy_match_ratio missing from candidate: {c.keys()}"
+            assert c["fuzzy_match_ratio"] > 0.30, (
+                f"Expected fuzzy_match_ratio > 0.30, got {c['fuzzy_match_ratio']}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_low_fuzzy_ratio_does_not_mark_unreliable(
+        self, in_memory_repo, seeded_tool_registry
+    ):
+        """When fuzzy_match_ratio <= 0.30, proposal status must NOT be signal_unreliable."""
+        from nanoresearch.eval.optimizer import OptimizationAgent
+        from nanoresearch.eval.score_sample import ScoreSample
+        import types as _types
+
+        provider = _MockHighFuzzyLLMProvider()
+        agent = OptimizationAgent(
+            provider=provider,
+            repo=in_memory_repo,
+            registry=seeded_tool_registry,
+        )
+        target = _ScorePatternTarget()
+        target.set_score_pattern(
+            baseline_mean=0.5, baseline_std=0.0,
+            candidate_mean=0.5, candidate_std=0.0,
+        )
+        target._baseline_text = "original weather tool desc"
+
+        # Patch _score_candidate_set to return a LOW fuzzy ratio
+        async def _fake_score_set_low_fuzzy(self_inner, tgt, candidate, test_cases, recordings_map):
+            result = {}
+            for tc in test_cases:
+                result[str(tc.id)] = ScoreSample.from_observations([0.5, 0.5, 0.5])
+            fuzzy_ratio = 0.10  # below 0.30 threshold
+            return result, fuzzy_ratio
+
+        agent._score_candidate_set = _types.MethodType(_fake_score_set_low_fuzzy, agent)
+
+        fix_cases = [_make_case_with_metadata("tool_schema_correctness")]
+        health_cases = [_make_case_with_metadata("general_health")]
+
+        proposal = await agent.generate_proposals(
+            target=target,
+            representative_snapshots=[],
+            fix_test_cases=fix_cases,
+            health_test_cases=health_cases,
+        )
+        assert proposal.status != "signal_unreliable", (
+            f"Expected NOT signal_unreliable when fuzzy_ratio <= 0.30, got {proposal.status!r}"
+        )
+        for c in proposal.proposals:
+            assert c.get("fuzzy_match_ratio", 0.0) <= 0.30
+
+
+# ---------------------------------------------------------------------------
+# Pre-step: ORM ghost-field regression test
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_agent_test_case_tool_recordings_round_trips_through_orm():
+    """Regression: tool_recordings was a ghost field on AgentTestCase, silently
+    returning None and killing _gather_recordings's case-level priority path."""
+    from sqlalchemy import inspect
+    from nanoresearch.storage.models import AgentTestCase
+    cols = {c.key for c in inspect(AgentTestCase).columns}
+    assert "tool_recordings" in cols, "AgentTestCase.tool_recordings must be ORM-declared, not ghost"

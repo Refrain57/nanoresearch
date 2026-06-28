@@ -381,6 +381,7 @@ class AgentTestCase(Base):
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)  # active | pending_review | rejected
     generated_from_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"), nullable=True)
     generation_reason: Mapped[str | None] = mapped_column(Text)
+    tool_recordings: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # B4 metadata (Phase 1 of A1 tool-layer harness refactor)
     origin_badcase_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -25,6 +25,21 @@ def _normalize_params(params: Any) -> Any:
     return params
 
 
+def _normalize_params_for_fuzzy(name: str, params: dict) -> str:
+    """Build a normalized key for fuzzy matching: strip strings, sort keys."""
+    def normalize_value(v):
+        if isinstance(v, str):
+            return v.strip()
+        if isinstance(v, dict):
+            return {k: normalize_value(v[k]) for k in sorted(v)}
+        if isinstance(v, list):
+            return [normalize_value(x) for x in v]
+        return v
+
+    normalized = {k: normalize_value(params[k]) for k in sorted(params)}
+    return json.dumps({"tool": name, "params": normalized}, separators=(",", ":"), sort_keys=True)
+
+
 class SandboxReplayError(Exception):
     """Raised when a tool call has no recorded result in replay mode."""
 
@@ -65,6 +80,8 @@ class SandboxedToolRegistry:
         self._dropped_count = 0
         self._description_overrides: dict[str, str] = dict(description_overrides) if description_overrides else {}
         self._audit_log: list[dict[str, Any]] = []
+        self._total_executions = 0
+        self._fuzzy_hits = 0
 
     # ------------------------------------------------------------------
     # ToolRegistry interface — forward non-execution calls directly
@@ -95,6 +112,13 @@ class SandboxedToolRegistry:
     # ------------------------------------------------------------------
 
     async def execute(self, name: str, params: dict) -> Any:
+        if self._mode == "side_effect_only":
+            # side_effect_only uses JSON-object key format: {"tool":"<name>","params":{...}}
+            # Params are NOT pre-normalized so that key-order/whitespace differences fall
+            # through to fuzzy matching (the normalization is the fuzzy match's job).
+            key = json.dumps({"tool": name, "params": params}, separators=(",", ":"))
+            return await self._execute_side_effect_only(name, params, key)
+
         key = f"{name}:{json.dumps(_normalize_params(params), ensure_ascii=False)}"
 
         if self._mode == "replay":
@@ -103,9 +127,6 @@ class SandboxedToolRegistry:
                     f"No recorded result for tool '{name}' with params: {key}"
                 )
             return self._recorded[key]
-
-        if self._mode == "side_effect_only":
-            return await self._execute_side_effect_only(name, params, key)
 
         result = await self._registry.execute(name, params)
 
@@ -124,13 +145,36 @@ class SandboxedToolRegistry:
         return result
 
     async def _execute_side_effect_only(self, name: str, params: dict, key: str) -> Any:
-        # Recording-first: if the baseline run produced this exact call, return its result.
-        # A cache hit signals that the description change did NOT alter this invocation —
-        # the recorded result is the real baseline outcome, not fabricated data.
+        self._total_executions += 1
+
+        # 1. Exact key hit → return recorded
         if key in self._recorded:
+            self._audit_log.append({
+                "tool": name, "key": key, "match_type": "exact",
+                "action": "recorded_hit",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
             return self._recorded[key]
 
-        # Recording miss: route by side_effect classification.
+        # 2. Fuzzy match: try normalized key against normalized recorded keys.
+        fuzzy_key = _normalize_params_for_fuzzy(name, params)
+        for rec_key, rec_value in self._recorded.items():
+            try:
+                rec_parsed = json.loads(rec_key)
+                rec_normalized = _normalize_params_for_fuzzy(rec_parsed["tool"], rec_parsed["params"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+            if rec_normalized == fuzzy_key:
+                self._fuzzy_hits += 1
+                self._audit_log.append({
+                    "tool": name, "key": key, "match_type": "fuzzy",
+                    "matched_recorded_key": rec_key,
+                    "action": "recorded_hit",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                })
+                return rec_value
+
+        # 3. Miss → existing side-effect vs query branching (unchanged behavior).
         tool = self._registry.get(name) if hasattr(self._registry, "get") else None
         is_side_effect = tool.side_effect if tool is not None else True  # unknown → conservative
 
@@ -173,6 +217,13 @@ class SandboxedToolRegistry:
     def audit_log(self) -> list[dict[str, Any]]:
         """Intercepted side-effect calls in side_effect_only mode (read-only copy)."""
         return list(self._audit_log)
+
+    @property
+    def fuzzy_match_ratio(self) -> float:
+        """Fraction of side_effect_only executions resolved via fuzzy (not exact) match."""
+        if self._total_executions == 0:
+            return 0.0
+        return self._fuzzy_hits / self._total_executions
 
     def export_recordings(self) -> str:
         """Serialize recordings to JSON string for storage."""

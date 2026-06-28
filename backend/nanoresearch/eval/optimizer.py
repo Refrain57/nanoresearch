@@ -56,6 +56,7 @@ from nanoresearch.eval.score_sample import ScoreSample
 # k=1.96 corresponds to 95% one-sided z-score.
 # ---------------------------------------------------------------------------
 _GATE_SIGMA_K = 1.96  # 95% one-sided confidence: require delta_mean ≥ k·σ_combined to accept
+_FUZZY_UNRELIABLE_THRESHOLD = 0.30  # fuzzy_match_ratio above this marks the proposal signal_unreliable
 
 
 def _combined_sigma(baseline: "ScoreSample", candidate: "ScoreSample") -> float:
@@ -180,10 +181,10 @@ class OptimizationAgent:
             prompt=baseline_text,
             rationale="baseline (current deployed version)",
         )
-        baseline_fix = await self._score_candidate_set(
+        baseline_fix, _baseline_fix_fuzzy = await self._score_candidate_set(
             target, baseline_candidate, fix_test_cases, fix_recordings
         )
-        baseline_health = await self._score_candidate_set(
+        baseline_health, _baseline_health_fuzzy = await self._score_candidate_set(
             target, baseline_candidate, health_test_cases, health_recordings
         )
         # baseline_score: store as serializable dict for the JSONB column
@@ -203,10 +204,10 @@ class OptimizationAgent:
 
         for cand_idx, candidate in enumerate(candidates):
             try:
-                fix_scores = await self._score_candidate_set(
+                fix_scores, fix_fuzzy_ratio = await self._score_candidate_set(
                     target, candidate, fix_test_cases, fix_recordings
                 )
-                health_scores = await self._score_candidate_set(
+                health_scores, health_fuzzy_ratio = await self._score_candidate_set(
                     target, candidate, health_test_cases, health_recordings
                 )
             except NotImplementedError as exc:
@@ -217,6 +218,8 @@ class OptimizationAgent:
                 )
                 fix_scores = {}
                 health_scores = {}
+                fix_fuzzy_ratio = 0.0
+                health_fuzzy_ratio = 0.0
 
             fix_score_samples[cand_idx] = fix_scores
             health_score_samples[cand_idx] = health_scores
@@ -263,6 +266,8 @@ class OptimizationAgent:
                     "fix": round(_GATE_SIGMA_K * fix_sigma, 6),
                     "health": round(_GATE_SIGMA_K * health_sigma, 6),
                 },
+                # B2-Fuzzy: max fuzzy ratio across fix and health sets for this candidate
+                "fuzzy_match_ratio": max(fix_fuzzy_ratio, health_fuzzy_ratio),
             })
 
         scored.sort(key=lambda x: x["fix_mean_score"], reverse=True)
@@ -274,6 +279,9 @@ class OptimizationAgent:
             item["gate_status"] == "rejected_by_gate" for item in scored
         )
         proposal_status = "gate_all_rejected" if all_rejected else "pending"
+        # B2-Fuzzy: if any candidate has high fuzzy ratio, mark as signal_unreliable.
+        if any(c.get("fuzzy_match_ratio", 0.0) > _FUZZY_UNRELIABLE_THRESHOLD for c in scored):
+            proposal_status = "signal_unreliable"
 
         # ---- build score_sample payload: {fix/health: {cand_idx: {case_id: dict}}} ----
         # Explicit two-shape: fix and health sets separated, keyed by candidate index then case_id.
@@ -330,11 +338,16 @@ class OptimizationAgent:
         tc: "AgentTestCase",
         recordings_map: dict[uuid.UUID, str],
         tool_desc_system_prompt: str | None = None,
+        sandbox: Any = None,
     ) -> float | None:
         """Score a single (candidate, test_case) pair. Returns a scalar score or None on failure.
 
         Extracted from the inner body of _score_candidate_set's per-case loop so that
         the N-repeat loop can call it without duplicating the sandbox dispatch logic.
+
+        sandbox: optional pre-built SandboxedToolRegistry (side_effect_only mode) for
+        tool_description targets. When provided, reused across N-repeat calls so that
+        fuzzy_match_ratio accumulates over all repeats. Created by _score_candidate_set.
         """
         import json
 
@@ -359,7 +372,8 @@ class OptimizationAgent:
             recorded = json.loads(recordings_json) if recordings_json else {}
 
             if target.kind == "tool_description":
-                tools: Any = SandboxedToolRegistry(
+                # Use pre-built sandbox if provided (reused across N repeats for fuzzy ratio tracking).
+                tools: Any = sandbox if sandbox is not None else SandboxedToolRegistry(
                     registry=self._registry,
                     mode="side_effect_only",
                     recorded=recorded,
@@ -420,7 +434,7 @@ class OptimizationAgent:
         candidate: "OptimizationCandidate",
         test_cases: "list[AgentTestCase]",
         recordings_map: dict[uuid.UUID, str],
-    ) -> dict[str, "ScoreSample"]:
+    ) -> "tuple[dict[str, ScoreSample], float]":
         """Score a candidate against one test set (fix or health).
 
         Each (candidate, case) pair is scored _SCORE_REPEAT_N times to estimate σ
@@ -451,20 +465,49 @@ class OptimizationAgent:
                 target, self._registry.tool_names
             )
 
+        from nanoresearch.eval.sandbox import SandboxedToolRegistry
+        import json as _json
+
         result: dict[str, ScoreSample] = {}
+        # Accumulate fuzzy hit counts across all sandboxes for all test cases.
+        total_executions = 0
+        total_fuzzy_hits = 0
+
         for tc in test_cases:
             observations: list[float] = []
+            recordings_json = recordings_map.get(tc.id)
+            recorded = _json.loads(recordings_json) if recordings_json else {}
+
+            if target.kind == "tool_description":
+                # Create ONE sandbox per test-case so fuzzy_match_ratio accumulates
+                # across all _SCORE_REPEAT_N repeats for this (candidate, case) pair.
+                sandbox: "SandboxedToolRegistry | None" = SandboxedToolRegistry(
+                    registry=self._registry,
+                    mode="side_effect_only",
+                    recorded=recorded,
+                    description_overrides={target.target_id: candidate.prompt},
+                )
+            else:
+                sandbox = None
+
             for _ in range(_SCORE_REPEAT_N):
                 score = await self._score_one(
                     target, candidate, tc, recordings_map,
                     tool_desc_system_prompt=tool_desc_system_prompt,
+                    sandbox=sandbox,
                 )
                 if score is not None:
                     observations.append(score)
             if not observations:
                 continue
             result[str(tc.id)] = ScoreSample.from_observations(observations)
-        return result
+
+            if sandbox is not None:
+                total_executions += sandbox._total_executions
+                total_fuzzy_hits += sandbox._fuzzy_hits
+
+        fuzzy_ratio = (total_fuzzy_hits / total_executions) if total_executions > 0 else 0.0
+        return result, fuzzy_ratio
 
 
 async def _build_tool_desc_system_prompt(target: Any, tool_names: list[str]) -> str:
