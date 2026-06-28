@@ -153,7 +153,6 @@ class ModelFactory:
         # server 模式：缺 user_providers 命中直接 raise，不读 config / rag_settings
         if effective_mode == "server":
             spec = cls._resolve_from_user_only(
-                role=role,
                 user_model=user_model,
                 user_providers=_providers,
                 **overrides,
@@ -427,16 +426,15 @@ class ModelFactory:
     def _resolve_from_user_only(
         cls,
         *,
-        role: ModelRole,
         user_model: str | None,
         user_providers: list[dict],
         **overrides: Any,
     ) -> ModelSpec:
         """Resolve ModelSpec from user_providers only (server mode).
 
-        For CHAT / EVAL_*: model from override > user_model > first provider's first model.
-        For INGESTION / EMBEDDING / VISION: caller must pass model_override OR
-        we default to user_model; if still empty, leave spec.model="" (caller error).
+        Model resolution path: model_override > user_model > first provider's first model.
+        Provider selection: exact model match in user_providers, falling back to first
+        provider with an api_key. Returns ModelSpec with model, api_key, base_url, and provider.
         """
         model = (
             overrides.get("model_override")
