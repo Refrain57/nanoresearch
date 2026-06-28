@@ -5,21 +5,28 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request as _Req, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 
 from nanoresearch.utils.env_compat import apply_legacy_env_compat
 
 apply_legacy_env_compat()
 
+from nanoresearch.providers.model_factory import ModelResolutionError  # noqa: E402
 from nanoresearch.server.middleware.auth import get_current_user  # noqa: E402
-from nanoresearch.server.routers.agent_router import router as agent_router
-from nanoresearch.server.routers.agent_eval_router import router as agent_eval_router
-from nanoresearch.server.routers.chat_router import router as chat_router
-from nanoresearch.server.routers.knowledge_router import router as knowledge_router
-from nanoresearch.server.routers.eval_router import router as eval_router
-from nanoresearch.server.routers.settings_router import router as settings_router
-from nanoresearch.server.routers.workspace_router import router as workspace_router
+
+
+async def _missing_provider_handler(request: _Req, exc: ModelResolutionError) -> JSONResponse:
+    """Global handler: ModelResolutionError → structured 422 JSON response."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "missing_provider",
+            "role": exc.missing_role or "",
+            "message": str(exc),
+        },
+    )
 
 
 def create_app(channel_loop, session_factory, loop_config=None, channel_manager=None, rag_settings=None, allowed_models=None, config=None) -> FastAPI:
@@ -83,6 +90,7 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
         await app.state.redis.aclose()
 
     app = FastAPI(title="Nanoresearch API", version="2.0.0", lifespan=lifespan)
+    app.add_exception_handler(ModelResolutionError, _missing_provider_handler)
     app.state.channel_loop = channel_loop
     app.state.web_loops = {}              # legacy placeholder — agent loops live in worker
     app.state.web_loops_lock = asyncio.Lock()
@@ -110,6 +118,14 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     @app.get("/api/auth/me")
     async def me(uid: str = Depends(get_current_user)):
         return {"uid": uid}
+
+    from nanoresearch.server.routers.agent_router import router as agent_router
+    from nanoresearch.server.routers.agent_eval_router import router as agent_eval_router
+    from nanoresearch.server.routers.chat_router import router as chat_router
+    from nanoresearch.server.routers.knowledge_router import router as knowledge_router
+    from nanoresearch.server.routers.eval_router import router as eval_router
+    from nanoresearch.server.routers.settings_router import router as settings_router
+    from nanoresearch.server.routers.workspace_router import router as workspace_router
 
     app.include_router(chat_router)
     app.include_router(agent_router)
