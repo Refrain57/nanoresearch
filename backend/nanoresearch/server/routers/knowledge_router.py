@@ -47,8 +47,9 @@ async def _resolve_rag_settings(uid: str, request: Request, role=None):
         user_cfg = await UserSettingsRepository(request.app.state.session_factory).get(uid)
         user_model = user_cfg.model if user_cfg else None
         user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
+        user_roles = (user_cfg.extra or {}).get("roles") if user_cfg else None
     except Exception:
-        user_model, user_providers = None, []
+        user_model, user_providers, user_roles = None, [], None
 
     spec = ModelFactory.resolve(
         role,
@@ -56,6 +57,7 @@ async def _resolve_rag_settings(uid: str, request: Request, role=None):
         rag_settings=base,
         user_model=user_model,
         user_providers=user_providers,
+        user_roles=user_roles,
         mode=get_mode(),
     )
     return ModelFactory.patch_settings(base, role, spec)

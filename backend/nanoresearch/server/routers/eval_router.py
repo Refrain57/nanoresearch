@@ -49,9 +49,10 @@ async def _resolve_eval_spec(uid: str, request: Request, role, model_override=No
         user_cfg = await UserSettingsRepository(request.app.state.session_factory).get(uid)
         user_model = user_cfg.model if user_cfg else None
         user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
+        user_roles = (user_cfg.extra or {}).get("roles") if user_cfg else None
         user_extra = (user_cfg.extra or {}) if user_cfg else {}
     except Exception:
-        user_model, user_providers, user_extra = None, [], {}
+        user_model, user_providers, user_roles, user_extra = None, [], None, {}
 
     return ModelFactory.resolve(
         role,
@@ -59,6 +60,7 @@ async def _resolve_eval_spec(uid: str, request: Request, role, model_override=No
         rag_settings=rag_settings,
         user_model=user_model,
         user_providers=user_providers,
+        user_roles=user_roles,
         model_override=model_override,
         user_extra=user_extra,
         mode=get_mode(),
@@ -1018,12 +1020,14 @@ async def _build_eval_agent_loop(uid: str, app_state):
     session_manager = SessionManager(ws, session_factory=factory, default_uid=uid)
 
     providers = ((user_cfg.extra or {}).get("providers") or []) if user_cfg else []
+    roles = ((user_cfg.extra or {}).get("roles") or None) if user_cfg else None
     spec = ModelFactory.resolve(
         ModelRole.CHAT,
         config=cfg.get("config"),
         rag_settings=None,
         user_model=user_cfg.model if user_cfg else None,
         user_providers=providers,
+        user_roles=roles,
         model_override=None,
         mode=get_mode(),
     )

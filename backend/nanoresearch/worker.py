@@ -102,12 +102,14 @@ async def _build_agent_loop(
     session_manager = SessionManager(ws, session_factory=factory, default_uid=uid)
 
     providers = ((user_cfg.extra or {}).get("providers") or []) if user_cfg else []
+    roles = ((user_cfg.extra or {}).get("roles") or None) if user_cfg else None
     spec = ModelFactory.resolve(
         ModelRole.CHAT,
         config=cfg.get("config"),
         rag_settings=None,
         user_model=user_cfg.model if user_cfg else None,
         user_providers=providers,
+        user_roles=roles,
         model_override=model_override or agent_model,
         mode=get_mode(),
     )
@@ -497,12 +499,14 @@ async def ingest_document_task(
         if user_cfg is not None or get_mode() == "server":
             user_model = user_cfg.model if user_cfg else None
             user_providers = (user_cfg.extra or {}).get("providers", []) if user_cfg else []
+            user_roles = (user_cfg.extra or {}).get("roles") if user_cfg else None
             spec = ModelFactory.resolve(
                 ModelRole.INGESTION_LLM,
                 config=ctx["loop_config"].get("config"),
                 rag_settings=settings,
                 user_model=user_model,
                 user_providers=user_providers,
+                user_roles=user_roles,
                 mode=get_mode(),
             )
             settings = ModelFactory.patch_settings(settings, ModelRole.INGESTION_LLM, spec)

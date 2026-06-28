@@ -79,6 +79,7 @@ class ModelFactory:
         rag_settings: "Settings | None" = None,
         user_model: str | None = None,
         user_providers: list[dict] | None = None,
+        user_roles: dict | None = None,
         **overrides: Any,
     ) -> ModelSpec:
         """Resolve a ModelSpec and raise ModelResolutionError if api_key is missing.
@@ -92,6 +93,7 @@ class ModelFactory:
             rag_settings=rag_settings,
             user_model=user_model,
             user_providers=user_providers,
+            user_roles=user_roles,
             **overrides,
         )
         if not spec.api_key:
@@ -119,6 +121,7 @@ class ModelFactory:
         rag_settings: "Settings | None" = None,
         user_model: str | None = None,
         user_providers: list[dict] | None = None,
+        user_roles: dict | None = None,
         mode: Literal["server", "local"] | None = None,
         **overrides: Any,
     ) -> ModelSpec:
@@ -137,6 +140,8 @@ class ModelFactory:
         user_providers:
             user_settings.extra["providers"] list of dicts:
             [{name, api_key, api_base (opt), models: [] (opt)}]
+        user_roles:
+            user_settings.extra["roles"] dict mapping role name → {provider_id, model}.
         mode:
             Override deployment mode ("server" or "local"). None → auto-detect
             via get_mode().
@@ -149,6 +154,25 @@ class ModelFactory:
 
         effective_mode = mode or get_mode()
         _providers = user_providers or []
+
+        # Explicit role-to-provider assignment wins over all other resolution paths.
+        _roles = user_roles or {}
+        role_entry = _roles.get(role.value)
+        if role_entry and role_entry.get("provider_id"):
+            matched = cls._match_user_provider_by_id(role_entry["provider_id"], _providers)
+            if matched and matched.get("api_key"):
+                model = (
+                    overrides.get("model_override")
+                    or role_entry.get("model")
+                    or (matched.get("models") or [None])[0]
+                    or ""
+                )
+                return ModelSpec(
+                    model=model,
+                    api_key=matched.get("api_key"),
+                    base_url=matched.get("api_base") or None,
+                    provider=matched.get("provider") or matched.get("name") or None,
+                )
 
         # server 模式：缺 user_providers 命中直接 raise，不读 config / rag_settings
         if effective_mode == "server":
@@ -463,6 +487,13 @@ class ModelFactory:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _match_user_provider_by_id(provider_id: str, user_providers: list[dict]) -> dict | None:
+        """Find user provider by exact id match."""
+        if not provider_id or not user_providers:
+            return None
+        return next((p for p in user_providers if p.get("id") == provider_id), None)
 
     @staticmethod
     def _match_user_provider_by_model(model: str, user_providers: list[dict]) -> dict | None:
