@@ -356,7 +356,7 @@ Call save_memory with your updated memory following the exact format specified."
                 self._knowledge_search.write_user_memory_sync([{
                     "text": entry,
                     "type": "consolidation_summary",
-                    "confidence": 0.6,
+                    "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
                     "is_evergreen": False,
                     "created_at": datetime.now().isoformat(),
                 }], uid=uid)
@@ -394,7 +394,7 @@ Call save_memory with your updated memory following the exact format specified."
             self._knowledge_search.write_user_memory_sync([{
                 "text": text,
                 "type": "raw_archive",
-                "confidence": 0.5,
+                "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
                 "is_evergreen": False,
                 "created_at": datetime.now().isoformat(),
             }], uid=uid)
