@@ -30,6 +30,93 @@ def _us_from_hash(h: dict) -> UserSettings:
     return us
 
 
+_PROVIDER_PRESET_KEYS = (
+    "deepseek",
+    "openai",
+    "anthropic",
+    "dashscope",
+    "azure_openai",
+    "siliconflow",
+)
+_EMBEDDING_CAPABLE = {"dashscope", "openai", "azure_openai", "siliconflow"}
+_ROLE_NAMES = (
+    "chat",
+    "ingestion_llm",
+    "embedding",
+    "vision",
+    "eval_generator",
+    "eval_evaluator",
+)
+
+
+def _infer_provider_preset(name: str) -> str:
+    """Map a free-text provider name to a canonical preset key."""
+    lname = (name or "").lower()
+    for key in _PROVIDER_PRESET_KEYS:
+        if key in lname:
+            return key
+    return "openai_compatible"
+
+
+def _migrate_legacy_extra(extra: dict) -> tuple[dict, bool]:
+    """Add `provider` field to each provider and build a default `roles` map.
+
+    Idempotent: if `roles` is already present (even partially), returns extra
+    unchanged. Migration only fires when providers exist AND roles key absent.
+    """
+    if "roles" in extra:
+        return extra, False
+    providers = extra.get("providers")
+    if not providers:
+        return extra, False
+
+    migrated_providers = []
+    for p in providers:
+        if p.get("provider"):
+            migrated_providers.append(p)
+            continue
+        new_p = dict(p)
+        new_p["provider"] = _infer_provider_preset(p.get("name", ""))
+        migrated_providers.append(new_p)
+
+    chat_provider = next((p for p in migrated_providers if p.get("api_key")), None)
+    embedding_provider = next(
+        (
+            p for p in migrated_providers
+            if p.get("api_key") and (p.get("provider") or "") in _EMBEDDING_CAPABLE
+        ),
+        None,
+    )
+
+    def _role_entry(provider: dict | None, model_hint: str | None) -> dict | None:
+        if not provider:
+            return None
+        models = provider.get("models") or []
+        model = model_hint or (models[0] if models else "")
+        return {"provider_id": provider["id"], "model": model}
+
+    embedding_model = None
+    if embedding_provider:
+        embedding_model = next(
+            (m for m in (embedding_provider.get("models") or []) if "embed" in m.lower()),
+            None,
+        )
+
+    roles = {
+        "chat": _role_entry(chat_provider, None),
+        "ingestion_llm": _role_entry(chat_provider, None),
+        "embedding": _role_entry(embedding_provider, embedding_model),
+        "vision": None,
+        "eval_generator": None,
+        "eval_evaluator": None,
+    }
+
+    new_extra = dict(extra)
+    new_extra["providers"] = migrated_providers
+    new_extra["roles"] = roles
+    return new_extra, True
+
+
 class UserSettingsRepository:
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self._factory = session_factory
@@ -56,12 +143,16 @@ class UserSettingsRepository:
             row = result.scalar_one_or_none()
 
         if row is not None:
-            try:
-                r = get_redis()
-                await r.hset(cache_key, mapping=_us_to_hash(row))
-                await r.expire(cache_key, RedisKeys.USER_SETTINGS_TTL)
-            except Exception:
-                pass
+            new_extra, changed = _migrate_legacy_extra(row.extra or {})
+            if changed:
+                row = await self.upsert(uid, extra=new_extra)
+            else:
+                try:
+                    r = get_redis()
+                    await r.hset(cache_key, mapping=_us_to_hash(row))
+                    await r.expire(cache_key, RedisKeys.USER_SETTINGS_TTL)
+                except Exception:
+                    pass
         return row
 
     async def upsert(self, uid: str, **fields) -> UserSettings:
