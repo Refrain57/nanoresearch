@@ -170,18 +170,26 @@ class SessionManager:
             return None
 
     async def _redis_save(self, session: Session) -> None:
-        """Write session rolling window to Redis via MULTI/EXEC. Fire-and-forget on error."""
+        """Mirror the full Session into Redis via MULTI/EXEC. Fire-and-forget on error.
+
+        We store the entire `messages` list — not the post-consolidation tail —
+        because `last_consolidated` is an offset INTO the full list. Storing
+        only the tail while preserving the original offset would make
+        `get_history()` apply the offset a second time on load, silently
+        dropping all history (production bug observed 2026-06-28). It would
+        also cascade to `_db_save` via `replace_messages`, permanently
+        truncating DB state.
+        """
         try:
             from nanoresearch.bus.redis_client import get_redis
             from nanoresearch.bus.redis_keys import RedisKeys
             redis = get_redis()
             msg_key, meta_key = self._redis_keys(session.key)
-            window = session.messages[session.last_consolidated:]
             ts = datetime.now().isoformat()
             async with redis.pipeline(transaction=True) as pipe:
                 pipe.delete(msg_key)
-                if window:
-                    pipe.rpush(msg_key, *[json.dumps(m, ensure_ascii=False) for m in window])
+                if session.messages:
+                    pipe.rpush(msg_key, *[json.dumps(m, ensure_ascii=False) for m in session.messages])
                 pipe.hset(meta_key, mapping={
                     "updated_at": ts,
                     "created_at": session.created_at.isoformat(),
