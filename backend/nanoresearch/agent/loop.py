@@ -19,6 +19,10 @@ from loguru import logger
 _EVAL_SAMPLING_RATE = float(os.environ.get("EVAL_SAMPLING_RATE", "0.2"))
 _EVAL_BADCASE_DETECTION = os.environ.get("EVAL_BADCASE_DETECTION_ENABLED", "true").lower() == "true"
 
+from datetime import timedelta
+STARTUP_CONSOLIDATION_IDLE_SECONDS = int(os.environ.get("STARTUP_CONSOLIDATION_IDLE_SECONDS", "1800"))
+STARTUP_MIN_PENDING_TURNS = int(os.environ.get("STARTUP_MIN_PENDING_TURNS", "2"))
+
 from nanoresearch.agent.context import ContextBuilder
 from nanoresearch.agent.hook import AgentHook, AgentHookContext
 from nanoresearch.agent.memory import MemoryConsolidator
@@ -529,34 +533,46 @@ class AgentLoop:
         task.add_done_callback(self._background_tasks.remove)
 
     async def _check_pending_consolidation(self, session: Session, agent_id: str | None = None) -> None:
-        """Check if there are unconsolidated messages from last session and consolidate them.
+        """Consolidate a previous, now-idle session's tail-protected backlog.
 
-        This runs once per session when the first message arrives after startup.
-        It ensures that important conversations from previous sessions are preserved
-        in MEMORY.md even if the previous session ended normally without token pressure.
+        Only fires when the session has been idle past the threshold and has
+        accumulated enough *turns* (not message rows). Always leaves the recent
+        tail uncompacted so coreference anchors survive into the next turn.
         """
-        # Only check once per session to avoid repeated consolidation
         if session.key in self._startup_consolidated:
             return
 
-        pending_count = len(session.messages) - session.last_consolidated
-        if pending_count < 5:
-            self._startup_consolidated.add(session.key)  # Mark as checked
-            return  # Not enough messages to bother consolidating
-
-        logger.info(
-            "Found {} unconsolidated messages from previous session, consolidating...",
-            pending_count
+        from nanoresearch.agent.memory import (
+            CONSOLIDATION_TAIL_PROTECT,
+            plan_startup_consolidation,
         )
+        from nanoresearch.utils.helpers import utcnow_aware
 
-        pending = session.messages[session.last_consolidated:]
-        success = await self.memory_consolidator.consolidate_messages(pending, agent_id=agent_id, uid=self._uid)
+        plan = plan_startup_consolidation(
+            session,
+            now_utc=utcnow_aware(),
+            idle_threshold=timedelta(seconds=STARTUP_CONSOLIDATION_IDLE_SECONDS),
+            min_turns=STARTUP_MIN_PENDING_TURNS,
+            tail_protect=CONSOLIDATION_TAIL_PROTECT,
+            pick_boundary=self.memory_consolidator.pick_consolidation_boundary,
+        )
+        if plan is None:
+            self._startup_consolidated.add(session.key)
+            return
 
+        start, end_idx = plan
+        chunk = session.messages[start:end_idx]
+        logger.info(
+            "Startup consolidation for {}: {} msgs (tail protected, range {}:{})",
+            session.key, len(chunk), start, end_idx,
+        )
+        success = await self.memory_consolidator.consolidate_messages(
+            chunk, agent_id=agent_id, uid=self._uid
+        )
         if success:
-            session.last_consolidated = len(session.messages)
+            session.last_consolidated = end_idx
             await self.sessions.save(session)
-            self._startup_consolidated.add(session.key)  # Mark as done
-            logger.info("Startup consolidation complete for {} messages", pending_count)
+            self._startup_consolidated.add(session.key)
         else:
             logger.warning("Startup consolidation failed, will retry on token pressure")
 

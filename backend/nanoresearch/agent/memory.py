@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,10 @@ return 1
 """
 
 from loguru import logger
+
+CONSOLIDATION_TAIL_PROTECT = int(os.environ.get("CONSOLIDATION_TAIL_PROTECT", "8"))
+TOKEN_CONSOLIDATION_TARGET_RATIO = float(os.environ.get("TOKEN_CONSOLIDATION_TARGET_RATIO", "0.5"))
+CONSOLIDATION_SUMMARY_CONFIDENCE = float(os.environ.get("CONSOLIDATION_SUMMARY_CONFIDENCE", "0.7"))
 
 from nanoresearch.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
 
@@ -639,3 +644,38 @@ class MemoryConsolidator:
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
+
+
+def plan_startup_consolidation(
+    session,
+    *,
+    now_utc,
+    idle_threshold,
+    min_turns,
+    tail_protect,
+    pick_boundary,
+):
+    """Decide the startup-consolidation chunk for a session, or None.
+
+    Returns (start, end_idx) where start == session.last_consolidated, or None
+    when the session is too active (idle gate), has too few turns, or no safe
+    tail-protected boundary exists.
+    """
+    from nanoresearch.utils.helpers import as_aware_utc
+
+    if now_utc - as_aware_utc(session.updated_at) < idle_threshold:
+        return None
+
+    start = session.last_consolidated
+    pending = session.messages[start:]
+    pending_turns = sum(1 for m in pending if m.get("role") == "user")
+    if pending_turns < min_turns:
+        return None
+
+    boundary = pick_boundary(session, tokens_to_remove=1, tail_protect=tail_protect)
+    if boundary is None:
+        return None
+    end_idx, _ = boundary
+    if end_idx <= start:
+        return None
+    return (start, end_idx)
