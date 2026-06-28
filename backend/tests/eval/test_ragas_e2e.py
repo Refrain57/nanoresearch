@@ -23,7 +23,8 @@ log = logging.getLogger("ragas_e2e")
 # ---------------------------------------------------------------------------
 
 def _load_api_config() -> dict:
-    cfg_path = pathlib.Path.home() / ".nanoresearch" / "config.json"
+    from nanoresearch.config.loader import get_nanoresearch_home
+    cfg_path = get_nanoresearch_home() / "config.json"
     if not cfg_path.exists():
         sys.exit(f"[SKIP] {cfg_path} not found")
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))

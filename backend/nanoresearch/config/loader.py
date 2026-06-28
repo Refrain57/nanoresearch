@@ -1,15 +1,31 @@
 """Configuration loading utilities."""
 
 import json
+import os
 from pathlib import Path
 
 import pydantic
 from loguru import logger
 
 from nanoresearch.config.schema import Config
+from nanoresearch.utils.env_compat import apply_legacy_env_compat
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
+
+
+def get_nanoresearch_home() -> Path:
+    """Return the base directory for all NanoResearch runtime state.
+
+    Reads ``NANORESEARCH_HOME``; falls back to ``~/.nanoresearch``. Calls the
+    legacy env-compat shim first so ``NANOBOT_HOME`` is honoured for scripts
+    that bypass the main entrypoints. Does not create the directory.
+    """
+    apply_legacy_env_compat()
+    raw = os.environ.get("NANORESEARCH_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".nanoresearch"
 
 
 def set_config_path(path: Path) -> None:
@@ -22,7 +38,7 @@ def get_config_path() -> Path:
     """Get the configuration file path."""
     if _current_config_path:
         return _current_config_path
-    return Path.home() / ".nanoresearch" / "config.json"
+    return get_nanoresearch_home() / "config.json"
 
 
 def load_config(config_path: Path | None = None) -> Config:
