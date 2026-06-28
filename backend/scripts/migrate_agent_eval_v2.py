@@ -17,7 +17,7 @@ if env_file.exists():
     from dotenv import load_dotenv
     load_dotenv(env_file)
 
-from nanobot.storage.database import init_engine
+from nanoresearch.storage.database import init_engine
 from sqlalchemy import text, inspect as sa_inspect
 
 
@@ -45,7 +45,7 @@ async def _has_table(conn, table: str) -> bool:
 
 async def main() -> None:
     init_engine()
-    from nanobot.storage.database import _engine
+    from nanoresearch.storage.database import _engine
 
     async with _engine.begin() as conn:
 

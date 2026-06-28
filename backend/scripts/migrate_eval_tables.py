@@ -18,7 +18,7 @@ if env_file.exists():
     from dotenv import load_dotenv
     load_dotenv(env_file)
 
-from nanobot.storage.database import init_engine, get_session_factory
+from nanoresearch.storage.database import init_engine, get_session_factory
 from sqlalchemy import text, inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -28,8 +28,8 @@ NEW_TABLES = ["agent_run_snapshots", "agent_test_cases"]
 
 async def main() -> None:
     init_engine()
-    from nanobot.storage.database import _engine
-    from nanobot.storage import models as _  # register all models
+    from nanoresearch.storage.database import _engine
+    from nanoresearch.storage import models as _  # register all models
 
     async with _engine.begin() as conn:
         # Check which tables already exist
@@ -47,7 +47,7 @@ async def main() -> None:
             return
 
         print(f"Creating: {', '.join(to_create)} ...")
-        from nanobot.storage.database import Base
+        from nanoresearch.storage.database import Base
         # Create only missing tables
         await conn.run_sync(
             lambda sync_conn: Base.metadata.create_all(

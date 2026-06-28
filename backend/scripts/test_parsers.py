@@ -24,7 +24,7 @@ print(f"Testing with: {pdf_path}\n")
 
 
 def test_markitdown(path):
-    from nanobot.rag.libs.loader.pdf_loader import PdfLoader
+    from nanoresearch.rag.libs.loader.pdf_loader import PdfLoader
     loader = PdfLoader(extract_images=False)
     doc = loader.load(path)
     preview = doc.text[:200].replace("\n", " ")
@@ -32,7 +32,7 @@ def test_markitdown(path):
 
 
 def test_marker(path):
-    from nanobot.rag.libs.loader.marker_loader import MarkerLoader, MARKER_AVAILABLE, MARKER_API
+    from nanoresearch.rag.libs.loader.marker_loader import MarkerLoader, MARKER_AVAILABLE, MARKER_API
     if not MARKER_AVAILABLE:
         print("[marker] SKIP — not installed")
         return
@@ -44,7 +44,7 @@ def test_marker(path):
 
 
 def test_mineru(path):
-    from nanobot.rag.libs.loader.mineru_loader import MinerULoader
+    from nanoresearch.rag.libs.loader.mineru_loader import MinerULoader
     print("[mineru] loading models (may take a while)...")
     loader = MinerULoader(mode="local")
     doc = loader.load(path)

@@ -1045,7 +1045,7 @@ systemctl --user enable --now nanoresearch-gateway
 ## 📁 Project Structure
 
 ```
-nanobot/
+nanoresearch/
 ├── agent/                    # 🧠 Core Agent
 │   ├── loop.py               #    ReAct 执行循环
 │   ├── context.py            #    上下文构建

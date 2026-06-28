@@ -1,4 +1,4 @@
-"""Tests for nanobot.config.migration — migrate_llm_keys()."""
+"""Tests for nanoresearch.config.migration — migrate_llm_keys()."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -86,7 +86,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"openai": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -105,7 +105,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -124,7 +124,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": "sk-ds-new"}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -145,7 +145,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -164,7 +164,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -181,7 +181,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -195,7 +195,7 @@ class TestMigrateLlmKeys:
         assert cfg["providers"]["dashscope"]["apiKey"] == ""
 
     def test_missing_settings_yaml_returns_empty_report(self, config_json):
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path="/nonexistent/settings.yaml",
@@ -208,7 +208,7 @@ class TestMigrateLlmKeys:
         _write_yaml(settings_yaml, {
             "llm": {"provider": "dashscope", "api_key": "sk-ds"},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -224,7 +224,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"dashscope": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -241,7 +241,7 @@ class TestMigrateLlmKeys:
         _write_json(config_json, {
             "providers": {"custom": {"apiKey": ""}},
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,
@@ -267,7 +267,7 @@ class TestMigrateLlmKeys:
                 "siliconflow": {"apiKey": ""},
             },
         })
-        from nanobot.config.migration import migrate_llm_keys
+        from nanoresearch.config.migration import migrate_llm_keys
 
         report = migrate_llm_keys(
             settings_path=settings_yaml,

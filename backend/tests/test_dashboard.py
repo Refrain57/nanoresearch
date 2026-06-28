@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from nanobot.auth.password import hash_password
+from nanoresearch.auth.password import hash_password
 from tests.conftest import TEST_DB_URL, truncate_all, make_factory
 
 
@@ -35,16 +35,16 @@ def clean_tables():
 def app(tmp_path, monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
     # Inject test session factory directly so dashboard uses the test DB
-    import nanobot.storage.database as db_mod
+    import nanoresearch.storage.database as db_mod
     monkeypatch.setattr(db_mod, "_AsyncSessionLocal", make_factory())
-    from nanobot.dashboard.server import create_app
+    from nanoresearch.dashboard.server import create_app
     return create_app(workspace=tmp_path)
 
 
 @pytest.fixture
 def seeded_user():
     async def _():
-        from nanobot.storage.repositories.user_repo import UserRepository
+        from nanoresearch.storage.repositories.user_repo import UserRepository
         repo = UserRepository(make_factory())
         return await repo.create("testadmin", hash_password("secret123"))
     return run(_())

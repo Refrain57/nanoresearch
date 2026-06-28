@@ -8,8 +8,8 @@ Tests the Reciprocal Rank Fusion implementation including:
 """
 
 import pytest
-from nanobot.rag.core.query_engine.fusion import RRFFusion, rrf_score
-from nanobot.rag.core.types import RetrievalResult
+from nanoresearch.rag.core.query_engine.fusion import RRFFusion, rrf_score
+from nanoresearch.rag.core.types import RetrievalResult
 
 
 def create_mock_retrieval_result(chunk_id: str, score: float, text: str = "") -> RetrievalResult:

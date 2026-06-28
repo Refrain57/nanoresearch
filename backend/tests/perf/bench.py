@@ -1,5 +1,5 @@
 """
-Nanobot infrastructure benchmark — LLM calls mocked out.
+Nanoresearch infrastructure benchmark — LLM calls mocked out.
 
 Three layers:
   A  Redis Stream roundtrip       (xadd → xread, pure Redis, no HTTP)
@@ -7,8 +7,8 @@ Three layers:
   C  Full pipeline E2E            (HTTP POST /api/runs → ARQ → mock worker → SSE)
 
 Layer C requires:
-  1. server running  (uvicorn nanobot.server.main:app)
-  2. worker running  (arq nanobot.worker.WorkerSettings)
+  1. server running  (uvicorn nanoresearch.server.main:app)
+  2. worker running  (arq nanoresearch.worker.WorkerSettings)
   3. worker has the __PERF_TEST__ bypass (already patched in worker.py)
   4. AUTH_TOKEN and BASE_URL set below (or via env)
 
@@ -58,7 +58,7 @@ def print_stats(label: str, ms: list[float]) -> None:
 # ── Layer A: Redis Stream roundtrip ───────────────────────────────────────────
 async def bench_stream(n: int = 1000) -> None:
     import redis.asyncio as aioredis
-    from nanobot.bus.stream import xadd_event, xread_next
+    from nanoresearch.bus.stream import xadd_event, xread_next
 
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     latencies: list[float] = []
@@ -83,7 +83,7 @@ async def bench_cache(concurrency: int = 50, per_worker: int = 200) -> None:
     Tests whether P99 degrades as connection pool saturates.
     """
     import redis.asyncio as aioredis
-    from nanobot.bus.redis_keys import RedisKeys
+    from nanoresearch.bus.redis_keys import RedisKeys
 
     # 共享连接池：max_connections 设为并发数的一半足够（asyncio 不会真的同时占用所有连接）
     pool = aioredis.ConnectionPool.from_url(

@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
-from nanobot.rag.core.types import (
+from nanoresearch.rag.core.types import (
     Document,
     Chunk,
     ChunkRecord,

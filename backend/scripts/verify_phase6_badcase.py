@@ -38,7 +38,7 @@ def _sep(title: str) -> None:
 
 def _make_token(uid: str) -> str:
     """Generate a JWT token directly from the secret (no password needed)."""
-    from nanobot.auth.jwt import create_token
+    from nanoresearch.auth.jwt import create_token
     return create_token(uid)
 
 
@@ -88,11 +88,11 @@ async def _get_latest_snapshot_with_ct(factory, user_input: str):
 
 
 async def main() -> None:
-    from nanobot.config.loader import load_config
-    from nanobot.eval.badcase_classifier import BadcaseClassifier
-    from nanobot.providers.openai_compat_provider import OpenAICompatProvider
-    from nanobot.storage.database import init_engine, get_session_factory
-    from nanobot.storage.repositories.agent_eval_repo import AgentEvalRepository
+    from nanoresearch.config.loader import load_config
+    from nanoresearch.eval.badcase_classifier import BadcaseClassifier
+    from nanoresearch.providers.openai_compat_provider import OpenAICompatProvider
+    from nanoresearch.storage.database import init_engine, get_session_factory
+    from nanoresearch.storage.repositories.agent_eval_repo import AgentEvalRepository
 
     init_engine()
     factory = get_session_factory()

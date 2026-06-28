@@ -15,15 +15,15 @@ if env_file.exists():
     from dotenv import load_dotenv
     load_dotenv(env_file)
 
-from nanobot.storage.database import init_engine, get_session_factory
+from nanoresearch.storage.database import init_engine, get_session_factory
 from sqlalchemy import text, inspect as sa_inspect
 
 
 async def main() -> None:
     init_engine()
-    from nanobot.storage.database import _engine
-    from nanobot.storage import models as _  # register all models
-    from nanobot.storage.database import Base
+    from nanoresearch.storage.database import _engine
+    from nanoresearch.storage import models as _  # register all models
+    from nanoresearch.storage.database import Base
 
     async with _engine.begin() as conn:
         existing = await conn.run_sync(

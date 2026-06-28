@@ -36,7 +36,7 @@ def main() -> None:
         print(f"Import error: {e}")
         return
 
-    from nanobot.rag.core.settings import load_settings
+    from nanoresearch.rag.core.settings import load_settings
     settings = load_settings()
 
     base_url = settings.llm.base_url or "https://api.openai.com/v1"

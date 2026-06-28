@@ -26,8 +26,8 @@ async def main(workspace: Path, uid: str) -> None:
         print("ERROR: DATABASE_URL 环境变量未设置", file=sys.stderr)
         sys.exit(1)
 
-    from nanobot.storage.database import init_engine, get_session_factory
-    from nanobot.storage.repositories.conversation_repo import ConversationRepository
+    from nanoresearch.storage.database import init_engine, get_session_factory
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
 
     init_engine(database_url)
     factory = get_session_factory()

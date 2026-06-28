@@ -50,7 +50,7 @@ pytest tests/rag/stress/ -v -m stress
 
 ### Run with Coverage
 ```bash
-pytest tests/rag/ --cov=nanobot.rag --cov-report=html
+pytest tests/rag/ --cov=nanoresearch.rag --cov-report=html
 ```
 
 ## Test Categories
@@ -96,7 +96,7 @@ Example:
 ```python
 def test_my_component(mock_settings):
     """Test description."""
-    from nanobot.rag.core.my_module import MyComponent
+    from nanoresearch.rag.core.my_module import MyComponent
 
     component = MyComponent(mock_settings)
     result = component.process("input")

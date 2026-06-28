@@ -7,7 +7,7 @@ import asyncio
 import pytest
 from fastapi.testclient import TestClient
 
-from nanobot.auth.password import hash_password
+from nanoresearch.auth.password import hash_password
 from tests.conftest import truncate_all, make_factory
 
 
@@ -41,14 +41,14 @@ def clean_tables():
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
-    from nanobot.server.main import create_app
+    from nanoresearch.server.main import create_app
     return create_app(channel_loop=FakeAgentLoop(), session_factory=make_factory())
 
 
 @pytest.fixture
 def seeded_user():
     async def _():
-        from nanobot.storage.repositories.user_repo import UserRepository
+        from nanoresearch.storage.repositories.user_repo import UserRepository
         repo = UserRepository(make_factory())
         return await repo.create("testadmin", hash_password("secret123"))
     return run(_())
@@ -57,14 +57,14 @@ def seeded_user():
 @pytest.fixture
 def auth_headers(seeded_user, monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
-    from nanobot.auth.jwt import create_token
+    from nanoresearch.auth.jwt import create_token
     return {"Authorization": f"Bearer {create_token('testadmin')}"}
 
 
 @pytest.fixture
 def seeded_agent():
     async def _():
-        from nanobot.storage.repositories.agent_repo import AgentRepository
+        from nanoresearch.storage.repositories.agent_repo import AgentRepository
         repo = AgentRepository(make_factory())
         return await repo.create({
             "name": "Nano Research",
@@ -166,8 +166,8 @@ def test_update_agent_not_found(app, auth_headers):
 
 def test_stats_with_runs(app, auth_headers, seeded_agent, seeded_user):
     async def _seed_runs():
-        from nanobot.storage.repositories.conversation_repo import ConversationRepository
-        from nanobot.storage.repositories.run_repo import RunRepository
+        from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+        from nanoresearch.storage.repositories.run_repo import RunRepository
         factory = make_factory()
         conv = await ConversationRepository(factory).create(
             key="web:stats-test", uid="testadmin", agent_id=seeded_agent.id

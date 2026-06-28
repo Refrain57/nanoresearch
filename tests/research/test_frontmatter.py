@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from nanobot.rag.libs.loader.markdown_loader import MarkdownLoader, _parse_frontmatter
+from nanoresearch.rag.libs.loader.markdown_loader import MarkdownLoader, _parse_frontmatter
 
 
 def test_parse_frontmatter_normal():

@@ -93,7 +93,7 @@ class TestIngestionPipelineBasic:
     @pytest.fixture
     def mock_pdf_loader(self):
         """Mock PDF loader that returns sample documents."""
-        from nanobot.rag.core.types import Document
+        from nanoresearch.rag.core.types import Document
 
         loader = MagicMock()
         doc = Document(
@@ -112,7 +112,7 @@ class TestIngestionPipelineBasic:
     @pytest.fixture
     def mock_chunks(self):
         """Mock chunks for testing."""
-        from nanobot.rag.core.types import Chunk
+        from nanoresearch.rag.core.types import Chunk
 
         return [
             Chunk(
@@ -129,21 +129,21 @@ class TestIngestionPipelineBasic:
 
     def test_pipeline_success(self, mock_settings, mock_integrity_checker, mock_pdf_loader, mock_chunks):
         """Test successful pipeline execution."""
-        from nanobot.rag.ingestion.pipeline import IngestionPipeline, PipelineResult
-        from nanobot.rag.core.types import ChunkRecord
+        from nanoresearch.rag.ingestion.pipeline import IngestionPipeline, PipelineResult
+        from nanoresearch.rag.core.types import ChunkRecord
 
         # Mock all pipeline components including factories
-        with patch("nanobot.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls, \
-             patch("nanobot.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls, \
-             patch("nanobot.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
-             patch("nanobot.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
-             patch("nanobot.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
-             patch("nanobot.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
-             patch("nanobot.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ImageStorage") as mock_img_cls, \
-             patch("nanobot.rag.ingestion.pipeline.EmbeddingFactory") as mock_emb_factory_cls:
+        with patch("nanoresearch.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ImageStorage") as mock_img_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.EmbeddingFactory") as mock_emb_factory_cls:
 
             # Configure mocks
             mock_ic_cls.return_value = mock_integrity_checker
@@ -200,21 +200,21 @@ class TestIngestionPipelineBasic:
 
     def test_pipeline_skip_existing_file(self, mock_settings, mock_integrity_checker, mock_pdf_loader, mock_chunks):
         """Test that existing files are skipped when force=False."""
-        from nanobot.rag.ingestion.pipeline import IngestionPipeline
+        from nanoresearch.rag.ingestion.pipeline import IngestionPipeline
 
         mock_integrity_checker.should_skip.return_value = True
 
-        with patch("nanobot.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls, \
-             patch("nanobot.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls, \
-             patch("nanobot.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
-             patch("nanobot.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
-             patch("nanobot.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
-             patch("nanobot.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
-             patch("nanobot.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ImageStorage") as mock_img_cls, \
-             patch("nanobot.rag.ingestion.pipeline.EmbeddingFactory") as mock_emb_factory_cls:
+        with patch("nanoresearch.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ImageStorage") as mock_img_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.EmbeddingFactory") as mock_emb_factory_cls:
 
             mock_ic_cls.return_value = mock_integrity_checker
             mock_pdf_cls.return_value = mock_pdf_loader
@@ -244,26 +244,26 @@ class TestIngestionPipelineBasic:
 
     def test_pipeline_failure(self, mock_settings, mock_integrity_checker):
         """Test pipeline failure handling."""
-        from nanobot.rag.ingestion.pipeline import IngestionPipeline
+        from nanoresearch.rag.ingestion.pipeline import IngestionPipeline
 
-        with patch("nanobot.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls:
+        with patch("nanoresearch.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls:
             mock_ic_cls.return_value = mock_integrity_checker
 
-            with patch("nanobot.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls:
+            with patch("nanoresearch.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls:
                 # Simulate PDF loading failure
                 mock_pdf = MagicMock()
                 mock_pdf.load.side_effect = Exception("PDF parsing failed")
                 mock_pdf_cls.return_value = mock_pdf
 
-                with patch("nanobot.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.ImageStorage") as mock_img_cls, \
-                     patch("nanobot.rag.ingestion.pipeline.EmbeddingFactory") as mock_emb_factory_cls:
+                with patch("nanoresearch.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.ImageStorage") as mock_img_cls, \
+                     patch("nanoresearch.rag.ingestion.pipeline.EmbeddingFactory") as mock_emb_factory_cls:
 
                     mock_emb_factory_cls.create.return_value = MagicMock()
 
@@ -293,7 +293,7 @@ class TestIngestionPipelineStages:
 
     def test_chunking_stage(self, mock_settings):
         """Test chunking stage produces correct output."""
-        from nanobot.rag.core.types import Document, Chunk
+        from nanoresearch.rag.core.types import Document, Chunk
 
         # This is a unit test for chunking logic
         doc = Document(
@@ -309,7 +309,7 @@ class TestIngestionPipelineStages:
 
     def test_pipeline_result_serialization(self):
         """Test PipelineResult serialization."""
-        from nanobot.rag.ingestion.pipeline import PipelineResult
+        from nanoresearch.rag.ingestion.pipeline import PipelineResult
 
         result = PipelineResult(
             success=True,
@@ -332,7 +332,7 @@ class TestIngestionPipelineStages:
 
     def test_pipeline_result_with_error(self):
         """Test PipelineResult with error."""
-        from nanobot.rag.ingestion.pipeline import PipelineResult
+        from nanoresearch.rag.ingestion.pipeline import PipelineResult
 
         result = PipelineResult(
             success=False,
@@ -355,7 +355,7 @@ class TestBatchProcessing:
 
     def test_batch_processor_flow(self, mock_settings):
         """Test batch processor flow."""
-        from nanobot.rag.core.types import Chunk
+        from nanoresearch.rag.core.types import Chunk
 
         # Create mock chunks
         chunks = [
@@ -385,7 +385,7 @@ class TestDocumentTypes:
 
     def test_document_creation(self):
         """Test Document creation and validation."""
-        from nanobot.rag.core.types import Document
+        from nanoresearch.rag.core.types import Document
 
         doc = Document(
             id="doc_123",
@@ -399,14 +399,14 @@ class TestDocumentTypes:
 
     def test_document_requires_source_path(self):
         """Test Document requires source_path in metadata."""
-        from nanobot.rag.core.types import Document
+        from nanoresearch.rag.core.types import Document
 
         with pytest.raises(ValueError, match="source_path"):
             Document(id="doc_123", text="Sample text", metadata={})
 
     def test_chunk_creation(self):
         """Test Chunk creation and validation."""
-        from nanobot.rag.core.types import Chunk
+        from nanoresearch.rag.core.types import Chunk
 
         chunk = Chunk(
             id="chunk_123",
@@ -420,7 +420,7 @@ class TestDocumentTypes:
 
     def test_chunk_record_creation(self):
         """Test ChunkRecord creation."""
-        from nanobot.rag.core.types import ChunkRecord
+        from nanoresearch.rag.core.types import ChunkRecord
 
         record = ChunkRecord(
             id="record_123",
@@ -436,7 +436,7 @@ class TestDocumentTypes:
 
     def test_retrieval_result_validation(self):
         """Test RetrievalResult validation."""
-        from nanobot.rag.core.types import RetrievalResult
+        from nanoresearch.rag.core.types import RetrievalResult
 
         # Valid result
         result = RetrievalResult(

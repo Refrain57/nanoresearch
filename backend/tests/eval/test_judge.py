@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from nanobot.eval.judge import LLMJudge, CalibrationResult
-from nanobot.eval.snapshot import RunSnapshotData
-from nanobot.eval.judge import _parse_scores, _build_prompt
+from nanoresearch.eval.judge import LLMJudge, CalibrationResult
+from nanoresearch.eval.snapshot import RunSnapshotData
+from nanoresearch.eval.judge import _parse_scores, _build_prompt
 
 
 class _DummyProvider:

@@ -31,16 +31,16 @@ async def main(username: str, password: str) -> None:
         print("ERROR: DATABASE_URL 环境变量未设置", file=sys.stderr)
         sys.exit(1)
 
-    from nanobot.storage.database import init_engine, init_db
-    from nanobot.storage.repositories.user_repo import UserRepository
-    from nanobot.storage.repositories.agent_repo import AgentRepository
-    from nanobot.auth.password import hash_password
+    from nanoresearch.storage.database import init_engine, init_db
+    from nanoresearch.storage.repositories.user_repo import UserRepository
+    from nanoresearch.storage.repositories.agent_repo import AgentRepository
+    from nanoresearch.auth.password import hash_password
 
     init_engine(database_url)
     await init_db()
     print("✓ 表结构创建完成")
 
-    from nanobot.storage.database import get_session_factory
+    from nanoresearch.storage.database import get_session_factory
     factory = get_session_factory()
 
     # Seed admin user

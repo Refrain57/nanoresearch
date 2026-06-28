@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from nanobot.eval.badcase_detector import BadcaseDetector
-from nanobot.eval.evaluator import RuleEvaluator
-from nanobot.eval.snapshot import RunSnapshotData
+from nanoresearch.eval.badcase_detector import BadcaseDetector
+from nanoresearch.eval.evaluator import RuleEvaluator
+from nanoresearch.eval.snapshot import RunSnapshotData
 
 
 def _snap(**overrides) -> RunSnapshotData:

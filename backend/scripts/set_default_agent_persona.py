@@ -43,8 +43,8 @@ async def main() -> None:
         print("ERROR: DATABASE_URL 未设置", file=sys.stderr)
         sys.exit(1)
 
-    from nanobot.storage.database import init_engine, get_session_factory
-    from nanobot.storage.repositories.agent_repo import AgentRepository
+    from nanoresearch.storage.database import init_engine, get_session_factory
+    from nanoresearch.storage.repositories.agent_repo import AgentRepository
 
     init_engine(database_url)
     factory = get_session_factory()

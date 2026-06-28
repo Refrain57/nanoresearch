@@ -1,7 +1,7 @@
 """Verify AgentTestCase model exposes the new B4 metadata fields after migration."""
 from sqlalchemy import inspect
 
-from nanobot.storage.models import AgentTestCase
+from nanoresearch.storage.models import AgentTestCase
 
 
 def test_agent_test_case_has_b4_metadata_columns():

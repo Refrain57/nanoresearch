@@ -97,8 +97,8 @@ dev = [
 ]
 
 [project.scripts]
-nr = "nanobot.cli.commands:app"
-nanoresearch = "nanobot.cli.commands:app"
+nr = "nanoresearch.cli.commands:app"
+nanoresearch = "nanoresearch.cli.commands:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -109,24 +109,24 @@ allow-direct-references = true
 
 [tool.hatch.build]
 include = [
-    "nanobot/**/*.py",
-    "nanobot/templates/**/*.md",
-    "nanobot/skills/**/*.md",
-    "nanobot/skills/**/*.sh",
+    "nanoresearch/**/*.py",
+    "nanoresearch/templates/**/*.md",
+    "nanoresearch/skills/**/*.md",
+    "nanoresearch/skills/**/*.sh",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["nanoresearch"]
 
 [tool.hatch.build.targets.wheel.sources]
-"nanobot" = "nanobot"
+"nanoresearch" = "nanoresearch"
 
 [tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanobot/bridge"
+"bridge" = "nanoresearch/bridge"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "nanobot/",
+    "nanoresearch/",
     "bridge/",
     "README.md",
     "LICENSE",
@@ -150,7 +150,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["nanobot"]
+source = ["nanoresearch"]
 omit = ["tests/*", "**/tests/*"]
 
 [tool.coverage.report]

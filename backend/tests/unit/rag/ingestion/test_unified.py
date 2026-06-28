@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nanobot.rag.core.types import ChunkPayload
-from nanobot.rag.ingestion.pipeline import PipelineResult
-from nanobot.rag.ingestion.unified import (
+from nanoresearch.rag.core.types import ChunkPayload
+from nanoresearch.rag.ingestion.pipeline import PipelineResult
+from nanoresearch.rag.ingestion.unified import (
     IngestFailedError,
     KbNotFoundError,
     _validate_file_path,
@@ -107,7 +107,7 @@ async def test_kb_not_found_raises():
     repo = _setup_repo(kb=None)  # get() returns None
     settings = MagicMock()
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         with pytest.raises(KbNotFoundError, match="not found"):
             await ingest_document(
                 kb_id="00000000-0000-0000-0000-000000000001",
@@ -126,7 +126,7 @@ async def test_dedup_skips():
     repo = _setup_repo(kb=kb, existing_doc=existing)
     settings = MagicMock()
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         result = await ingest_document(
             kb_id=str(uuid.uuid4()),
             file_path="/valid/file.pdf",
@@ -144,8 +144,8 @@ async def test_dedup_skips():
 
 
 @pytest.mark.asyncio
-@patch("nanobot.rag.ingestion.unified.VectorStoreFactory")
-@patch("nanobot.rag.ingestion.unified.IngestionPipeline")
+@patch("nanoresearch.rag.ingestion.unified.VectorStoreFactory")
+@patch("nanoresearch.rag.ingestion.unified.IngestionPipeline")
 async def test_force_reprocess(mock_pipeline_class, mock_vs_factory):
     kb = _mock_kb()
     existing = _mock_doc(status="indexed", file_path="/old/doc.pdf")
@@ -165,7 +165,7 @@ async def test_force_reprocess(mock_pipeline_class, mock_vs_factory):
     mock_vs.delete_by_metadata = MagicMock(return_value=5)
     mock_vs_factory.create.return_value = mock_vs
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         result = await ingest_document(
             kb_id=str(uuid.uuid4()),
             file_path="/valid/file.pdf",
@@ -187,8 +187,8 @@ async def test_force_reprocess(mock_pipeline_class, mock_vs_factory):
 
 
 @pytest.mark.asyncio
-@patch("nanobot.rag.ingestion.unified.VectorStoreFactory")
-@patch("nanobot.rag.ingestion.unified.IngestionPipeline")
+@patch("nanoresearch.rag.ingestion.unified.VectorStoreFactory")
+@patch("nanoresearch.rag.ingestion.unified.IngestionPipeline")
 async def test_processing_residue_retries(mock_pipeline_class, mock_vs_factory):
     kb = _mock_kb()
     existing = _mock_doc(status="processing", file_path="/crashed/doc.pdf")
@@ -206,7 +206,7 @@ async def test_processing_residue_retries(mock_pipeline_class, mock_vs_factory):
     mock_vs.delete_by_metadata = MagicMock(return_value=3)
     mock_vs_factory.create.return_value = mock_vs
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         result = await ingest_document(
             kb_id=str(uuid.uuid4()),
             file_path="/valid/file.pdf",
@@ -223,8 +223,8 @@ async def test_processing_residue_retries(mock_pipeline_class, mock_vs_factory):
 
 
 @pytest.mark.asyncio
-@patch("nanobot.rag.ingestion.unified.VectorStoreFactory")
-@patch("nanobot.rag.ingestion.unified.IngestionPipeline")
+@patch("nanoresearch.rag.ingestion.unified.VectorStoreFactory")
+@patch("nanoresearch.rag.ingestion.unified.IngestionPipeline")
 async def test_fresh_ingest_success(mock_pipeline_class, mock_vs_factory):
     kb = _mock_kb()
     repo = _setup_repo(kb=kb, existing_doc=None)
@@ -244,7 +244,7 @@ async def test_fresh_ingest_success(mock_pipeline_class, mock_vs_factory):
     mock_vs = MagicMock()
     mock_vs_factory.create.return_value = mock_vs
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         result = await ingest_document(
             kb_id=str(uuid.uuid4()),
             file_path="/valid/file.pdf",
@@ -280,8 +280,8 @@ async def test_fresh_ingest_success(mock_pipeline_class, mock_vs_factory):
 
 
 @pytest.mark.asyncio
-@patch("nanobot.rag.ingestion.unified.VectorStoreFactory")
-@patch("nanobot.rag.ingestion.unified.IngestionPipeline")
+@patch("nanoresearch.rag.ingestion.unified.VectorStoreFactory")
+@patch("nanoresearch.rag.ingestion.unified.IngestionPipeline")
 async def test_pipeline_failure_rollback(mock_pipeline_class, mock_vs_factory):
     kb = _mock_kb()
     repo = _setup_repo(kb=kb, existing_doc=None)
@@ -301,7 +301,7 @@ async def test_pipeline_failure_rollback(mock_pipeline_class, mock_vs_factory):
     mock_vs.delete_by_metadata = MagicMock(return_value=0)
     mock_vs_factory.create.return_value = mock_vs
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         with pytest.raises(IngestFailedError, match="Embedding API timeout"):
             await ingest_document(
                 kb_id=str(uuid.uuid4()),
@@ -325,8 +325,8 @@ async def test_pipeline_failure_rollback(mock_pipeline_class, mock_vs_factory):
 
 
 @pytest.mark.asyncio
-@patch("nanobot.rag.ingestion.unified.VectorStoreFactory")
-@patch("nanobot.rag.ingestion.unified.IngestionPipeline")
+@patch("nanoresearch.rag.ingestion.unified.VectorStoreFactory")
+@patch("nanoresearch.rag.ingestion.unified.IngestionPipeline")
 async def test_empty_chunks(mock_pipeline_class, mock_vs_factory):
     kb = _mock_kb()
     repo = _setup_repo(kb=kb, existing_doc=None)
@@ -345,7 +345,7 @@ async def test_empty_chunks(mock_pipeline_class, mock_vs_factory):
     mock_vs = MagicMock()
     mock_vs_factory.create.return_value = mock_vs
 
-    with patch("nanobot.rag.ingestion.unified._validate_file_path"):
+    with patch("nanoresearch.rag.ingestion.unified._validate_file_path"):
         result = await ingest_document(
             kb_id=str(uuid.uuid4()),
             file_path="/valid/file.pdf",

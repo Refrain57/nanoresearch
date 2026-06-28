@@ -168,10 +168,10 @@ class TestRAGIntegration:
 
     def test_hybrid_search_with_evaluator(self):
         """Test hybrid search output can be evaluated."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
-        from nanobot.rag.core.query_engine.fusion import RRFFusion
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
-        from nanobot.rag.core.types import RetrievalResult
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.types import RetrievalResult
 
         # Create mock retrievers
         mock_dense = MagicMock()

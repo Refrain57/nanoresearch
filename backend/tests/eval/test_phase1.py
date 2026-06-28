@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 import pytest
 
-from nanobot.eval.badcase_classifier import (
+from nanoresearch.eval.badcase_classifier import (
     BadcaseClassifier,
     ClassifyResult,
     FIXABLE_LAYERS,
@@ -23,7 +23,7 @@ from nanobot.eval.badcase_classifier import (
     _rule_based_root_cause,
     _build_classify_prompt,
 )
-from nanobot.eval.tunable import PersonaObject, ToolDescriptionObject, OptimizationCandidate
+from nanoresearch.eval.tunable import PersonaObject, ToolDescriptionObject, OptimizationCandidate
 
 
 # ---------------------------------------------------------------------------

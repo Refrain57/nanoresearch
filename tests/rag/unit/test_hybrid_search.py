@@ -13,15 +13,15 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from typing import List, Optional, Dict, Any, Tuple
 
-from nanobot.rag.core.query_engine.hybrid_search import (
+from nanoresearch.rag.core.query_engine.hybrid_search import (
     HybridSearch,
     HybridSearchConfig,
     HybridSearchResult,
     create_hybrid_search,
 )
-from nanobot.rag.core.query_engine.fusion import RRFFusion
-from nanobot.rag.core.query_engine.query_processor import QueryProcessor
-from nanobot.rag.core.types import RetrievalResult, ProcessedQuery
+from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
+from nanoresearch.rag.core.types import RetrievalResult, ProcessedQuery
 from tests.rag.conftest import MockSettings
 
 

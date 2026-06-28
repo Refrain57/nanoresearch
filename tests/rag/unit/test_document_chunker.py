@@ -12,7 +12,7 @@ import hashlib
 import pytest
 from unittest.mock import MagicMock, patch
 
-from nanobot.rag.core.types import Document, Chunk
+from nanoresearch.rag.core.types import Document, Chunk
 from tests.rag.conftest import MockSettings
 
 
@@ -28,11 +28,11 @@ class TestDocumentChunkerInit:
 
     def test_init_with_mock_settings(self):
         """Test initialization with mock settings."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
         # Patch SplitterFactory to return a mock splitter
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk1", "chunk2"]
             mock_factory.create.return_value = mock_splitter
@@ -46,10 +46,10 @@ class TestDocumentChunkerChunkId:
 
     def test_chunk_id_format(self):
         """Test chunk ID follows expected format."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["test content"]
             mock_factory.create.return_value = mock_splitter
@@ -66,10 +66,10 @@ class TestDocumentChunkerChunkId:
 
     def test_chunk_id_deterministic(self):
         """Test that same input produces same chunk ID."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["test content"]
             mock_factory.create.return_value = mock_splitter
@@ -83,10 +83,10 @@ class TestDocumentChunkerChunkId:
 
     def test_chunk_id_different_content(self):
         """Test that different content produces different chunk ID."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["content1", "content2"]
             mock_factory.create.return_value = mock_splitter
@@ -100,10 +100,10 @@ class TestDocumentChunkerChunkId:
 
     def test_chunk_id_zero_padded_index(self):
         """Test that chunk index is zero-padded."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["test"]
             mock_factory.create.return_value = mock_splitter
@@ -124,10 +124,10 @@ class TestDocumentChunkerMetadataInheritance:
 
     def test_metadata_inherited_from_document(self):
         """Test that document metadata is inherited to chunks."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk content"]
             mock_factory.create.return_value = mock_splitter
@@ -153,10 +153,10 @@ class TestDocumentChunkerMetadataInheritance:
 
     def test_chunk_index_added(self):
         """Test that chunk_index is added to metadata."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk1", "chunk2", "chunk3"]
             mock_factory.create.return_value = mock_splitter
@@ -177,10 +177,10 @@ class TestDocumentChunkerMetadataInheritance:
 
     def test_source_ref_added(self):
         """Test that source_ref points to parent document."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk content"]
             mock_factory.create.return_value = mock_splitter
@@ -199,10 +199,10 @@ class TestDocumentChunkerMetadataInheritance:
 
     def test_image_refs_extraction(self):
         """Test extraction of image references from chunk text."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = [
                 "First part [IMAGE: img_001] and [IMAGE: img_002]",
@@ -225,10 +225,10 @@ class TestDocumentChunkerMetadataInheritance:
 
     def test_image_refs_with_doc_images(self):
         """Test image metadata with document-level images."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["Content with [IMAGE: img_001]"]
             mock_factory.create.return_value = mock_splitter
@@ -256,10 +256,10 @@ class TestDocumentChunkerMetadataInheritance:
 
     def test_document_level_images_removed_from_chunk(self):
         """Test that document-level images field is not copied to chunk."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk without image ref"]
             mock_factory.create.return_value = mock_splitter
@@ -286,10 +286,10 @@ class TestDocumentChunkerSplitDocument:
 
     def test_split_document_basic(self):
         """Test basic document splitting."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk1", "chunk2", "chunk3"]
             mock_factory.create.return_value = mock_splitter
@@ -312,10 +312,10 @@ class TestDocumentChunkerSplitDocument:
 
     def test_split_document_empty_text_error(self):
         """Test that empty document raises error."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_factory.create.return_value = mock_splitter
 
@@ -332,10 +332,10 @@ class TestDocumentChunkerSplitDocument:
 
     def test_split_document_whitespace_only_error(self):
         """Test that whitespace-only document raises error."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_factory.create.return_value = mock_splitter
 
@@ -352,10 +352,10 @@ class TestDocumentChunkerSplitDocument:
 
     def test_split_document_splitter_returns_empty(self):
         """Test handling when splitter returns empty list."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = []
             mock_factory.create.return_value = mock_splitter
@@ -373,10 +373,10 @@ class TestDocumentChunkerSplitDocument:
 
     def test_split_document_single_chunk(self):
         """Test splitting document that produces single chunk."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["short content"]
             mock_factory.create.return_value = mock_splitter
@@ -400,10 +400,10 @@ class TestDocumentChunkerMetadataIntegrity:
 
     def test_metadata_not_shared(self):
         """Test that metadata dicts are not shared between chunks."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["chunk1", "chunk2"]
             mock_factory.create.return_value = mock_splitter
@@ -425,10 +425,10 @@ class TestDocumentChunkerMetadataIntegrity:
 
     def test_page_num_from_image(self):
         """Test that page_num is extracted from first image."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         settings = MockSettings()
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             mock_splitter.split_text.return_value = ["Content with [IMAGE: img_001]"]
             mock_factory.create.return_value = mock_splitter
@@ -460,7 +460,7 @@ class TestDocumentStructureChunkerInit:
 
     def test_init_default_params(self):
         """Test initialization with default parameters."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         assert chunker.min_chunk_length == 100
@@ -468,7 +468,7 @@ class TestDocumentStructureChunkerInit:
 
     def test_init_custom_params(self):
         """Test initialization with custom parameters."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker(
             min_chunk_length=50,
@@ -483,7 +483,7 @@ class TestDocumentStructureChunkerBlockIdentification:
 
     def test_identify_code_blocks(self):
         """Test identification of code blocks."""
-        from nanobot.rag.ingestion.chunking.document_chunker import (
+        from nanoresearch.rag.ingestion.chunking.document_chunker import (
             DocumentStructureChunker,
             ContentType,
         )
@@ -506,7 +506,7 @@ More text."""
 
     def test_identify_multiple_code_blocks(self):
         """Test identification of multiple code blocks."""
-        from nanobot.rag.ingestion.chunking.document_chunker import (
+        from nanoresearch.rag.ingestion.chunking.document_chunker import (
             DocumentStructureChunker,
             ContentType,
         )
@@ -528,7 +528,7 @@ code2
 
     def test_identify_tables(self):
         """Test identification of tables."""
-        from nanobot.rag.ingestion.chunking.document_chunker import (
+        from nanoresearch.rag.ingestion.chunking.document_chunker import (
             DocumentStructureChunker,
             ContentType,
         )
@@ -551,7 +551,7 @@ More text."""
 
     def test_identify_lists(self):
         """Test identification of lists."""
-        from nanobot.rag.ingestion.chunking.document_chunker import (
+        from nanoresearch.rag.ingestion.chunking.document_chunker import (
             DocumentStructureChunker,
             ContentType,
         )
@@ -576,7 +576,7 @@ class TestDocumentStructureChunkerSectionParsing:
 
     def test_parse_single_heading(self):
         """Test parsing document with single heading."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         text = """# Chapter 1
@@ -592,7 +592,7 @@ This is the content of chapter 1."""
 
     def test_parse_multiple_headings(self):
         """Test parsing document with multiple headings."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         text = """# Chapter 1
@@ -619,7 +619,7 @@ Content 2."""
 
     def test_parse_section_path(self):
         """Test that section_path is correctly built."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         text = """# Main
@@ -638,7 +638,7 @@ Content here."""
 
     def test_parse_no_headings(self):
         """Test parsing document without headings."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         text = "Just plain text without any headings."
@@ -655,7 +655,7 @@ class TestDocumentStructureChunkerMetadata:
 
     def test_metadata_has_title(self):
         """Test that chunk metadata includes title."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -672,7 +672,7 @@ class TestDocumentStructureChunkerMetadata:
 
     def test_metadata_has_section_level(self):
         """Test that chunk metadata includes section_level."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -692,7 +692,7 @@ class TestDocumentStructureChunkerMetadata:
 
     def test_metadata_has_section_path(self):
         """Test that chunk metadata includes section_path."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -709,7 +709,7 @@ class TestDocumentStructureChunkerMetadata:
 
     def test_metadata_has_content_type(self):
         """Test that chunk metadata includes content_type."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -730,7 +730,7 @@ class TestDocumentStructureChunkerNeighborLinks:
 
     def test_neighbors_linked(self):
         """Test that adjacent chunks are linked."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -757,7 +757,7 @@ class TestDocumentStructureChunkerNeighborLinks:
 
     def test_neighbor_ids_valid(self):
         """Test that neighbor IDs point to valid chunks."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -784,7 +784,7 @@ class TestDocumentStructureChunkerCodeBlockProtection:
 
     def test_code_block_not_split(self):
         """Test that code blocks are not split."""
-        from nanobot.rag.ingestion.chunking.document_chunker import (
+        from nanoresearch.rag.ingestion.chunking.document_chunker import (
             DocumentStructureChunker,
             ContentType,
         )
@@ -810,7 +810,7 @@ class TestDocumentStructureChunkerCodeBlockProtection:
 
     def test_code_block_language_extracted(self):
         """Test that code block language is extracted."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         blocks = chunker._identify_blocks("```python\ncode\n```")
@@ -824,7 +824,7 @@ class TestDocumentStructureChunkerIntegration:
 
     def test_full_document_chunking(self):
         """Test complete document chunking with all features."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(
@@ -881,7 +881,7 @@ class RAGSystem:
 
     def test_empty_document_error(self):
         """Test that empty document raises error."""
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentStructureChunker
 
         chunker = DocumentStructureChunker()
         doc = Document(

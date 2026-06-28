@@ -22,12 +22,12 @@ async def main() -> None:
         print("ERROR: DATABASE_URL 未设置", file=sys.stderr)
         sys.exit(1)
 
-    from nanobot.storage.database import init_engine
+    from nanoresearch.storage.database import init_engine
     import sqlalchemy as sa
 
     init_engine(database_url)
 
-    from nanobot.storage.database import _engine as engine
+    from nanoresearch.storage.database import _engine as engine
     async with engine.begin() as conn:
         result = await conn.execute(sa.text(
             "SELECT 1 FROM information_schema.columns "

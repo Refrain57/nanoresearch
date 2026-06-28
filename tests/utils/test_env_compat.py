@@ -1,11 +1,11 @@
-"""Tests for nanobot.utils.env_compat."""
+"""Tests for nanoresearch.utils.env_compat."""
 
 import os
 import warnings
 
 import pytest
 
-from nanobot.utils.env_compat import apply_legacy_env_compat, _reset_for_tests
+from nanoresearch.utils.env_compat import apply_legacy_env_compat, _reset_for_tests
 
 
 @pytest.fixture(autouse=True)

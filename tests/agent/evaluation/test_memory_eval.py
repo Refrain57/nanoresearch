@@ -31,7 +31,7 @@ class TestMemoryFactExtraction:
     @pytest.mark.asyncio
     async def test_simple_fact_extraction(self):
         """Test extraction of simple facts from conversation."""
-        from nanobot.agent.memory import MemoryStore
+        from nanoresearch.agent.memory import MemoryStore
 
         # Create a memory store
         import tempfile
@@ -73,7 +73,7 @@ class TestMemoryFactExtraction:
     @pytest.mark.asyncio
     async def test_no_information_loss(self):
         """Test that key facts are not lost during consolidation."""
-        from nanobot.agent.memory import MemoryStore
+        from nanoresearch.agent.memory import MemoryStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = MemoryStore(Path(tmpdir))
@@ -134,7 +134,7 @@ class TestMemoryDegradation:
     @pytest.mark.asyncio
     async def test_degradation_on_llm_failure(self):
         """Test graceful degradation when LLM fails."""
-        from nanobot.agent.memory import MemoryStore
+        from nanoresearch.agent.memory import MemoryStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create mock knowledge_search
@@ -164,7 +164,7 @@ class TestMemoryDegradation:
     @pytest.mark.asyncio
     async def test_consecutive_failures_counter(self):
         """Test that consecutive failures are properly tracked."""
-        from nanobot.agent.memory import MemoryStore
+        from nanoresearch.agent.memory import MemoryStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = MemoryStore(Path(tmpdir))
@@ -234,7 +234,7 @@ class TestMemoryCompleteness:
     @pytest.mark.asyncio
     async def test_completeness_against_ground_truth(self):
         """Test that memory captures expected facts."""
-        from nanobot.agent.memory import MemoryStore
+        from nanoresearch.agent.memory import MemoryStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = MemoryStore(Path(tmpdir))

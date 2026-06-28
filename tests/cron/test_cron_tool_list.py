@@ -2,9 +2,9 @@
 
 from datetime import datetime, timezone
 
-from nanobot.agent.tools.cron import CronTool
-from nanobot.cron.service import CronService
-from nanobot.cron.types import CronJobState, CronSchedule
+from nanoresearch.agent.tools.cron import CronTool
+from nanoresearch.cron.service import CronService
+from nanoresearch.cron.types import CronJobState, CronSchedule
 
 
 def _make_tool(tmp_path) -> CronTool:

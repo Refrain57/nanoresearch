@@ -37,13 +37,13 @@ async def _db_query(factory, sql: str, params: dict = None):
 
 
 async def main() -> None:
-    from nanobot.config.loader import load_config
-    from nanobot.providers.openai_compat_provider import OpenAICompatProvider
-    from nanobot.storage.database import init_engine, get_session_factory
-    from nanobot.storage.repositories.agent_repo import AgentRepository
-    from nanobot.storage.repositories.agent_eval_repo import AgentEvalRepository
-    from nanobot.eval.tunable import PersonaObject
-    from nanobot.eval.badcase_classifier import BadcaseClassifier, _build_classify_prompt
+    from nanoresearch.config.loader import load_config
+    from nanoresearch.providers.openai_compat_provider import OpenAICompatProvider
+    from nanoresearch.storage.database import init_engine, get_session_factory
+    from nanoresearch.storage.repositories.agent_repo import AgentRepository
+    from nanoresearch.storage.repositories.agent_eval_repo import AgentEvalRepository
+    from nanoresearch.eval.tunable import PersonaObject
+    from nanoresearch.eval.badcase_classifier import BadcaseClassifier, _build_classify_prompt
 
     # ── Init DB ──────────────────────────────────────────────────────────────
     init_engine()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pytest
 
-from nanobot.eval.sandbox import SandboxedToolRegistry, SandboxReplayError
+from nanoresearch.eval.sandbox import SandboxedToolRegistry, SandboxReplayError
 
 
 class _DummyRegistry:

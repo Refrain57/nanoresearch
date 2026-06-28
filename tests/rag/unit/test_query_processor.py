@@ -9,7 +9,7 @@ Tests the query preprocessing functionality including:
 """
 
 import pytest
-from nanobot.rag.core.query_engine.query_processor import (
+from nanoresearch.rag.core.query_engine.query_processor import (
     QueryProcessor,
     QueryProcessorConfig,
     create_query_processor,
@@ -17,7 +17,7 @@ from nanobot.rag.core.query_engine.query_processor import (
     ENGLISH_STOPWORDS,
     DEFAULT_STOPWORDS,
 )
-from nanobot.rag.core.types import ProcessedQuery
+from nanoresearch.rag.core.types import ProcessedQuery
 
 
 class TestQueryProcessorInit:

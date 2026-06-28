@@ -9,10 +9,10 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-from nanobot.auth.password import hash_password
-from nanobot.storage.repositories.agent_repo import AgentRepository
-from nanobot.storage.repositories.conversation_repo import ConversationRepository
-from nanobot.storage.repositories.user_repo import UserRepository
+from nanoresearch.auth.password import hash_password
+from nanoresearch.storage.repositories.agent_repo import AgentRepository
+from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+from nanoresearch.storage.repositories.user_repo import UserRepository
 
 from tests.conftest import truncate_all, make_factory
 

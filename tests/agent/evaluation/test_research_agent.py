@@ -195,8 +195,8 @@ class TestResearchAgentPlanning:
     @pytest.mark.asyncio
     async def test_topic_decomposition(self):
         """Test that research topic is properly decomposed into sub-questions."""
-        from nanobot.research.planner import ResearchPlanner
-        from nanobot.research.types import ResearchConfig
+        from nanoresearch.research.planner import ResearchPlanner
+        from nanoresearch.research.types import ResearchConfig
 
         provider = MockLLMProvider()
         planner = ResearchPlanner(provider, "test-model")
@@ -217,7 +217,7 @@ class TestResearchAgentPlanning:
     @pytest.mark.asyncio
     async def test_planning_fallback(self):
         """Test fallback when LLM doesn't return proper tool call."""
-        from nanobot.research.planner import ResearchPlanner
+        from nanoresearch.research.planner import ResearchPlanner
 
         # Provider that returns no tool calls
         provider = MagicMock()
@@ -239,8 +239,8 @@ class TestResearchAgentSearch:
     @pytest.mark.asyncio
     async def test_parallel_search(self):
         """Test that searches run in parallel for multiple sub-questions."""
-        from nanobot.research.searcher import SearchOrchestrator
-        from nanobot.research.types import ResearchPlan, SubQuestion, ResearchConfig
+        from nanoresearch.research.searcher import SearchOrchestrator
+        from nanoresearch.research.types import ResearchPlan, SubQuestion, ResearchConfig
 
         mock_search = MockWebSearchTool()
         mock_fetch = MockWebFetchTool()
@@ -273,8 +273,8 @@ class TestResearchAgentSearch:
     @pytest.mark.asyncio
     async def test_search_deduplication(self):
         """Test that duplicate URLs are removed."""
-        from nanobot.research.searcher import SearchOrchestrator
-        from nanobot.research.types import ResearchPlan, SubQuestion, ResearchConfig
+        from nanoresearch.research.searcher import SearchOrchestrator
+        from nanoresearch.research.types import ResearchPlan, SubQuestion, ResearchConfig
 
         mock_search = MockWebSearchTool()
         mock_fetch = MockWebFetchTool()
@@ -308,8 +308,8 @@ class TestResearchAgentSynthesis:
     @pytest.mark.asyncio
     async def test_synthesis_structure(self):
         """Test that synthesis produces structured output."""
-        from nanobot.research.synthesizer import InformationSynthesizer
-        from nanobot.research.types import ResearchPlan, SubQuestion, SearchResult
+        from nanoresearch.research.synthesizer import InformationSynthesizer
+        from nanoresearch.research.types import ResearchPlan, SubQuestion, SearchResult
 
         provider = MockLLMProvider()
         synthesizer = InformationSynthesizer(provider, "test-model")
@@ -346,14 +346,14 @@ class TestResearchAgentEndToEnd:
     )
     async def test_full_research_pipeline(self):
         """Test complete research pipeline with real LLM."""
-        from nanobot.research.runner import ResearchRunner
-        from nanobot.research.types import ResearchConfig
+        from nanoresearch.research.runner import ResearchRunner
+        from nanoresearch.research.types import ResearchConfig
 
         # This test requires actual LLM API access
         # Skip in CI, run locally with API keys
 
         # Use real provider if available
-        from nanobot.providers.base import get_provider
+        from nanoresearch.providers.base import get_provider
 
         provider = get_provider()  # Will use configured provider
         runner = ResearchRunner(
@@ -408,7 +408,7 @@ class TestResearchAgentQuality:
     @pytest.mark.asyncio
     async def test_research_quality_benchmark(self):
         """Run research quality benchmark."""
-        from nanobot.research.planner import ResearchPlanner
+        from nanoresearch.research.planner import ResearchPlanner
 
         results = []
         provider = MockLLMProvider()

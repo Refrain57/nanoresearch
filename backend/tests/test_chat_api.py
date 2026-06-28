@@ -8,7 +8,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from nanobot.auth.password import hash_password
+from nanoresearch.auth.password import hash_password
 from tests.conftest import truncate_all, make_factory
 
 
@@ -45,14 +45,14 @@ def clean_tables():
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
-    from nanobot.server.main import create_app
+    from nanoresearch.server.main import create_app
     return create_app(channel_loop=FakeAgentLoop(), session_factory=make_factory())
 
 
 @pytest.fixture
 def seeded_user():
     async def _():
-        from nanobot.storage.repositories.user_repo import UserRepository
+        from nanoresearch.storage.repositories.user_repo import UserRepository
         repo = UserRepository(make_factory())
         return await repo.create("testadmin", hash_password("secret123"))
     return run(_())
@@ -61,7 +61,7 @@ def seeded_user():
 @pytest.fixture
 def other_user():
     async def _():
-        from nanobot.storage.repositories.user_repo import UserRepository
+        from nanoresearch.storage.repositories.user_repo import UserRepository
         repo = UserRepository(make_factory())
         return await repo.create("other", hash_password("other123"))
     return run(_())
@@ -70,14 +70,14 @@ def other_user():
 @pytest.fixture
 def auth_headers(seeded_user, monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
-    from nanobot.auth.jwt import create_token
+    from nanoresearch.auth.jwt import create_token
     return {"Authorization": f"Bearer {create_token('testadmin')}"}
 
 
 @pytest.fixture
 def other_auth_headers(other_user, monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
-    from nanobot.auth.jwt import create_token
+    from nanoresearch.auth.jwt import create_token
     return {"Authorization": f"Bearer {create_token('other')}"}
 
 
@@ -179,7 +179,7 @@ def test_get_messages_empty(app, auth_headers):
 
 def test_get_messages_pagination(app, auth_headers):
     async def seed(conv_id_str):
-        from nanobot.storage.repositories.conversation_repo import ConversationRepository
+        from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
         import uuid
         repo = ConversationRepository(make_factory())
         msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg{i}"} for i in range(5)]
@@ -254,8 +254,8 @@ def test_run_events_already_completed(app, auth_headers):
     """Completed run (no active queue) returns a single terminal run_end event."""
     async def seed_completed_run():
         import uuid
-        from nanobot.storage.repositories.conversation_repo import ConversationRepository
-        from nanobot.storage.repositories.run_repo import RunRepository
+        from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+        from nanoresearch.storage.repositories.run_repo import RunRepository
         from datetime import datetime, timezone
         factory = make_factory()
         conv = await ConversationRepository(factory).create(key="web:done-conv", uid="testadmin")

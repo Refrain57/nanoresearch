@@ -1,6 +1,6 @@
 # Agent Evaluation Framework
 
-评估框架用于测试和验证 nanobot Agent 各个模块的质量。
+评估框架用于测试和验证 nanoresearch Agent 各个模块的质量。
 
 ## 快速开始
 
@@ -118,7 +118,7 @@ python -m tests.agent.evaluation.benchmark
 
 # 输出示例：
 # ============================================================
-#  NANOBOT AGENT EVALUATION BENCHMARK
+#  NANORESEARCH AGENT EVALUATION BENCHMARK
 #  Started: 2026-04-06 10:29:43
 # ============================================================
 #

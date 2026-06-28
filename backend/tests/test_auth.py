@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from nanobot.auth.password import hash_password, verify_password
-from nanobot.auth.jwt import create_token, verify_token
+from nanoresearch.auth.password import hash_password, verify_password
+from nanoresearch.auth.jwt import create_token, verify_token
 
 SECRET = "a" * 64
 

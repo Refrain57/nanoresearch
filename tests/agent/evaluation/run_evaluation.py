@@ -304,7 +304,7 @@ def run_tool_call_benchmark() -> dict[str, Any]:
 async def run_all_benchmarks() -> dict[str, Any]:
     """Run all benchmarks."""
     print("\n" + "=" * 60)
-    print(" NANOBOT AGENT EVALUATION BENCHMARK")
+    print(" NANORESEARCH AGENT EVALUATION BENCHMARK")
     print(f" Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
@@ -365,7 +365,7 @@ def generate_report(results: dict[str, Any], format: str = "markdown") -> str:
         return json.dumps(results, indent=2, ensure_ascii=False)
 
     lines = [
-        "# Nanobot Agent Evaluation Report",
+        "# Nanoresearch Agent Evaluation Report",
         f"\n**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "\n## Summary",
     ]
@@ -402,7 +402,7 @@ def generate_report(results: dict[str, Any], format: str = "markdown") -> str:
 
 async def main() -> None:
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="Run Nanobot Agent Evaluation")
+    parser = argparse.ArgumentParser(description="Run Nanoresearch Agent Evaluation")
     parser.add_argument(
         "--format",
         choices=["text", "markdown", "json"],

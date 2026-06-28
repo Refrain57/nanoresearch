@@ -13,7 +13,7 @@ import sys
 from unittest.mock import MagicMock, patch
 from typing import List
 
-from nanobot.rag.core.types import Chunk, Document, ChunkRecord
+from nanoresearch.rag.core.types import Chunk, Document, ChunkRecord
 
 
 class MockSettings:
@@ -51,7 +51,7 @@ class TestLargeDocumentIngestion:
     @pytest.mark.stress
     def test_ingest_1000_chunks(self):
         """Test ingestion of 1000 chunks."""
-        from nanobot.rag.ingestion.pipeline import IngestionPipeline
+        from nanoresearch.rag.ingestion.pipeline import IngestionPipeline
 
         settings = MockSettings()
         settings.ingestion.batch_size = 50
@@ -68,16 +68,16 @@ class TestLargeDocumentIngestion:
             }
             chunks.append(chunk)
 
-        with patch("nanobot.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls, \
-             patch("nanobot.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls, \
-             patch("nanobot.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
-             patch("nanobot.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
-             patch("nanobot.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
-             patch("nanobot.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
-             patch("nanobot.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
-             patch("nanobot.rag.ingestion.pipeline.ImageStorage") as mock_img_cls:
+        with patch("nanoresearch.rag.ingestion.pipeline.SQLiteIntegrityChecker") as mock_ic_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.PdfLoader") as mock_pdf_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.DocumentChunker") as mock_chunker_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ChunkRefiner") as mock_refiner_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.MetadataEnricher") as mock_enricher_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ImageCaptioner") as mock_captioner_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.BatchProcessor") as mock_batch_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.VectorUpserter") as mock_vector_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.BM25Indexer") as mock_bm25_cls, \
+             patch("nanoresearch.rag.ingestion.pipeline.ImageStorage") as mock_img_cls:
 
             mock_ic_cls.return_value = MagicMock(
                 compute_sha256=lambda x: "hash_1000",
@@ -135,8 +135,8 @@ class TestLargeDocumentIngestion:
         large_text = "Sample text content. " * 500000  # ~10MB
 
         # Test that chunking handles it
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
-            from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+            from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
             # Mock splitter to simulate realistic chunking
             chunk_size = 500
@@ -172,7 +172,7 @@ class TestBatchProcessing:
     @pytest.mark.stress
     def test_batch_processor_large_batch(self):
         """Test batch processor with large batch."""
-        from nanobot.rag.ingestion.embedding.batch_processor import BatchProcessor
+        from nanoresearch.rag.ingestion.embedding.batch_processor import BatchProcessor
 
         settings = MockSettings()
         batch_size = 100
@@ -212,7 +212,7 @@ class TestBatchProcessing:
     @pytest.mark.stress
     def test_batch_processor_scaling(self):
         """Test batch processor scaling with different batch sizes."""
-        from nanobot.rag.ingestion.embedding.batch_processor import BatchProcessor
+        from nanoresearch.rag.ingestion.embedding.batch_processor import BatchProcessor
 
         chunk_counts = [100, 500, 1000]
         batch_sizes = [50, 100, 200]
@@ -248,11 +248,11 @@ class TestMemoryUsage:
     def test_chunking_memory_usage(self):
         """Test memory usage during chunking."""
         import tracemalloc
-        from nanobot.rag.ingestion.chunking.document_chunker import DocumentChunker
+        from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 
         tracemalloc.start()
 
-        with patch("nanobot.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
+        with patch("nanoresearch.rag.ingestion.chunking.document_chunker.SplitterFactory") as mock_factory:
             mock_splitter = MagicMock()
             # Simulate many small chunks
             chunks_text = ["Chunk content " * 100] * 5000  # 5000 chunks

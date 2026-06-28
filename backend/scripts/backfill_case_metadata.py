@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from nanobot.storage.models import AgentTestCase
+from nanoresearch.storage.models import AgentTestCase
 
 LEGACY_DIMENSION = "legacy_pre_b4"
 BACKFILL_AUTHOR = "system:backfill_2026_06"

@@ -5,8 +5,8 @@ from __future__ import annotations
 import uuid
 import pytest
 
-from nanobot.eval.tunable import OptimizationCandidate
-from nanobot.eval.optimizer import OptimizationAgent
+from nanoresearch.eval.tunable import OptimizationCandidate
+from nanoresearch.eval.optimizer import OptimizationAgent
 
 
 # ---------------------------------------------------------------------------

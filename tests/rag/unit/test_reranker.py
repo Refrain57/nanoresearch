@@ -12,14 +12,14 @@ import pytest
 from unittest.mock import MagicMock
 from typing import List, Dict, Any, Optional
 
-from nanobot.rag.core.query_engine.reranker import (
+from nanoresearch.rag.core.query_engine.reranker import (
     CoreReranker,
     RerankConfig,
     RerankResult,
     RerankError,
     create_core_reranker,
 )
-from nanobot.rag.core.types import RetrievalResult
+from nanoresearch.rag.core.types import RetrievalResult
 
 
 class MockSettings:

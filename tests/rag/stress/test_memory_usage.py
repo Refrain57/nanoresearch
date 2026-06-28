@@ -14,7 +14,7 @@ from typing import List
 from unittest.mock import MagicMock
 
 import sys
-from nanobot.rag.core.types import RetrievalResult, ChunkRecord
+from nanoresearch.rag.core.types import RetrievalResult, ChunkRecord
 
 
 class MockSettings:
@@ -46,7 +46,7 @@ class TestRetrievalMemory:
     @pytest.mark.stress
     def test_dense_retrieval_memory(self):
         """Test memory usage during dense retrieval."""
-        from nanobot.rag.core.query_engine.dense_retriever import DenseRetriever
+        from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
 
         tracemalloc.start()
 
@@ -88,7 +88,7 @@ class TestRetrievalMemory:
     @pytest.mark.stress
     def test_rerank_memory_usage(self):
         """Test memory usage during reranking."""
-        from nanobot.rag.core.query_engine.reranker import CoreReranker, RerankConfig
+        from nanoresearch.rag.core.query_engine.reranker import CoreReranker, RerankConfig
 
         tracemalloc.start()
 
@@ -208,7 +208,7 @@ class TestMemoryLeaks:
     @pytest.mark.stress
     def test_query_processor_memory(self):
         """Test for memory leaks in query processor."""
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
         tracemalloc.start()
 

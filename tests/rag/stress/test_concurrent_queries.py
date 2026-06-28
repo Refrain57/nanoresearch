@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest.mock import MagicMock, patch
 from typing import List
 
-from nanobot.rag.core.types import RetrievalResult
+from nanoresearch.rag.core.types import RetrievalResult
 
 
 class MockSettings:
@@ -38,7 +38,7 @@ class TestConcurrentDenseQueries:
     @pytest.mark.stress
     def test_concurrent_50_queries(self):
         """Test 50 concurrent dense queries."""
-        from nanobot.rag.core.query_engine.dense_retriever import DenseRetriever
+        from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
 
         settings = MockSettings()
 
@@ -83,9 +83,9 @@ class TestConcurrentDenseQueries:
     @pytest.mark.stress
     def test_concurrent_hybrid_queries(self):
         """Test concurrent hybrid search queries."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
-        from nanobot.rag.core.query_engine.fusion import RRFFusion
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
+        from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
         # Mock retrievers
         mock_dense = MagicMock()
@@ -125,9 +125,9 @@ class TestConcurrentDenseQueries:
     @pytest.mark.stress
     def test_hybrid_search_parallel_vs_sequential(self):
         """Compare parallel vs sequential retrieval performance."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
-        from nanobot.rag.core.query_engine.fusion import RRFFusion
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
+        from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
         # Slow retrievers to highlight difference
         def slow_dense_retrieve(*args, **kwargs):
@@ -193,7 +193,7 @@ class TestQueryThroughput:
     @pytest.mark.stress
     def test_query_throughput_single_thread(self):
         """Test query throughput in single thread."""
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
         processor = QueryProcessor()
         queries = [
@@ -214,7 +214,7 @@ class TestQueryThroughput:
     @pytest.mark.stress
     def test_query_throughput_multi_thread(self):
         """Test query throughput with multi-threading."""
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
         processor = QueryProcessor()
         queries = [
@@ -250,7 +250,7 @@ class TestQueryLatency:
     @pytest.mark.stress
     def test_p99_latency(self):
         """Test P99 latency for query processing."""
-        from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
         processor = QueryProcessor()
         queries = [f"Query about topic {i}" for i in range(100)]

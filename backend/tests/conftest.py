@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import pytest
 
-from nanobot.storage import models as _  # noqa: F401 — register all ORM models
-from nanobot.storage.database import Base
+from nanoresearch.storage import models as _  # noqa: F401 — register all ORM models
+from nanoresearch.storage.database import Base
 
 # ── Connection config ─────────────────────────────────────────────────────────
 

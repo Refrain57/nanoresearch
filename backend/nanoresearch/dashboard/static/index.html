@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NanoResearch Dashboard</title>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
+
+  header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #1a1d27; border-bottom: 1px solid #2d3148; flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 600; color: #a78bfa; }
+  .header-meta { font-size: 12px; color: #64748b; }
+  .header-meta .ok { color: #4ade80; }
+  .header-meta .err { color: #f87171; }
+
+  .layout { display: grid; grid-template-columns: 220px 200px 1fr; flex: 1; overflow: hidden; }
+
+  .col { display: flex; flex-direction: column; border-right: 1px solid #2d3148; overflow: hidden; }
+  .col:last-child { border-right: none; }
+  .col-header { padding: 10px 14px; font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #2d3148; flex-shrink: 0; }
+  .col-body { flex: 1; overflow-y: auto; }
+
+  /* Sessions */
+  .session-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #1e2133; transition: background 0.1s; }
+  .session-item:hover { background: #1e2133; }
+  .session-item.active { background: #1e2133; border-left: 3px solid #a78bfa; }
+  .session-name { font-size: 13px; font-weight: 500; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-meta { font-size: 11px; color: #64748b; margin-top: 2px; }
+  .session-channel { display: inline-block; font-size: 10px; background: #2d3148; color: #94a3b8; padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+
+  /* Agents */
+  .agent-item { padding: 12px 14px; border-bottom: 1px solid #1e2133; }
+  .agent-name { font-size: 13px; font-weight: 500; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-status { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; margin-top: 4px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .status-idle .status-dot { background: #4ade80; }
+  .status-idle { color: #4ade80; }
+  .status-busy .status-dot { background: #facc15; animation: pulse 1s infinite; }
+  .status-busy { color: #facc15; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Detail pane */
+  .detail-col { display: flex; flex-direction: column; }
+  .tabs { display: flex; padding: 0 14px; border-bottom: 1px solid #2d3148; flex-shrink: 0; }
+  .tab { padding: 8px 12px; font-size: 12px; cursor: pointer; color: #64748b; border-bottom: 2px solid transparent; transition: color 0.1s; }
+  .tab:hover { color: #94a3b8; }
+  .tab.active { color: #a78bfa; border-bottom-color: #a78bfa; }
+  .tab-content { padding: 14px; overflow-y: auto; flex: 1; }
+
+  /* Status tab */
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .stat-card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 6px; padding: 10px 12px; }
+  .stat-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-value { font-size: 18px; font-weight: 600; color: #e2e8f0; margin-top: 2px; }
+
+  /* Memory tab */
+  .memory-pre { font-family: 'SF Mono', 'Monaco', monospace; font-size: 11px; color: #94a3b8; white-space: pre-wrap; word-break: break-word; line-height: 1.6; background: #1a1d27; border: 1px solid #2d3148; border-radius: 6px; padding: 12px; }
+
+  /* Skills tab */
+  .skill-item { padding: 8px 0; border-bottom: 1px solid #1e2133; }
+  .skill-item:last-child { border-bottom: none; }
+  .skill-name { font-size: 13px; font-weight: 500; color: #e2e8f0; display: flex; align-items: center; gap: 6px; }
+  .skill-desc { font-size: 11px; color: #64748b; margin-top: 3px; }
+  .badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
+  .badge-always { background: #312e81; color: #a78bfa; }
+  .badge-builtin { background: #1e3a2a; color: #4ade80; }
+  .badge-user { background: #3b2f1e; color: #fb923c; }
+
+  /* Activity tab */
+  .cron-job { background: #1a1d27; border: 1px solid #2d3148; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+  .cron-job-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .cron-job-name { font-size: 13px; font-weight: 500; color: #e2e8f0; }
+  .cron-job-schedule { font-size: 11px; color: #64748b; }
+  .run-list { display: flex; flex-direction: column; gap: 4px; }
+  .run-item { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .run-status-ok { color: #4ade80; }
+  .run-status-err { color: #f87171; }
+  .run-time { color: #64748b; }
+  .run-dur { color: #475569; }
+
+  .empty { color: #475569; font-size: 12px; padding: 20px 0; text-align: center; }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 2px; }
+</style>
+</head>
+<body x-data="dashboard()" x-init="init()">
+
+<header>
+  <h1>🐈 NanoResearch Dashboard</h1>
+  <div class="header-meta">
+    <span x-show="error" class="err" x-text="'Error: ' + error"></span>
+    <span x-show="!error && last_updated" class="ok">●</span>
+    <span x-show="last_updated" x-text="' 更新于 ' + timeAgo(last_updated)"></span>
+    <span x-show="!last_updated && !error" style="color:#64748b">连接中...</span>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- Col 1: Sessions -->
+  <div class="col">
+    <div class="col-header">会话 (<span x-text="state.sessions.length"></span>)</div>
+    <div class="col-body">
+      <template x-if="state.sessions.length === 0">
+        <div class="empty">无会话记录</div>
+      </template>
+      <template x-for="s in state.sessions" :key="s.key">
+        <div class="session-item" :class="{ active: selected_session && selected_session.key === s.key }" @click="selected_session = s; active_tab = 'status'">
+          <div class="session-name" x-text="s.display_name || s.chat_id"></div>
+          <div class="session-meta">
+            <span class="session-channel" x-text="s.channel"></span>
+            <span x-text="s.message_count + ' 条'"></span>
+            <span x-show="s.updated_at"> · <span x-text="timeAgoIso(s.updated_at)"></span></span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Col 2: Agents -->
+  <div class="col">
+    <div class="col-header">Agent</div>
+    <div class="col-body">
+      <template x-if="state.agents.length === 0">
+        <div class="empty">无 Agent</div>
+      </template>
+      <template x-for="a in state.agents" :key="a.session_key">
+        <div class="agent-item" style="cursor:pointer" @click="selected_session = state.sessions.find(s => s.key === a.session_key) || null; if(selected_session) active_tab = 'status'">
+          <div class="agent-name" x-text="a.name"></div>
+          <div class="agent-status" :class="'status-' + a.status">
+            <span class="status-dot"></span>
+            <span x-text="a.status"></span>
+          </div>
+          <div class="session-meta" x-show="a.last_active">
+            <span x-text="timeAgoIso(a.last_active)"></span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Col 3: Detail -->
+  <div class="col detail-col">
+    <template x-if="!selected_session">
+      <div style="padding:40px; text-align:center; color:#475569; font-size:13px;">← 选择一个会话查看详情</div>
+    </template>
+    <template x-if="selected_session">
+      <div style="display:flex; flex-direction:column; height:100%; overflow:hidden;">
+        <div class="tabs">
+          <div class="tab" :class="{ active: active_tab === 'status' }" @click="active_tab = 'status'">状态</div>
+          <div class="tab" :class="{ active: active_tab === 'memory' }" @click="active_tab = 'memory'">记忆</div>
+          <div class="tab" :class="{ active: active_tab === 'skills' }" @click="active_tab = 'skills'">技能</div>
+          <div class="tab" :class="{ active: active_tab === 'activity' }" @click="active_tab = 'activity'">活动</div>
+        </div>
+
+        <!-- Status tab -->
+        <div class="tab-content" x-show="active_tab === 'status'">
+          <div class="stat-grid">
+            <div class="stat-card">
+              <div class="stat-label">消息数</div>
+              <div class="stat-value" x-text="selected_session.message_count"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">已压缩轮次</div>
+              <div class="stat-value" x-text="selected_session.last_consolidated || 0"></div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <div style="font-size:12px;"><span style="color:#64748b">Channel: </span><span x-text="selected_session.channel"></span></div>
+            <div style="font-size:12px;"><span style="color:#64748b">Chat ID: </span><span x-text="selected_session.chat_id"></span></div>
+            <div style="font-size:12px;" x-show="selected_session.created_at"><span style="color:#64748b">创建: </span><span x-text="fmtIso(selected_session.created_at)"></span></div>
+            <div style="font-size:12px;" x-show="selected_session.updated_at"><span style="color:#64748b">更新: </span><span x-text="fmtIso(selected_session.updated_at)"></span></div>
+          </div>
+        </div>
+
+        <!-- Memory tab -->
+        <div class="tab-content" x-show="active_tab === 'memory'">
+          <template x-if="state.memory_preview">
+            <pre class="memory-pre" x-text="state.memory_preview"></pre>
+          </template>
+          <template x-if="!state.memory_preview">
+            <div class="empty">MEMORY.md 为空</div>
+          </template>
+        </div>
+
+        <!-- Skills tab -->
+        <div class="tab-content" x-show="active_tab === 'skills'">
+          <template x-if="state.skills.length === 0">
+            <div class="empty">无技能</div>
+          </template>
+          <template x-for="sk in state.skills" :key="sk.name">
+            <div class="skill-item">
+              <div class="skill-name">
+                <span x-text="sk.name"></span>
+                <span x-show="sk.always" class="badge badge-always">always</span>
+                <span class="badge" :class="sk.source === 'user' ? 'badge-user' : 'badge-builtin'" x-text="sk.source"></span>
+              </div>
+              <div class="skill-desc" x-text="sk.description"></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Activity tab -->
+        <div class="tab-content" x-show="active_tab === 'activity'">
+          <template x-if="sessionCronJobs().length === 0">
+            <div class="empty">无定时任务</div>
+          </template>
+          <template x-for="job in sessionCronJobs()" :key="job.id">
+            <div class="cron-job">
+              <div class="cron-job-header">
+                <div class="cron-job-name" x-text="job.name"></div>
+                <div class="cron-job-schedule" x-text="job.schedule_expr || job.schedule_kind"></div>
+              </div>
+              <div style="font-size:11px; color:#64748b; margin-bottom:6px;">
+                <span x-show="job.next_run_at">下次: <span x-text="fmtIso(job.next_run_at)"></span></span>
+                <span x-show="job.last_status"> · 上次: <span :class="job.last_status === 'ok' ? 'run-status-ok' : 'run-status-err'" x-text="job.last_status"></span></span>
+              </div>
+              <div class="run-list">
+                <template x-for="(r, i) in job.recent_runs" :key="i">
+                  <div class="run-item">
+                    <span :class="r.status === 'ok' ? 'run-status-ok' : 'run-status-err'" x-text="r.status === 'ok' ? '✓' : '✗'"></span>
+                    <span class="run-time" x-text="timeAgoIso(r.run_at)"></span>
+                    <span class="run-dur" x-text="r.duration_ms + 'ms'"></span>
+                    <span x-show="r.error" style="color:#f87171; font-size:10px;" x-text="r.error"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+</div>
+
+<script>
+function dashboard() {
+  return {
+    state: {
+      sessions: [], agents: [], skills: [], cron_jobs: [],
+      recent_activity: [], memory_preview: "", timestamp: null,
+    },
+    selected_session: null,
+    active_tab: 'status',
+    last_updated: null,
+    error: null,
+
+    async init() {
+      await this.refresh();
+      setInterval(() => this.refresh(), 3000);
+    },
+
+    async refresh() {
+      try {
+        const r = await fetch('/api/state');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        this.state = await r.json();
+        this.last_updated = new Date();
+        this.error = null;
+        if (this.selected_session) {
+          this.selected_session = this.state.sessions.find(
+            s => s.key === this.selected_session.key
+          ) || null;
+        }
+      } catch(e) {
+        this.error = e.message;
+      }
+    },
+
+    sessionCronJobs() {
+      if (!this.selected_session) return [];
+      return this.state.cron_jobs.filter(
+        j => j.chat_id === this.selected_session.chat_id
+      );
+    },
+
+    timeAgo(date) {
+      if (!date) return '';
+      const sec = Math.floor((new Date() - date) / 1000);
+      if (sec < 5) return '刚刚';
+      if (sec < 60) return sec + 's 前';
+      if (sec < 3600) return Math.floor(sec / 60) + 'm 前';
+      return Math.floor(sec / 3600) + 'h 前';
+    },
+
+    timeAgoIso(iso) {
+      if (!iso) return '';
+      return this.timeAgo(new Date(iso));
+    },
+
+    fmtIso(iso) {
+      if (!iso) return '';
+      try {
+        return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      } catch { return iso; }
+    },
+  };
+}
+</script>
+</body>
+</html>

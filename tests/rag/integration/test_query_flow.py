@@ -9,9 +9,9 @@ import pytest
 from unittest.mock import MagicMock, patch
 from typing import List, Optional, Dict, Any
 
-from nanobot.rag.core.types import RetrievalResult, ProcessedQuery
-from nanobot.rag.core.query_engine.fusion import RRFFusion
-from nanobot.rag.core.query_engine.query_processor import QueryProcessor
+from nanoresearch.rag.core.types import RetrievalResult, ProcessedQuery
+from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
 
 
 class MockVectorStore:
@@ -57,7 +57,7 @@ class TestQueryFlowBasic:
 
     def test_query_processing_to_hybrid_search(self):
         """Test query processing feeds into hybrid search."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
 
         # Process query
         processor = QueryProcessor()
@@ -68,7 +68,7 @@ class TestQueryFlowBasic:
 
     def test_full_hybrid_search_flow(self):
         """Test complete hybrid search flow."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         # Mock dense retriever
         mock_dense = MagicMock()
@@ -99,7 +99,7 @@ class TestQueryFlowBasic:
 
     def test_hybrid_search_returns_details(self):
         """Test hybrid search returns detailed results."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchResult
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchResult
 
         mock_dense = MagicMock()
         mock_dense.retrieve.return_value = [
@@ -132,8 +132,8 @@ class TestQueryFlowWithReranking:
 
     def test_search_with_reranking(self):
         """Test hybrid search followed by reranking."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
-        from nanobot.rag.core.query_engine.reranker import CoreReranker, RerankConfig
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.reranker import CoreReranker, RerankConfig
 
         # Mock dense retriever
         mock_dense = MagicMock()
@@ -187,7 +187,7 @@ class TestQueryFlowFilters:
 
     def test_filter_propagation_to_dense(self):
         """Test that filters propagate to dense retriever."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         mock_dense = MagicMock()
         mock_dense.retrieve.return_value = []
@@ -210,7 +210,7 @@ class TestQueryFlowFilters:
 
     def test_explicit_filter_override(self):
         """Test explicit filters override query filters."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         mock_dense = MagicMock()
         mock_dense.retrieve.return_value = []
@@ -236,7 +236,7 @@ class TestQueryFlowErrorHandling:
 
     def test_dense_failure_fallback(self):
         """Test fallback when dense retrieval fails."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         mock_dense = MagicMock()
         mock_dense.retrieve.side_effect = Exception("Dense retrieval failed")
@@ -261,7 +261,7 @@ class TestQueryFlowErrorHandling:
 
     def test_both_failures_raise_error(self):
         """Test error raised when both retrievers fail."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         mock_dense = MagicMock()
         mock_dense.retrieve.side_effect = Exception("Dense failed")
@@ -281,7 +281,7 @@ class TestQueryFlowErrorHandling:
 
     def test_empty_query_raises_error(self):
         """Test that empty query raises ValueError."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         hybrid = HybridSearch(
             query_processor=QueryProcessor(),
@@ -299,7 +299,7 @@ class TestQueryFlowRRF:
 
     def test_rrf_fusion_with_two_lists(self):
         """Test RRF fusion combines results from two lists."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         dense_results = [
             RetrievalResult(chunk_id="a", score=0.9, text="A", metadata={}),
@@ -333,7 +333,7 @@ class TestQueryFlowRRF:
 
     def test_single_retriever_mode(self):
         """Test hybrid search with only one retriever."""
-        from nanobot.rag.core.query_engine.hybrid_search import HybridSearch
+        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch
 
         mock_dense = MagicMock()
         mock_dense.retrieve.return_value = [

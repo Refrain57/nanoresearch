@@ -186,7 +186,7 @@ def run_memory_benchmark() -> dict:
 def main() -> None:
     """Run all benchmarks."""
     print("\n" + "=" * 60)
-    print(" NANOBOT AGENT EVALUATION BENCHMARK")
+    print(" NANORESEARCH AGENT EVALUATION BENCHMARK")
     print(f" Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 

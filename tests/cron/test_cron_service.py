@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from nanobot.cron.service import CronService
-from nanobot.cron.types import CronSchedule
+from nanoresearch.cron.service import CronService
+from nanoresearch.cron.types import CronSchedule
 
 
 def test_add_job_rejects_unknown_timezone(tmp_path) -> None:

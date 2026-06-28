@@ -9,7 +9,7 @@ if not pdf_path:
 
 print(f"Testing mineru with: {pdf_path}\n")
 try:
-    from nanobot.rag.libs.loader.mineru_loader import MinerULoader
+    from nanoresearch.rag.libs.loader.mineru_loader import MinerULoader
     loader = MinerULoader(mode="local")
     doc = loader.load(pdf_path)
     print(f"[mineru] OK — {len(doc.text)} chars")
