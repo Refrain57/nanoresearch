@@ -207,6 +207,12 @@ class MCPToolWrapper(Tool):
                 kwargs["kb_id"] = next(iter(self._kb_map.keys()))
                 logger.debug("MCP delete_document: single KB auto-inject → kb_id={!r}", kwargs["kb_id"])
 
+        # Auto-inject session_key for RAG retrieval tools to enable subprocess
+        # history-based query rewrite. Only kb_search / kb_retrieve accept
+        # session_key — other tools (memory_search, web_search, ...) would reject it.
+        if self._original_name in ("kb_search", "kb_retrieve") and self._session_key:
+            kwargs.setdefault("session_key", self._session_key)
+
         effective_timeout = self._tool_timeout
 
         try:

@@ -1,5 +1,6 @@
 """A 类透传链 unit tests."""
 
+from unittest.mock import AsyncMock, MagicMock
 from nanoresearch.rag.internal_loop.state import SessionState, SessionStateManager
 
 
@@ -96,7 +97,6 @@ def test_plan_query_signature_has_session_key():
 
 async def test_run_plan_phase_forwards_session_key():
     """_run_plan_phase 必须从 session.caller_session_key 读出并传给 plan_query。"""
-    from unittest.mock import AsyncMock
     from nanoresearch.rag.internal_loop.runner import RAGLoopRunner
 
     runner = RAGLoopRunner()
@@ -116,3 +116,63 @@ async def test_run_plan_phase_forwards_session_key():
     call_kwargs = runner.tools.plan_query.call_args.kwargs
     assert call_kwargs.get("session_key") == "telegram:42"
     assert call_kwargs.get("query") == "它是什么"
+
+
+# MCPToolWrapper.execute() session_key injection tests (Task 6)
+
+
+def _make_wrapper(original_name: str, session_key: str | None = None):
+    """Helper: build a MCPToolWrapper bypassing __init__ heavy paths."""
+    from nanoresearch.agent.tools.mcp import MCPToolWrapper
+
+    w = MCPToolWrapper.__new__(MCPToolWrapper)
+    w._session = AsyncMock()
+    fake_result = MagicMock()
+    fake_result.content = []
+    w._session.call_tool = AsyncMock(return_value=fake_result)
+    w._original_name = original_name
+    w._name = f"mcp_test_{original_name}"
+    w._description = ""
+    w._parameters = {}
+    w._tool_timeout = 5
+    w._session_key = session_key
+    w._kb_map = {"kb1": "col_user_kb1"}
+    return w
+
+
+async def test_mcp_wrapper_injects_session_key_for_kb_search():
+    w = _make_wrapper("kb_search", session_key="telegram:99")
+    await w.execute(query="x", kb_id="kb1")
+    args, kwargs = w._session.call_tool.call_args
+    forwarded = kwargs["arguments"]
+    assert forwarded.get("session_key") == "telegram:99"
+
+
+async def test_mcp_wrapper_injects_session_key_for_kb_retrieve():
+    w = _make_wrapper("kb_retrieve", session_key="telegram:99")
+    await w.execute(query="x", kb_id="kb1")
+    forwarded = w._session.call_tool.call_args.kwargs["arguments"]
+    assert forwarded.get("session_key") == "telegram:99"
+
+
+async def test_mcp_wrapper_no_inject_when_session_key_none():
+    w = _make_wrapper("kb_search", session_key=None)
+    await w.execute(query="x", kb_id="kb1")
+    forwarded = w._session.call_tool.call_args.kwargs["arguments"]
+    assert "session_key" not in forwarded
+
+
+async def test_mcp_wrapper_no_inject_for_other_tools():
+    """session_key 不能注入到 memory_search / web_search 等——子进程会拒绝。"""
+    w = _make_wrapper("memory_search", session_key="telegram:99")
+    await w.execute(query="x")
+    forwarded = w._session.call_tool.call_args.kwargs["arguments"]
+    assert "session_key" not in forwarded
+
+
+async def test_mcp_wrapper_user_provided_session_key_wins():
+    """若 kwargs 已含 session_key（理论上不会发生），使用 setdefault 不覆盖。"""
+    w = _make_wrapper("kb_search", session_key="auto")
+    await w.execute(query="x", kb_id="kb1", session_key="explicit")
+    forwarded = w._session.call_tool.call_args.kwargs["arguments"]
+    assert forwarded["session_key"] == "explicit"
