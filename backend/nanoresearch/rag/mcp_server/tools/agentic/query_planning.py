@@ -61,16 +61,15 @@ def _get_subprocess_session_manager():
 
 
 # Rewrite prompt for resolving pronouns and references
-REWRITE_PROMPT = """对话历史：
-{history}
-
-当前问题：{query}
+REWRITE_PROMPT = """{history_section}{retrieval_section}当前问题：{query}
 
 将当前问题改写为独立完整的检索查询，解析所有指代和省略。
 
-注意：如果最近的对话已经切换了话题，优先使用最近的上下文解析指代词，
-忽略更早的话题锚点。
-如果问题已经完整清晰，原样返回。
+注意：
+- 指代词（"它"、"那篇"、"上面那个"）优先用最近的上下文解析。
+- 如果"上一轮检索到"列出了具体论文/文档，且当前问题用"那篇""上面"等指代，优先指向其中一篇。
+- 如果话题已切换，忽略更早的话题锚点。
+- 如果问题已经完整清晰，原样返回。
 
 只输出改写后的查询，不要其他内容。"""
 
@@ -255,11 +254,14 @@ Returns:
                 is_empty=True,
             )
 
-        # 1. Get conversation history for query rewriting
+        # 1. Get conversation history for query rewriting (async)
         history = await self._get_conversation_history(session_key) if session_key else []
 
-        # 2. Rewrite query to resolve pronouns
-        rewritten_query = await self._rewrite_query(query, history)
+        # 2. Extract retrieval titles from last RAG tool message (B class data)
+        retrieval_titles = self._get_retrieval_titles(history)
+
+        # 3. Rewrite query to resolve pronouns
+        rewritten_query = await self._rewrite_query(query, history, retrieval_titles)
 
         # Use rewritten query for subsequent analysis
         analysis_query = rewritten_query
@@ -361,43 +363,103 @@ Returns:
             logger.warning(f"Failed to fetch history for {session_key!r}: {e}")
             return []
 
-    async def _rewrite_query(self, query: str, history: List[str]) -> str:
-        """Rewrite query to resolve pronouns using conversation history."""
-        if not history:
+    _RAG_TOOL_NAMES = ("kb_search", "rag_search", "kb_retrieve")
+
+    @staticmethod
+    def _extract_text_from_content(content) -> str:
+        """Flatten str / multimodal list to text."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            return " ".join(parts)
+        return ""
+
+    def _render_history_for_prompt(self, history: list[dict]) -> list[str]:
+        """Render user + assistant turns as `[用户]/[助手] text` lines.
+
+        - Skip tool messages (B class reads them via _get_retrieval_titles).
+        - Truncate assistant content to 200 chars to bound prompt size.
+        - Multimodal assistant content (list of blocks) is flattened to text.
+        - Window: last 6 user+assistant messages (tool not counted).
+        """
+        rendered: list[str] = []
+        for msg in history:
+            role = msg.get("role")
+            if role == "user":
+                text = self._extract_text_from_content(msg.get("content", ""))
+                rendered.append(f"[用户] {text}")
+            elif role == "assistant":
+                text = self._extract_text_from_content(msg.get("content", ""))
+                if len(text) > 200:
+                    text = text[:200] + "..."
+                rendered.append(f"[助手] {text}")
+            # tool 跳过：A4 数据保留 vs 渲染过滤分层
+        return rendered[-6:]
+
+    def _get_retrieval_titles(self, history: list[dict]) -> list[str]:
+        """Read `_chunk_titles` sidecar from the most recent RAG tool message.
+
+        Written by B class (§4.2 _save_turn sidecar). In A class period this
+        field is never present — returns []. Caller renders retrieval_section
+        as empty string in that case.
+        """
+        for msg in reversed(history):
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("name") not in self._RAG_TOOL_NAMES:
+                continue
+            titles = msg.get("_chunk_titles")
+            if isinstance(titles, list) and titles:
+                return [str(t) for t in titles]
+            return []
+        return []
+
+    async def _rewrite_query(
+        self,
+        query: str,
+        history: list[dict],
+        retrieval_titles: list[str],
+    ) -> str:
+        """Rewrite query to resolve pronouns using history + last RAG titles."""
+        rendered_history = self._render_history_for_prompt(history)
+
+        if not rendered_history and not retrieval_titles:
             return query
 
-        import asyncio
+        history_section = ""
+        if rendered_history:
+            history_section = "对话历史：\n" + "\n".join(
+                f"{i+1}. {line}" for i, line in enumerate(rendered_history)
+            ) + "\n\n"
 
-        # Format history
-        history_text = "\n".join(
-            f"{i+1}. {q}" for i, q in enumerate(history)
-        )
+        retrieval_section = ""
+        if retrieval_titles:
+            retrieval_section = "上一轮检索到：\n" + "\n".join(
+                f"- {t}" for t in retrieval_titles
+            ) + "\n\n"
 
         prompt = REWRITE_PROMPT.format(
-            history=history_text,
-            query=query
+            history_section=history_section,
+            retrieval_section=retrieval_section,
+            query=query,
         )
 
-        # Call LLM asynchronously
+        import asyncio
         try:
-            # Ensure LLM is initialized
             await asyncio.to_thread(self._ensure_initialized)
-
             if not self._llm_client:
                 return query
-
             response = await asyncio.to_thread(self._call_llm, prompt)
-
-            # Parse returned text
             rewritten = response.strip()
-
-            # Fallback to original query if empty or only punctuation
             if not rewritten or rewritten in [".", "。"]:
                 return query
-
             return rewritten
         except Exception as e:
-            logger.warning(f"Query rewrite failed: {e}")
+            logger.warning(f"Query rewrite failed, falling back to original: {e}")
             return query
 
     def _parse_llm_response(self, response: str, query: str) -> Dict[str, Any]:

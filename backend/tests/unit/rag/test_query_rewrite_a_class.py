@@ -226,3 +226,116 @@ async def test_get_conversation_history_returns_empty_when_no_manager(monkeypatc
     tool = qp.PlanQueryTool()
     history = await tool._get_conversation_history("telegram:nope")
     assert history == []
+
+
+async def test_render_history_skips_tool():
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "user", "content": "介绍 NeRF 先驱"},
+        {"role": "assistant", "content": "Ben Mildenhall（NeRF 一作）, Jonathan Barron（Mip-NeRF）"},
+        {"role": "tool", "name": "kb_search", "content": '{"chunks":[]}'},
+        {"role": "user", "content": "你提到那两个做渲染的"},
+    ]
+    rendered = tool._render_history_for_prompt(history)
+    joined = "\n".join(rendered)
+    assert "tool" not in joined.lower(), "tool 消息不能出现在 prompt 里"
+    assert "[用户]" in joined and "[助手]" in joined
+    assert "kb_search" not in joined
+
+
+async def test_render_history_truncates_assistant_to_200():
+    tool = qp.PlanQueryTool()
+    long_text = "A" * 500
+    history = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": long_text},
+    ]
+    rendered = tool._render_history_for_prompt(history)
+    assistant_line = [l for l in rendered if l.startswith("[助手]")][0]
+    assert len(assistant_line) <= 220  # 200 字 + role 标签前缀余量
+
+
+async def test_render_history_window_keeps_recent_6():
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "user", "content": f"u{i}"} for i in range(10)
+    ]
+    rendered = tool._render_history_for_prompt(history)
+    assert len(rendered) == 6
+    assert rendered[-1].endswith("u9")
+    assert rendered[0].endswith("u4")
+
+
+async def test_render_history_assistant_multimodal_list():
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "first text"},
+            {"type": "text", "text": "second text"},
+        ]},
+    ]
+    rendered = tool._render_history_for_prompt(history)
+    joined = "\n".join(rendered)
+    assert "first text" in joined and "second text" in joined
+
+
+async def test_get_retrieval_titles_empty_for_a_class():
+    """A 类期间 sidecar 未写入，应返回 []。"""
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "user", "content": "q1"},
+        {"role": "tool", "name": "kb_search", "content": '{"chunks":[]}'},
+    ]
+    assert tool._get_retrieval_titles(history) == []
+
+
+async def test_get_retrieval_titles_reads_sidecar_when_present():
+    """B 类 ship 后，sidecar 写入则可读出。"""
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "user", "content": "q1"},
+        {
+            "role": "tool",
+            "name": "kb_search",
+            "content": '{"chunks":[]}',
+            "_chunk_titles": ["PGSR", "SuGaR"],
+        },
+        {"role": "assistant", "content": "..."},
+        {"role": "user", "content": "上面那个"},
+    ]
+    titles = tool._get_retrieval_titles(history)
+    assert titles == ["PGSR", "SuGaR"]
+
+
+async def test_get_retrieval_titles_takes_most_recent_rag_tool():
+    """多条 RAG tool 消息时，取最后一条。"""
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "tool", "name": "kb_search", "content": "{}", "_chunk_titles": ["OLD"]},
+        {"role": "tool", "name": "kb_search", "content": "{}", "_chunk_titles": ["NEW"]},
+    ]
+    assert tool._get_retrieval_titles(history) == ["NEW"]
+
+
+async def test_get_retrieval_titles_ignores_non_rag_tool():
+    """web_search 等非 RAG tool 即使有 _chunk_titles 也忽略。"""
+    tool = qp.PlanQueryTool()
+    history = [
+        {"role": "tool", "name": "web_search", "content": "{}", "_chunk_titles": ["bogus"]},
+    ]
+    assert tool._get_retrieval_titles(history) == []
+
+
+async def test_rewrite_query_short_circuits_when_no_context():
+    """history 和 titles 都为空时不调 LLM，原样返回。"""
+    tool = qp.PlanQueryTool()
+    tool._llm_client = object()  # truthy 但永远不应被调用——若调用会 AttributeError
+    rewritten = await tool._rewrite_query("它是什么", history=[], retrieval_titles=[])
+    assert rewritten == "它是什么"
+
+
+async def test_rewrite_query_new_signature():
+    sig = _inspect.signature(qp.PlanQueryTool._rewrite_query)
+    params = list(sig.parameters.keys())
+    assert "history" in params and "retrieval_titles" in params
