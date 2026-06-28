@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 import pydantic
 from loguru import logger
@@ -26,6 +27,28 @@ def get_nanoresearch_home() -> Path:
     if raw:
         return Path(raw).expanduser()
     return Path.home() / ".nanoresearch"
+
+
+_VALID_MODES = ("server", "local")
+
+
+def get_mode() -> Literal["server", "local"]:
+    """Return the deployment mode (NANORESEARCH_MODE env var, default 'local').
+
+    server: 凭证唯一来源 = user_settings.extra.providers；config.json / env 兜底全关
+    local:  沿用 user_providers > config.json > settings.yaml > env 链路（本地 dev）
+    """
+    raw = os.environ.get("NANORESEARCH_MODE", "local").lower()
+    if raw not in _VALID_MODES:
+        raise ValueError(
+            f"NANORESEARCH_MODE must be one of {_VALID_MODES}, got {raw!r}"
+        )
+    return raw  # type: ignore[return-value]
+
+
+def env_key_fallback_allowed() -> bool:
+    """True iff env-var API key fallback is permitted (i.e. local mode)."""
+    return get_mode() == "local"
 
 
 def set_config_path(path: Path) -> None:
