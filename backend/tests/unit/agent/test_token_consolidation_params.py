@@ -19,6 +19,13 @@ def test_pick_boundary_default_tail_protect_is_shared_constant():
     assert end_idx <= len(rows) - CONSOLIDATION_TAIL_PROTECT
 
 
+def test_pick_boundary_default_arg_is_the_shared_constant():
+    """The default tail_protect MUST be the shared constant, not a hardcoded 5."""
+    import inspect
+    sig = inspect.signature(MemoryConsolidator.pick_consolidation_boundary)
+    assert sig.parameters["tail_protect"].default == CONSOLIDATION_TAIL_PROTECT
+
+
 def test_target_ratio_constant_is_used(monkeypatch):
     """maybe_consolidate_by_tokens must derive `target` from the ratio constant."""
     import inspect
