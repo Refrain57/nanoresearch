@@ -81,7 +81,12 @@
           <div class="provider-list">
             <div v-for="p in settingsStore.providers" :key="p.id" class="provider-card">
               <div class="provider-card-body">
-                <div class="provider-name">{{ p.name }}</div>
+                <div class="provider-name">
+                  {{ p.name }}
+                  <a-tag v-if="p.provider" size="small" style="margin-left: 6px">
+                    {{ p.provider }}
+                  </a-tag>
+                </div>
                 <div class="provider-meta">
                   <a-tag v-if="p.api_key_set" color="green" size="small">Key 已配置</a-tag>
                   <span v-if="p.api_base" class="provider-base">{{ p.api_base }}</span>
@@ -170,8 +175,15 @@
     :destroy-on-close="true"
   >
     <a-form layout="vertical" style="margin-top: 16px">
-      <a-form-item label="供应商名称" required>
-        <a-input v-model:value="providerForm.name" placeholder="如 通义千问、OpenAI、DeepSeek" />
+      <a-form-item label="供应商类型" required>
+        <a-select
+          v-model:value="providerForm.provider"
+          placeholder="选择供应商"
+          :options="PROVIDER_PRESETS"
+        />
+      </a-form-item>
+      <a-form-item label="自定义名称（备注）">
+        <a-input v-model:value="providerForm.name" placeholder="如 我的 DeepSeek、团队 OpenAI" />
       </a-form-item>
       <a-form-item label="API Key">
         <a-input-password
@@ -182,7 +194,7 @@
           autocomplete="new-password"
         />
       </a-form-item>
-      <a-form-item label="API Base URL">
+      <a-form-item :label="providerForm.provider === 'openai_compatible' ? 'API Base URL（必填）' : 'API Base URL'">
         <a-input
           v-model:value="providerForm.api_base"
           placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -309,7 +321,17 @@ async function openSettings() {
 const providerModalOpen = ref(false)
 const providerSaving    = ref(false)
 const editingProvider   = ref(null)
-const providerForm      = ref({ name: '', api_key: '', api_base: '', models: [] })
+const providerForm      = ref({ provider: '', name: '', api_key: '', api_base: '', models: [] })
+
+const PROVIDER_PRESETS = [
+  { value: 'deepseek',          label: 'DeepSeek' },
+  { value: 'openai',            label: 'OpenAI' },
+  { value: 'anthropic',         label: 'Anthropic' },
+  { value: 'dashscope',         label: '通义千问 (DashScope)' },
+  { value: 'azure_openai',      label: 'Azure OpenAI' },
+  { value: 'siliconflow',       label: 'SiliconFlow' },
+  { value: 'openai_compatible', label: 'OpenAI 兼容 (自定义)' },
+]
 
 const PROVIDER_MODEL_PRESETS = {
   deepseek:  ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-r1'],
@@ -320,19 +342,22 @@ const PROVIDER_MODEL_PRESETS = {
   阿里云:    ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long', 'qwen-max-latest', 'deepseek-v3', 'deepseek-r1'],
   dashscope: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'deepseek-v3', 'deepseek-r1'],
   ollama:    ['llama3', 'llama3.1', 'mistral', 'mixtral', 'qwen2.5', 'deepseek-r1'],
+  azure_openai:      [],
+  siliconflow:       ['deepseek-v3', 'qwen-plus', 'BAAI/bge-large-zh-v1.5'],
+  openai_compatible: [],
 }
 
 const providerModelOptions = computed(() => {
-  const name = (providerForm.value.name || '').toLowerCase()
-  const key = Object.keys(PROVIDER_MODEL_PRESETS).find(k => name.includes(k))
-  return (key ? PROVIDER_MODEL_PRESETS[key] : []).map(m => ({ label: m, value: m }))
+  const preset = providerForm.value.provider
+  const presets = PROVIDER_MODEL_PRESETS[preset] || []
+  return presets.map(m => ({ label: m, value: m }))
 })
 
 function openProviderModal(p) {
   editingProvider.value = p
   providerForm.value = p
-    ? { name: p.name, api_key: '', api_base: p.api_base || '', models: [...(p.models || [])] }
-    : { name: '', api_key: '', api_base: '', models: [] }
+    ? { provider: p.provider || '', name: p.name, api_key: '', api_base: p.api_base || '', models: [...(p.models || [])] }
+    : { provider: '', name: '', api_key: '', api_base: '', models: [] }
   providerModalOpen.value = true
 }
 
@@ -341,24 +366,37 @@ async function saveProvider() {
     message.warning('请填写供应商名称')
     return
   }
+  if (!providerForm.value.provider) {
+    message.warning('请选择供应商类型')
+    return
+  }
   providerSaving.value = true
   try {
     const existing = settingsStore.providers.map(p => ({
-      id: p.id, name: p.name, api_key: null, api_base: p.api_base, models: p.models,
+      id: p.id, name: p.name, provider: p.provider, api_key: null, api_base: p.api_base, models: p.models,
     }))
 
     let next
     if (editingProvider.value) {
       next = existing.map(p =>
         p.id === editingProvider.value.id
-          ? { id: p.id, name: providerForm.value.name, api_key: providerForm.value.api_key || null,
-              api_base: providerForm.value.api_base || null, models: providerForm.value.models }
+          ? {
+              id: p.id,
+              name: providerForm.value.name,
+              provider: providerForm.value.provider || null,
+              api_key: providerForm.value.api_key || null,
+              api_base: providerForm.value.api_base || null,
+              models: providerForm.value.models,
+            }
           : p
       )
     } else {
       next = [...existing, {
-        name: providerForm.value.name, api_key: providerForm.value.api_key || null,
-        api_base: providerForm.value.api_base || null, models: providerForm.value.models,
+        name: providerForm.value.name,
+        provider: providerForm.value.provider || null,
+        api_key: providerForm.value.api_key || null,
+        api_base: providerForm.value.api_base || null,
+        models: providerForm.value.models,
       }]
     }
 
