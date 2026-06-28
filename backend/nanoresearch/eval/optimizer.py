@@ -30,6 +30,7 @@ Phase constraints:
 
 from __future__ import annotations
 
+import math
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -48,12 +49,50 @@ from nanoresearch.eval.tunable import OptimizationCandidate  # noqa: F401  (re-e
 from nanoresearch.eval.score_sample import ScoreSample
 
 # ---------------------------------------------------------------------------
-# Phase 5: deployment gate thresholds (hardcoded — no dynamic threshold yet;
-# insufficient calibration data to tune.  Revisit after 2-3 months of real
-# proposal data per SDD §4.4 Rationale.)
+# Phase 5 / B2: σ-weighted gate (replaces hard-threshold _GATE_IMPROVE).
+#
+# Gate requires delta_mean ≥ k·σ_combined on fix set (95% one-sided confidence)
+# AND health_set delta ≥ -k·σ_combined (no significant regression allowed).
+# k=1.96 corresponds to 95% one-sided z-score.
 # ---------------------------------------------------------------------------
-_GATE_IMPROVE = 0.05   # fix_set delta must be ≥ this (candidate beats baseline on fix set)
-_GATE_TOLERATE = 0.02  # health_set delta must be ≥ -this (candidate doesn't wreck health set)
+_GATE_SIGMA_K = 1.96  # 95% one-sided confidence: require delta_mean ≥ k·σ_combined to accept
+
+
+def _combined_sigma(baseline: "ScoreSample", candidate: "ScoreSample") -> float:
+    """σ of the difference of two independent means."""
+    return math.sqrt(
+        (baseline.std ** 2 / baseline.n) + (candidate.std ** 2 / candidate.n)
+    )
+
+
+def _aggregate_set_delta(
+    baseline_scores: "dict[str, ScoreSample]",
+    candidate_scores: "dict[str, ScoreSample]",
+) -> "tuple[float, float]":
+    """Return (delta_mean, sigma_combined) aggregated across all cases in the set."""
+    case_ids = set(baseline_scores) & set(candidate_scores)
+    if not case_ids:
+        return 0.0, 0.0
+    deltas = [candidate_scores[c].mean - baseline_scores[c].mean for c in case_ids]
+    sigmas = [_combined_sigma(baseline_scores[c], candidate_scores[c]) for c in case_ids]
+    delta_mean = sum(deltas) / len(deltas)
+    # Aggregate σ across cases assuming independence (conservative):
+    sigma_combined = math.sqrt(sum(s ** 2 for s in sigmas)) / len(sigmas)
+    return delta_mean, sigma_combined
+
+
+def _gate_decision(
+    fix_delta: float, fix_sigma: float,
+    health_delta: float, health_sigma: float,
+) -> "tuple[str, str]":
+    """Return (gate_decision, gate_reason) for the σ-weighted gate."""
+    fix_threshold = _GATE_SIGMA_K * fix_sigma
+    health_threshold = _GATE_SIGMA_K * health_sigma
+    if fix_delta < fix_threshold:
+        return "rejected", "within_noise_envelope"
+    if health_delta < -health_threshold:
+        return "rejected", "health_regression"
+    return "approved", "passes_sigma_gate"
 
 # B2: each (candidate, case) scored this many times to estimate σ for σ-weighted gate.
 _SCORE_REPEAT_N = 3
@@ -192,17 +231,20 @@ class OptimizationAgent:
                 if fix_scores else 0.0
             )
 
-            # ---- Phase 5: compute deltas & gate decision ----
+            # ---- B2: σ-weighted gate decision ----
             health_mean = _dict_mean(health_scores)
 
             fix_set_delta = round(fix_mean - baseline_fix_mean, 4)
             health_set_delta = round(health_mean - baseline_health_mean, 4)
 
-            gate_passed = (
-                fix_set_delta >= _GATE_IMPROVE
-                and health_set_delta >= -_GATE_TOLERATE
-            )
-            gate_status = "pending_approval" if gate_passed else "rejected_by_gate"
+            # Compute per-set (delta_mean, sigma_combined) from ScoreSamples.
+            fix_delta, fix_sigma = _aggregate_set_delta(baseline_fix, fix_scores)
+            health_delta, health_sigma = _aggregate_set_delta(baseline_health, health_scores)
+
+            decision, reason = _gate_decision(fix_delta, fix_sigma, health_delta, health_sigma)
+
+            # Backward-compat: keep gate_status mapping for existing consumers.
+            gate_status = "pending_approval" if decision == "approved" else "rejected_by_gate"
 
             scored.append({
                 "prompt": candidate.prompt,
@@ -212,6 +254,15 @@ class OptimizationAgent:
                 "fix_set_delta": fix_set_delta,
                 "health_set_delta": health_set_delta,
                 "gate_status": gate_status,
+                # B2: σ-weighted gate fields (forward-only A/B analysis)
+                "gate_decision": decision,
+                "gate_reason": reason,
+                "sigma_combined": {"fix": round(fix_sigma, 6), "health": round(health_sigma, 6)},
+                "delta_mean": {"fix": round(fix_delta, 4), "health": round(health_delta, 4)},
+                "threshold": {
+                    "fix": round(_GATE_SIGMA_K * fix_sigma, 6),
+                    "health": round(_GATE_SIGMA_K * health_sigma, 6),
+                },
             })
 
         scored.sort(key=lambda x: x["fix_mean_score"], reverse=True)

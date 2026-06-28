@@ -417,7 +417,7 @@ class OptimizationProposal(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     category: Mapped[str] = mapped_column(String, nullable=False)
     proposals: Mapped[list] = mapped_column(JSONB, default=list)
-    status: Mapped[str] = mapped_column(String, default="pending", index=True)  # pending/approved/rejected
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)  # pending/approved/rejected/gate_all_rejected/signal_unreliable
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, ForeignKey("users.uid"), nullable=True)
