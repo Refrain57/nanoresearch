@@ -59,3 +59,18 @@ async def test_rag_search_handler_accepts_session_key(monkeypatch):
         session_key="telegram:789",
     )
     assert captured["session_key"] == "telegram:789"
+
+
+import inspect
+from nanoresearch.rag.internal_loop.runner import RAGLoopRunner, run_rag_loop
+
+
+def test_runner_run_signature_has_session_key():
+    sig = inspect.signature(RAGLoopRunner.run)
+    assert "session_key" in sig.parameters
+    assert sig.parameters["session_key"].default is None
+
+
+def test_run_rag_loop_signature_has_session_key():
+    sig = inspect.signature(run_rag_loop)
+    assert "session_key" in sig.parameters
