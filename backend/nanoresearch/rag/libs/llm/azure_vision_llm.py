@@ -113,12 +113,17 @@ class AzureVisionLLM(BaseVisionLLM):
         # 3. Env var (AZURE_OPENAI_API_KEY)
         # 4. LLM settings fallback? (Usually not for API keys in settings object, but let's check)
         
-        self.api_key = api_key 
+        from nanoresearch.config.loader import get_mode
+        self.api_key = api_key
         if not self.api_key and vision_settings and vision_settings.api_key:
              self.api_key = vision_settings.api_key
         if not self.api_key:
-             self.api_key = os.environ.get("AZURE_OPENAI_API_KEY")
-             
+            if get_mode() == "server":
+                raise RuntimeError(
+                    "Azure Vision LLM api_key must come from user_settings in server mode"
+                )
+            self.api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+
         if not self.api_key:
             raise ValueError(
                 "Azure OpenAI API key not provided. Set AZURE_OPENAI_API_KEY "

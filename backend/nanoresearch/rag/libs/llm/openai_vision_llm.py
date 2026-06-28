@@ -92,18 +92,20 @@ class OpenAIVisionLLM(BaseVisionLLM):
         vision_max_size = getattr(vision_settings, 'max_image_size', None) if vision_settings else None
         self.max_image_size = max_image_size or vision_max_size or self.DEFAULT_MAX_IMAGE_SIZE
         
-        # API key: explicit > vision_settings > llm settings > env var
+        # API key: explicit > vision_settings > llm settings > env var (gated by mode)
+        from nanoresearch.config.loader import env_key_or_raise, get_mode
         self.api_key = api_key
         if not self.api_key and vision_settings:
             self.api_key = getattr(vision_settings, 'api_key', None)
         if not self.api_key:
             self.api_key = getattr(settings.llm, 'api_key', None)
         if not self.api_key:
-            self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "OpenAI API key not provided. Set in settings.yaml (vision_llm.api_key), "
-                "OPENAI_API_KEY / DASHSCOPE_API_KEY environment variable, or pass api_key parameter."
+            if get_mode() == "server":
+                raise RuntimeError(
+                    "Vision LLM api_key must come from user_settings in server mode"
+                )
+            self.api_key = os.environ.get("OPENAI_API_KEY") or env_key_or_raise(
+                "DASHSCOPE_API_KEY", role="vision"
             )
         
         # Azure-compatible mode detection

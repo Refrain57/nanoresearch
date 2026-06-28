@@ -72,16 +72,16 @@ class AzureLLM(BaseLLM):
         self.default_temperature = settings.llm.temperature
         self.default_max_tokens = settings.llm.max_tokens
         
-        # API key: explicit > settings > env var
-        self.api_key = (
-            api_key 
-            or getattr(settings.llm, 'api_key', None) 
-            or os.environ.get("AZURE_OPENAI_API_KEY")
-        )
+        # API key: explicit > settings > env var (gated by mode)
+        from nanoresearch.config.loader import env_key_or_raise, get_mode
+        self.api_key = api_key or getattr(settings.llm, 'api_key', None)
         if not self.api_key:
-            raise ValueError(
-                "Azure OpenAI API key not provided. Set in settings.yaml (llm.api_key), "
-                "AZURE_OPENAI_API_KEY environment variable, or pass api_key parameter."
+            if get_mode() == "server":
+                raise RuntimeError(
+                    "Azure LLM api_key must come from user_settings in server mode"
+                )
+            self.api_key = os.environ.get("AZURE_OPENAI_API_KEY") or env_key_or_raise(
+                "OPENAI_API_KEY", role="ingestion_llm"
             )
         
         # Endpoint: explicit > settings > env var

@@ -158,8 +158,8 @@ async def generate_dataset(
     ds_name = body.name or f"自动生成 {datetime.now(timezone.utc).strftime('%m-%d %H:%M')}"
     ds = await repo.create_dataset(uuid.UUID(kb_id), ds_name)
 
-    import os
-    gen_api_key = gen_spec.api_key or os.environ.get("OPENAI_API_KEY", "sk-placeholder")
+    from nanoresearch.config.loader import env_key_or_raise
+    gen_api_key = gen_spec.api_key or env_key_or_raise("OPENAI_API_KEY", role="eval_generator")
     gen_base_url = gen_spec.base_url or "https://api.openai.com/v1"
     emb_api_key = emb_spec.api_key or gen_api_key
     emb_base_url = emb_spec.base_url or gen_base_url
@@ -218,8 +218,8 @@ async def create_agent_run(
         or "text-embedding-v3"
     )
 
-    import os
-    _default_key = os.environ.get("OPENAI_API_KEY", "sk-placeholder")
+    from nanoresearch.config.loader import env_key_or_raise
+    _default_key = env_key_or_raise("OPENAI_API_KEY", role="eval_evaluator")
     _default_url = "https://api.openai.com/v1"
 
     run = await repo.create_run(
@@ -306,8 +306,8 @@ async def create_ragas_run(
         or "text-embedding-v3"
     )
 
-    import os
-    _default_key = os.environ.get("OPENAI_API_KEY", "sk-placeholder")
+    from nanoresearch.config.loader import env_key_or_raise
+    _default_key = env_key_or_raise("OPENAI_API_KEY", role="eval_evaluator")
     _default_url = "https://api.openai.com/v1"
 
     run = await repo.create_run(

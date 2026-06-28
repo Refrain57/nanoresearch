@@ -42,16 +42,15 @@ class DashScopeEmbedding(BaseEmbedding):
         self.model = settings.embedding.model
         self.dimensions = getattr(settings.embedding, "dimensions", None)
 
-        self.api_key = (
-            api_key
-            or getattr(settings.embedding, "api_key", None)
-            or os.environ.get("DASHSCOPE_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-        )
+        from nanoresearch.config.loader import env_key_or_raise, get_mode
+        self.api_key = api_key or getattr(settings.embedding, "api_key", None)
         if not self.api_key:
-            raise ValueError(
-                "DashScope API key not provided. Set in settings.yaml "
-                "(embedding.api_key) or DASHSCOPE_API_KEY / OPENAI_API_KEY env var."
+            if get_mode() == "server":
+                raise RuntimeError(
+                    "DashScope embedding api_key must come from user_settings in server mode"
+                )
+            self.api_key = os.environ.get("DASHSCOPE_API_KEY") or env_key_or_raise(
+                "OPENAI_API_KEY", role="embedding"
             )
 
         settings_base_url = getattr(settings.embedding, "base_url", None)

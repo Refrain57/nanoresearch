@@ -51,6 +51,26 @@ def env_key_fallback_allowed() -> bool:
     return get_mode() == "local"
 
 
+def env_key_or_raise(env_name: str, *, role: str) -> str:
+    """Read env var in local mode; raise in server mode or when var unset.
+
+    Used as fallback when user_settings + config.json have no key. In server
+    mode this short-circuits to raise — server deployments must not silently
+    spend host platform credentials.
+    """
+    if get_mode() == "server":
+        raise RuntimeError(
+            f"API key for role '{role}' must come from user_settings.extra.providers "
+            f"in server mode (NANORESEARCH_MODE=server); env var {env_name} fallback disabled."
+        )
+    value = os.environ.get(env_name)
+    if not value:
+        raise RuntimeError(
+            f"{env_name} not set (role={role!r}); set the env var or pass api_key explicitly."
+        )
+    return value
+
+
 def set_config_path(path: Path) -> None:
     """Set the current config path (used to derive data directory)."""
     global _current_config_path

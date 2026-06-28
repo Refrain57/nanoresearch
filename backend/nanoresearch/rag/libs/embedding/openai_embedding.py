@@ -65,17 +65,11 @@ class OpenAIEmbedding(BaseEmbedding):
         # Extract optional dimensions setting
         self.dimensions = getattr(settings.embedding, 'dimensions', None)
         
-        # API key: explicit > settings > env var
-        self.api_key = (
-            api_key
-            or getattr(settings.embedding, 'api_key', None)
-            or os.environ.get("OPENAI_API_KEY")
-        )
+        # API key: explicit > settings > env var (gated by mode)
+        from nanoresearch.config.loader import env_key_or_raise
+        self.api_key = api_key or getattr(settings.embedding, 'api_key', None)
         if not self.api_key:
-            raise ValueError(
-                "OpenAI API key not provided. Set in settings.yaml (embedding.api_key), "
-                "OPENAI_API_KEY environment variable, or pass api_key parameter."
-            )
+            self.api_key = env_key_or_raise("OPENAI_API_KEY", role="embedding")
         
         # Azure-compatible mode detection
         azure_endpoint = getattr(settings.embedding, 'azure_endpoint', None)

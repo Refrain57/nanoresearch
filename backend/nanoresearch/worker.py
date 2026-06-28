@@ -209,10 +209,11 @@ async def _run_simple_rag_job(
         ctx_text = "\n\n---\n\n".join(r.text for r in results[:5])
 
         from openai import AsyncOpenAI
+        from nanoresearch.config.loader import env_key_or_raise
         llm_cfg = getattr(settings, "llm", None)
         client = AsyncOpenAI(
             base_url=getattr(llm_cfg, "base_url", None) or "https://api.openai.com/v1",
-            api_key=getattr(llm_cfg, "api_key", None) or _os.environ.get("OPENAI_API_KEY", "sk-placeholder"),
+            api_key=getattr(llm_cfg, "api_key", None) or env_key_or_raise("OPENAI_API_KEY", role="ingestion_llm"),
         )
         model = getattr(llm_cfg, "model", None) or "gpt-4o-mini"
         stream = await client.chat.completions.create(
