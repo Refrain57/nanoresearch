@@ -4,11 +4,12 @@ import base64
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import tiktoken
+from loguru import logger
 
 
 def strip_think(text: str) -> str:
@@ -80,6 +81,23 @@ _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 def safe_filename(name: str) -> str:
     """Replace unsafe path characters with underscores."""
     return _UNSAFE_CHARS.sub("_", name).strip()
+
+
+def utcnow_aware() -> datetime:
+    """Current time as a timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+def as_aware_utc(dt: datetime) -> datetime:
+    """Normalize any datetime to aware-UTC.
+
+    Naive values are assumed to be UTC (with a warning) — this is the
+    fallback for legacy rows written before the timezone unification.
+    """
+    if dt.tzinfo is None:
+        logger.warning("as_aware_utc: received naive datetime {!r}, assuming UTC", dt)
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def split_message(content: str, max_len: int = 2000) -> list[str]:

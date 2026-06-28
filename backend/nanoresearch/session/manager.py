@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from nanoresearch.config.paths import get_legacy_sessions_dir
-from nanoresearch.utils.helpers import ensure_dir, safe_filename
+from nanoresearch.utils.helpers import as_aware_utc, ensure_dir, safe_filename, utcnow_aware
 
 
 @dataclass
@@ -27,8 +27,8 @@ class Session:
 
     key: str  # channel:chat_id
     messages: list[dict[str, Any]] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=utcnow_aware)
+    updated_at: datetime = field(default_factory=utcnow_aware)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0
 
@@ -36,11 +36,11 @@ class Session:
         msg = {
             "role": role,
             "content": content,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utcnow_aware().isoformat(),
             **kwargs,
         }
         self.messages.append(msg)
-        self.updated_at = datetime.now()
+        self.updated_at = utcnow_aware()
 
     @staticmethod
     def _find_legal_start(messages: list[dict[str, Any]]) -> int:
@@ -89,7 +89,7 @@ class Session:
     def clear(self) -> None:
         self.messages = []
         self.last_consolidated = 0
-        self.updated_at = datetime.now()
+        self.updated_at = utcnow_aware()
 
     def retain_recent_legal_suffix(self, max_messages: int) -> None:
         if max_messages <= 0:
@@ -110,7 +110,7 @@ class Session:
         dropped = len(self.messages) - len(retained)
         self.messages = retained
         self.last_consolidated = max(0, self.last_consolidated - dropped)
-        self.updated_at = datetime.now()
+        self.updated_at = utcnow_aware()
 
 
 class SessionManager:
@@ -155,8 +155,8 @@ class SessionManager:
             if not meta or not raw_msgs:
                 return None
             messages = [json.loads(m) for m in raw_msgs]
-            created_at = datetime.fromisoformat(meta["created_at"]) if meta.get("created_at") else datetime.now()
-            updated_at = datetime.fromisoformat(meta["updated_at"]) if meta.get("updated_at") else datetime.now()
+            created_at = as_aware_utc(datetime.fromisoformat(meta["created_at"])) if meta.get("created_at") else utcnow_aware()
+            updated_at = as_aware_utc(datetime.fromisoformat(meta["updated_at"])) if meta.get("updated_at") else utcnow_aware()
             return Session(
                 key=key,
                 messages=messages,
@@ -185,7 +185,7 @@ class SessionManager:
             from nanoresearch.bus.redis_keys import RedisKeys
             redis = get_redis()
             msg_key, meta_key = self._redis_keys(session.key)
-            ts = datetime.now().isoformat()
+            ts = utcnow_aware().isoformat()
             async with redis.pipeline(transaction=True) as pipe:
                 pipe.delete(msg_key)
                 if session.messages:
@@ -263,8 +263,8 @@ class SessionManager:
         return Session(
             key=key,
             messages=[m.content for m in msgs],
-            created_at=conv.created_at.replace(tzinfo=None) if conv.created_at else datetime.now(),
-            updated_at=conv.updated_at.replace(tzinfo=None) if conv.updated_at else datetime.now(),
+            created_at=as_aware_utc(conv.created_at) if conv.created_at else utcnow_aware(),
+            updated_at=as_aware_utc(conv.updated_at) if conv.updated_at else utcnow_aware(),
             metadata=conv.conv_metadata or {},
             last_consolidated=conv.last_consolidated or 0,
         )

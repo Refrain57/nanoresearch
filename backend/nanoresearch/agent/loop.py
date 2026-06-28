@@ -40,6 +40,7 @@ from nanoresearch.bus.queue import MessageBus
 from nanoresearch.providers.base import LLMProvider
 from nanoresearch.session.manager import Session, SessionManager
 from nanoresearch.utils.cache_metrics import record_cache_stats
+from nanoresearch.utils.helpers import utcnow_aware
 
 if TYPE_CHECKING:
     from nanoresearch.config.schema import ChannelsConfig, ExecToolConfig, ResearchConfig, WebSearchConfig
@@ -896,7 +897,7 @@ class AgentLoop:
                     entry["content"] = filtered
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
-        session.updated_at = datetime.now()
+        session.updated_at = utcnow_aware()
 
     async def process_direct(
         self,

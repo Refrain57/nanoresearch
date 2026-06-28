@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import weakref
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -628,7 +628,7 @@ class MemoryConsolidator:
                             RedisKeys.session_msg(uid, ch, chat_id),
                             RedisKeys.session_meta(uid, ch, chat_id),
                             str(keep_from_idx),
-                            datetime.utcnow().isoformat(),
+                            datetime.now(timezone.utc).isoformat(),
                         )
                     except Exception as _lua_err:
                         logger.warning("Lua LTRIM failed (non-fatal): {}", _lua_err)
