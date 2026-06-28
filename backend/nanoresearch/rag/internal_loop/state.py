@@ -73,7 +73,7 @@ class PlanResult:
 class SessionState:
     """State for an entire RAG search session.
 
-    This holds all state for a single rag_search call,
+    This holds all state for a single kb_search call,
     including the original query, context, and all rounds.
 
     Attributes:
