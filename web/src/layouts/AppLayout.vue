@@ -70,8 +70,8 @@
             type="info"
             show-icon
             style="margin-bottom: 12px; font-size: 12px"
-            message="至少需要填两组 key"
-            :description="providerGuideDesc"
+            message="第一步：添加 API key"
+            description="不同模型用途可以共用同一个 key，也可以分配不同 provider。下方「模型用途分配」决定每种调用走哪个 key。"
           />
 
           <div v-if="settingsStore.providers.length === 0" class="empty-providers">
@@ -108,6 +108,41 @@
             </div>
           </div>
         </a-spin>
+
+        <!-- 模型用途分配 -->
+        <div class="section-header" style="margin-top: 24px">
+          <span class="section-title">模型用途分配</span>
+        </div>
+        <div class="field-hint" style="margin-bottom: 10px">
+          每种调用使用哪个 provider + 哪个模型。留空时按 fallback 规则处理。
+        </div>
+        <div v-if="settingsStore.providers.length === 0" class="empty-providers">
+          先添加 API key，再分配用途
+        </div>
+        <div v-else class="role-assignment-list">
+          <div v-for="role in ROLE_LABELS" :key="role.key" class="role-row">
+            <div class="role-label">
+              <div class="role-title">{{ role.label }}</div>
+              <div class="role-hint">{{ role.hint }}</div>
+            </div>
+            <a-select
+              :value="settingsStore.roles[role.key]?.provider_id || null"
+              :options="providerSelectOptions"
+              placeholder="未配置"
+              allow-clear
+              style="width: 180px"
+              @change="(pid) => onRoleProviderChange(role.key, pid)"
+            />
+            <a-auto-complete
+              :value="settingsStore.roles[role.key]?.model || ''"
+              :options="modelOptionsForRole(role.key)"
+              placeholder="模型名"
+              allow-clear
+              style="width: 200px"
+              @change="(m) => onRoleModelChange(role.key, m)"
+            />
+          </div>
+        </div>
 
         <!-- Base 模型选择 -->
         <div class="section-header" style="margin-top: 24px">
@@ -290,11 +325,6 @@ async function saveBootstrapFile(file) {
   }
 }
 
-const providerGuideDesc = `• 一组用于 Chat（如 deepseek / openai）
-• 一组用于 Embedding（如 dashscope / openai；deepseek 不提供 embedding）
-
-每个 provider 行的"models"字段标注此 key 能跑的模型；多 provider 共存时，按 model 精确匹配优先，匹配不到走第一个有 key 的 provider 兜底。`
-
 const localBaseModel = ref('')
 const baseModelSaving = ref(false)
 
@@ -332,6 +362,16 @@ const PROVIDER_PRESETS = [
   { value: 'siliconflow',       label: 'SiliconFlow' },
   { value: 'openai_compatible', label: 'OpenAI 兼容 (自定义)' },
 ]
+
+const ROLE_LABELS = [
+  { key: 'chat',            label: '聊天 (chat)',           hint: '默认对话模型' },
+  { key: 'ingestion_llm',   label: 'RAG 摄取',              hint: '处理知识库文档时使用' },
+  { key: 'embedding',       label: '向量嵌入',              hint: '知识库检索需要' },
+  { key: 'vision',          label: '视觉',                  hint: '图片理解；留空则关闭' },
+  { key: 'eval_generator',  label: '评测 - 题目生成',       hint: '留空 fallback 到聊天模型' },
+  { key: 'eval_evaluator',  label: '评测 - 打分',           hint: '留空 fallback 到聊天模型' },
+]
+const EMBEDDING_CAPABLE_PRESETS = new Set(['dashscope', 'openai', 'azure_openai', 'siliconflow'])
 
 const PROVIDER_MODEL_PRESETS = {
   deepseek:  ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-r1'],
@@ -401,6 +441,35 @@ async function saveProvider() {
     }
 
     await settingsStore.saveProviders(next)
+
+    // Default role auto-assignment on first add or first embedding-capable add
+    if (!editingProvider.value) {
+      const updatedProviders = settingsStore.providers
+      const added = updatedProviders.find(p =>
+        p.name === providerForm.value.name && p.provider === (providerForm.value.provider || null)
+      )
+      if (added) {
+        const nextRoles = { ...settingsStore.roles }
+        let rolesChanged = false
+        if (!nextRoles.chat) {
+          nextRoles.chat = { provider_id: added.id, model: (added.models || [])[0] || '' }
+          rolesChanged = true
+        }
+        if (!nextRoles.ingestion_llm) {
+          nextRoles.ingestion_llm = { provider_id: added.id, model: (added.models || [])[0] || '' }
+          rolesChanged = true
+        }
+        if (!nextRoles.embedding && EMBEDDING_CAPABLE_PRESETS.has(added.provider || '')) {
+          const embModel = (added.models || []).find(m => /embed/i.test(m)) || ''
+          nextRoles.embedding = { provider_id: added.id, model: embModel }
+          rolesChanged = true
+        }
+        if (rolesChanged) {
+          await settingsStore.saveRoles(nextRoles)
+        }
+      }
+    }
+
     providerModalOpen.value = false
     message.success('供应商已保存')
   } catch (e) {
@@ -419,6 +488,47 @@ async function deleteProvider(id) {
     message.success('已删除')
   } catch (e) {
     message.error('删除失败：' + (e.message || ''))
+  }
+}
+
+const providerSelectOptions = computed(() =>
+  settingsStore.providers.map(p => ({
+    value: p.id,
+    label: `${p.name}${p.provider ? ` (${p.provider})` : ''}`,
+  }))
+)
+
+function modelOptionsForRole(roleKey) {
+  const pid = settingsStore.roles[roleKey]?.provider_id
+  if (!pid) return []
+  const p = settingsStore.providers.find(x => x.id === pid)
+  return (p?.models || []).map(m => ({ value: m, label: m }))
+}
+
+async function onRoleProviderChange(roleKey, providerId) {
+  const next = { ...settingsStore.roles }
+  if (!providerId) {
+    next[roleKey] = null
+  } else {
+    const p = settingsStore.providers.find(x => x.id === providerId)
+    const defaultModel = (p?.models || [])[0] || ''
+    next[roleKey] = { provider_id: providerId, model: defaultModel }
+  }
+  try {
+    await settingsStore.saveRoles(next)
+  } catch (e) {
+    message.error('保存失败：' + (e.message || ''))
+  }
+}
+
+async function onRoleModelChange(roleKey, model) {
+  const entry = settingsStore.roles[roleKey]
+  if (!entry) return  // No provider chosen yet; the model field is disabled-ish
+  const next = { ...settingsStore.roles, [roleKey]: { provider_id: entry.provider_id, model: model || '' } }
+  try {
+    await settingsStore.saveRoles(next)
+  } catch (e) {
+    message.error('保存失败：' + (e.message || ''))
   }
 }
 
@@ -493,4 +603,30 @@ function logout() { userStore.logout(); router.push('/login') }
 .provider-card-actions { display: flex; gap: 2px; flex-shrink: 0; }
 
 .field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+
+.role-assignment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: #fafafa;
+  border-radius: 6px;
+}
+.role-label {
+  flex: 1;
+  min-width: 0;
+}
+.role-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+.role-hint {
+  font-size: 11px;
+  color: #888;
+}
 </style>
