@@ -18,6 +18,48 @@ from nanoresearch.rag.mcp_server.tools.agentic.shared import (
 
 logger = logging.getLogger(__name__)
 
+# Subprocess-side PG-backed SessionManager
+# MCP server is an independent stdio subprocess (see §8 #1 of spec).
+# Module-level globals in the main process are invisible here. We rely on
+# DATABASE_URL/REDIS_URL transported via _stdio_env (§8 #6) to connect to the
+# SAME PG/Redis the main process uses. JSONL fallback is forbidden — that
+# would create an orphan store with no sync to the main session.
+
+_subprocess_session_manager = None
+
+
+def _get_subprocess_session_manager():
+    """Lazy-init a PG-backed SessionManager in the MCP subprocess.
+
+    Returns None on any init failure; callers must degrade (return empty
+    history) rather than fall back to JSONL.
+    """
+    global _subprocess_session_manager
+    if _subprocess_session_manager is not None:
+        return _subprocess_session_manager
+    try:
+        from nanoresearch.storage.database import get_session_factory, init_engine
+        from nanoresearch.session.manager import SessionManager
+        from nanoresearch.config.paths import get_workspace_path
+
+        try:
+            factory = get_session_factory()
+        except RuntimeError:
+            # Engine not initialized yet in this subprocess — initialize it.
+            init_engine()
+            factory = get_session_factory()
+
+        _subprocess_session_manager = SessionManager(
+            workspace=get_workspace_path(),
+            session_factory=factory,
+        )
+        logger.info("Subprocess PG-backed SessionManager initialized")
+        return _subprocess_session_manager
+    except Exception as e:
+        logger.warning(f"Subprocess SessionManager init failed: {e}; query rewrite degraded")
+        return None
+
+
 # Rewrite prompt for resolving pronouns and references
 REWRITE_PROMPT = """对话历史：
 {history}
@@ -214,7 +256,7 @@ Returns:
             )
 
         # 1. Get conversation history for query rewriting
-        history = self._get_conversation_history(session_key) if session_key else []
+        history = await self._get_conversation_history(session_key) if session_key else []
 
         # 2. Rewrite query to resolve pronouns
         rewritten_query = await self._rewrite_query(query, history)
@@ -290,66 +332,33 @@ Returns:
         else:
             raise ValueError("Unknown LLM client type")
 
-    def _get_conversation_history(self, session_key: str) -> List[str]:
-        """Get conversation history from main Agent session.
+    async def _get_conversation_history(self, session_key: str) -> list[dict]:
+        """Fetch conversation history from main agent's PG-backed session store.
 
-        Strategy:
-        1. Always include initial_query (first user message) as topic anchor
-        2. Get recent 5 rounds
-        3. Deduplicate if initial_query is already in recent 5
+        Returns list[dict] — raw messages with role/content/tool_calls/etc.
+        No role filtering: tool messages are preserved for §3.4 A4 layering.
+        Render layer (_render_history_for_prompt) skips tool when rendering
+        to prompt; B class's _get_retrieval_titles reads them for chunk titles.
 
-        User message content field can be:
-        1. String: use directly
-        2. List: extract {"type": "text", "text": "..."} blocks
+        Degrades to [] when subprocess SessionManager init fails — caller
+        falls back to original query without rewrite.
         """
-        logger.info(f"_get_conversation_history called: session_key='{session_key}'")
+        manager = _get_subprocess_session_manager()
+        if manager is None:
+            logger.warning(
+                f"No SessionManager available in subprocess for {session_key!r}; "
+                "query rewrite degraded"
+            )
+            return []
         try:
-            from nanoresearch.session.manager import SessionManager
-            from nanoresearch.config.paths import get_workspace
-
-            manager = SessionManager(get_workspace())
-            session = manager.get_or_create(session_key)
-
-            # Get history messages
-            history = session.get_history()
-
-            # Extract user message text content
-            user_messages = []
-            for msg in history:
-                if msg.get("role") != "user":
-                    continue
-
-                content = msg.get("content")
-                if isinstance(content, str):
-                    user_messages.append(content)
-                elif isinstance(content, list):
-                    # Multimodal list: extract text blocks
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                    if text_parts:
-                        user_messages.append(" ".join(text_parts))
-
-            if not user_messages:
-                return []
-
-            # Get initial_query (first user message)
-            initial_query = user_messages[0]
-
-            # Get recent 5 rounds
-            recent = user_messages[-5:]
-
-            # Combine: initial_query + recent, deduplicate
-            if initial_query in recent:
-                # initial_query already in window, return as is
-                return recent
-            else:
-                # initial_query outside window, prepend to beginning
-                return [initial_query] + recent
-
+            session = await manager.get_or_create(session_key)
+            # Return raw messages (no legal-start filtering) so tool messages
+            # survive for the B-class retrieval titles path (§3.4 A4 layering).
+            # session.get_history() strips orphaned tool messages via
+            # _find_legal_start; we need the unfiltered slice instead.
+            return list(session.messages[-20:])
         except Exception as e:
-            logger.warning(f"Failed to get conversation history: {e}")
+            logger.warning(f"Failed to fetch history for {session_key!r}: {e}")
             return []
 
     async def _rewrite_query(self, query: str, history: List[str]) -> str:

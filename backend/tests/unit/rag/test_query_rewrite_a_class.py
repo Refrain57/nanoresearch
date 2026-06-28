@@ -176,3 +176,53 @@ async def test_mcp_wrapper_user_provided_session_key_wins():
     await w.execute(query="x", kb_id="kb1", session_key="explicit")
     forwarded = w._session.call_tool.call_args.kwargs["arguments"]
     assert forwarded["session_key"] == "explicit"
+
+
+# Task 7: Subprocess PG-backed SessionManager + async _get_conversation_history
+
+import inspect as _inspect
+from nanoresearch.rag.mcp_server.tools.agentic import query_planning as qp
+
+
+def test_subprocess_session_manager_factory_exists():
+    assert hasattr(qp, "_get_subprocess_session_manager")
+
+
+def test_get_conversation_history_is_async():
+    sig = _inspect.signature(qp.PlanQueryTool._get_conversation_history)
+    assert _inspect.iscoroutinefunction(qp.PlanQueryTool._get_conversation_history)
+
+
+async def test_get_conversation_history_returns_list_of_dicts(monkeypatch):
+    """SessionManager 返回 user/assistant/tool 三种 role，_get_conversation_history 原样返回（不过滤）。"""
+    from nanoresearch.session.manager import Session
+
+    fake_session = Session(key="telegram:1")
+    fake_session.messages = [
+        {"role": "user", "content": "介绍 NeRF 先驱"},
+        {"role": "assistant", "content": "Ben Mildenhall, Jonathan Barron..."},
+        {"role": "tool", "tool_call_id": "t1", "name": "kb_search", "content": "{}"},
+        {"role": "user", "content": "你提到那两个做渲染的"},
+    ]
+
+    fake_mgr = AsyncMock()
+    fake_mgr.get_or_create = AsyncMock(return_value=fake_session)
+    monkeypatch.setattr(qp, "_get_subprocess_session_manager", lambda: fake_mgr)
+
+    tool = qp.PlanQueryTool()
+    history = await tool._get_conversation_history("telegram:1")
+
+    roles = [m["role"] for m in history]
+    assert "user" in roles
+    assert "assistant" in roles
+    assert "tool" in roles, "tool 消息必须保留，B 类要用"
+    assert isinstance(history, list)
+    assert all(isinstance(m, dict) for m in history)
+
+
+async def test_get_conversation_history_returns_empty_when_no_manager(monkeypatch):
+    """SessionManager 拿不到 → 返回 []，不抛异常。"""
+    monkeypatch.setattr(qp, "_get_subprocess_session_manager", lambda: None)
+    tool = qp.PlanQueryTool()
+    history = await tool._get_conversation_history("telegram:nope")
+    assert history == []
