@@ -313,14 +313,14 @@ class SessionManager:
                     data = json.loads(line)
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        created_at = as_aware_utc(datetime.fromisoformat(data["created_at"])) if data.get("created_at") else None
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
             return Session(
                 key=key,
                 messages=messages,
-                created_at=created_at or datetime.now(),
+                created_at=created_at or utcnow_aware(),
                 metadata=metadata,
                 last_consolidated=last_consolidated,
             )

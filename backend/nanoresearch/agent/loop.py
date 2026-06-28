@@ -895,7 +895,7 @@ class AgentLoop:
                     if not filtered:
                         continue
                     entry["content"] = filtered
-            entry.setdefault("timestamp", datetime.now().isoformat())
+            entry.setdefault("timestamp", utcnow_aware().isoformat())
             session.messages.append(entry)
         session.updated_at = utcnow_aware()
 

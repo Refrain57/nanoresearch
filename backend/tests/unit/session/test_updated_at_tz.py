@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from nanoresearch.utils.helpers import as_aware_utc, utcnow_aware
+from nanoresearch.session.manager import Session, SessionManager
+from tests.unit.session.test_redis_roundtrip import _FakeRedis
 
 
 def test_utcnow_aware_is_timezone_aware():
@@ -41,14 +45,6 @@ def test_idle_delta_is_consistent_regardless_of_source_tz():
 
     assert abs(delta_naive.total_seconds() - 300) < 1
     assert abs(delta_aware.total_seconds() - 300) < 1
-
-
-from pathlib import Path
-from unittest.mock import patch
-
-from nanoresearch.session.manager import Session, SessionManager
-# 直接复用已有 fake redis
-from tests.unit.session.test_redis_roundtrip import _FakeRedis
 
 
 async def test_redis_roundtrip_updated_at_is_aware_utc(tmp_path: Path):
