@@ -53,6 +53,7 @@ def test_missing_provider_role_embedding():
     body = resp.json()
     assert body["error"] == "missing_provider"
     assert body["role"] == "embedding"
+    assert "no api key" in body["message"]
 
 
 def test_missing_provider_role_empty_when_unset():
@@ -62,3 +63,4 @@ def test_missing_provider_role_empty_when_unset():
     body = resp.json()
     assert body["error"] == "missing_provider"
     assert body["role"] == ""
+    assert "no api key" in body["message"]
