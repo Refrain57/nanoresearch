@@ -122,25 +122,27 @@
         <div v-else class="role-assignment-list">
           <div v-for="role in ROLE_LABELS" :key="role.key" class="role-row">
             <div class="role-label">
-              <div class="role-title">{{ role.label }}</div>
-              <div class="role-hint">{{ role.hint }}</div>
+              <span class="role-title">{{ role.label }}</span>
+              <span class="role-hint">{{ role.hint }}</span>
             </div>
-            <a-select
-              :value="settingsStore.roles[role.key]?.provider_id || null"
-              :options="providerSelectOptions"
-              placeholder="未配置"
-              allow-clear
-              style="width: 180px"
-              @change="(pid) => onRoleProviderChange(role.key, pid)"
-            />
-            <a-auto-complete
-              :value="settingsStore.roles[role.key]?.model || ''"
-              :options="modelOptionsForRole(role.key)"
-              placeholder="模型名"
-              allow-clear
-              style="width: 200px"
-              @change="(m) => onRoleModelChange(role.key, m)"
-            />
+            <div class="role-controls">
+              <a-select
+                :value="settingsStore.roles[role.key]?.provider_id || null"
+                :options="providerSelectOptions"
+                placeholder="未配置"
+                allow-clear
+                class="role-control"
+                @change="(pid) => onRoleProviderChange(role.key, pid)"
+              />
+              <a-auto-complete
+                :value="settingsStore.roles[role.key]?.model || ''"
+                :options="modelOptionsForRole(role.key)"
+                placeholder="模型名"
+                allow-clear
+                class="role-control"
+                @change="(m) => onRoleModelChange(role.key, m)"
+              />
+            </div>
           </div>
         </div>
 
@@ -611,22 +613,33 @@ function logout() { userStore.logout(); router.push('/login') }
 }
 .role-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
   background: #fafafa;
   border-radius: 6px;
 }
 .role-label {
-  flex: 1;
-  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .role-title {
   font-size: 13px;
   font-weight: 500;
+  white-space: nowrap;
 }
 .role-hint {
   font-size: 11px;
   color: #888;
+}
+.role-controls {
+  display: flex;
+  gap: 8px;
+}
+.role-control {
+  flex: 1;
+  min-width: 0;
 }
 </style>
