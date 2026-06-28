@@ -863,6 +863,23 @@ nr channels login weixin
 
 Config file: `~/.nanoresearch/config.json`
 
+### Custom base directory (multi-tenant / containerized deployments)
+
+By default, NanoResearch stores all runtime state under `~/.nanoresearch`.
+Set the `NANORESEARCH_HOME` environment variable to relocate this base
+directory — for example to support multiple tenants on a single host or
+to mount a non-home volume inside a container:
+
+```bash
+export NANORESEARCH_HOME=/data/tenant_alice
+nr serve
+```
+
+Tilde expansion (`~/custom-root`) and absolute paths are both supported.
+The directory is created automatically on first write. The legacy
+`NANOBOT_HOME` environment variable is also accepted for backward
+compatibility and will be removed in v0.3.0.
+
 ### Providers
 
 | Provider | Purpose | Get API Key |

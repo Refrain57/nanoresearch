@@ -28,6 +28,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/nanoresearch
     volumes:
       - ~/.nanoresearch:/root/.nanoresearch
+    # Multi-tenant / custom-base example:
+    #   environment:
+    #     NANORESEARCH_HOME: /data/tenant_x
+    #   volumes:
+    #     - ./tenant_x:/data/tenant_x
     command: ["gateway"]
     restart: unless-stopped
     ports:

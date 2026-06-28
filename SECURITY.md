@@ -144,6 +144,7 @@ For production use:
 
 3. **Set Proper Permissions**
    ```bash
+   # If you have set NANORESEARCH_HOME, substitute its value for ~/.nanoresearch below.
    chmod 700 ~/.nanoresearch
    chmod 600 ~/.nanoresearch/config.json
    chmod 700 ~/.nanoresearch/whatsapp-auth
