@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -179,6 +179,24 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    @model_validator(mode="after")
+    def _warn_providers_in_server_mode(self) -> "Config":
+        import os
+        from loguru import logger
+        if os.environ.get("NANORESEARCH_MODE", "local").lower() == "server":
+            non_empty = []
+            for fname in ProvidersConfig.model_fields:
+                p = getattr(self.providers, fname, None)
+                if p and getattr(p, "api_key", ""):
+                    non_empty.append(fname)
+            if non_empty:
+                logger.warning(
+                    "NANORESEARCH_MODE=server but config.json providers has api_key for: {} — "
+                    "these will be IGNORED. Move credentials to user_settings.extra.providers.",
+                    non_empty,
+                )
+        return self
 
     @property
     def workspace_path(self) -> Path:

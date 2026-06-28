@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 
+from nanoresearch.config.loader import get_mode
 from nanoresearch.server.middleware.auth import get_current_user
 from nanoresearch.storage.repositories.eval_repo import EvalRepository
 from nanoresearch.storage.repositories.knowledge_repo import KnowledgeRepository
@@ -60,6 +61,7 @@ async def _resolve_eval_spec(uid: str, request: Request, role, model_override=No
         user_providers=user_providers,
         model_override=model_override,
         user_extra=user_extra,
+        mode=get_mode(),
     )
 
 
@@ -1023,6 +1025,7 @@ async def _build_eval_agent_loop(uid: str, app_state):
         user_model=user_cfg.model if user_cfg else None,
         user_providers=providers,
         model_override=None,
+        mode=get_mode(),
     )
 
     def _build_provider(spec, fallback):

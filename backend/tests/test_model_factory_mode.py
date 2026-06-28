@@ -70,3 +70,66 @@ def test_mode_param_overrides_env(monkeypatch):
 def test_missing_role_field_on_error():
     err = ModelResolutionError("missing key", missing_role="embedding")
     assert err.missing_role == "embedding"
+
+
+def test_config_warns_when_server_mode_with_providers(monkeypatch):
+    import io
+    from loguru import logger
+    monkeypatch.setenv("NANORESEARCH_MODE", "server")
+    from nanoresearch.config.schema import Config, ProvidersConfig, ProviderConfig
+
+    sink = io.StringIO()
+    handler_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        Config(
+            providers=ProvidersConfig(
+                openai=ProviderConfig(api_key="sk-leaked"),
+            ),
+        )
+        sink.seek(0)
+        output = sink.read()
+    finally:
+        logger.remove(handler_id)
+
+    assert "server mode" in output.lower() or "ignored" in output.lower()
+    assert "openai" in output.lower()
+
+
+def test_config_silent_when_server_mode_no_providers(monkeypatch):
+    import io
+    from loguru import logger
+    monkeypatch.setenv("NANORESEARCH_MODE", "server")
+    from nanoresearch.config.schema import Config
+
+    sink = io.StringIO()
+    handler_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        Config()
+        sink.seek(0)
+        output = sink.read()
+    finally:
+        logger.remove(handler_id)
+
+    assert output == "" or "server mode" not in output.lower()
+
+
+def test_config_silent_when_local_mode_with_providers(monkeypatch):
+    import io
+    from loguru import logger
+    monkeypatch.setenv("NANORESEARCH_MODE", "local")
+    from nanoresearch.config.schema import Config, ProvidersConfig, ProviderConfig
+
+    sink = io.StringIO()
+    handler_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        Config(
+            providers=ProvidersConfig(
+                openai=ProviderConfig(api_key="sk-local"),
+            ),
+        )
+        sink.seek(0)
+        output = sink.read()
+    finally:
+        logger.remove(handler_id)
+
+    assert "server mode" not in output.lower()

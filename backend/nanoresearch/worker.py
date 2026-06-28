@@ -19,6 +19,7 @@ from typing import Any
 
 from arq.connections import RedisSettings
 
+from nanoresearch.config.loader import get_mode
 from nanoresearch.utils.env_compat import apply_legacy_env_compat
 
 apply_legacy_env_compat()
@@ -108,6 +109,7 @@ async def _build_agent_loop(
         user_model=user_cfg.model if user_cfg else None,
         user_providers=providers,
         model_override=model_override or agent_model,
+        mode=get_mode(),
     )
     provider = _build_provider_from_spec(spec, cfg["provider"])
 
@@ -491,6 +493,7 @@ async def ingest_document_task(
                 rag_settings=settings,
                 user_model=user_model,
                 user_providers=user_providers,
+                mode=get_mode(),
             )
             settings = ModelFactory.patch_settings(settings, ModelRole.INGESTION_LLM, spec)
         except Exception:

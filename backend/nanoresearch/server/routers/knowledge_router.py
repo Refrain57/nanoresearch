@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from nanoresearch.config.loader import get_mode
 from nanoresearch.server.middleware.auth import get_current_user
 from nanoresearch.storage.models import KbChunk
 from nanoresearch.storage.repositories.knowledge_repo import KnowledgeRepository
@@ -55,6 +56,7 @@ async def _resolve_rag_settings(uid: str, request: Request, role=None):
         rag_settings=base,
         user_model=user_model,
         user_providers=user_providers,
+        mode=get_mode(),
     )
     return ModelFactory.patch_settings(base, role, spec)
 
