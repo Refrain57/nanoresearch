@@ -30,3 +30,32 @@ def test_create_session_default_caller_session_key_is_none():
     mgr = SessionStateManager.get_instance()
     s = mgr.create_session(query="q")
     assert s.caller_session_key is None
+
+
+def test_rag_search_input_schema_has_session_key():
+    from nanoresearch.rag.mcp_server.tools.rag_search import RAGSearchTool
+    tool = RAGSearchTool()
+    schema = tool.input_schema
+    assert "session_key" in schema["properties"]
+    assert "session_key" not in schema["required"]
+    assert schema["properties"]["session_key"]["type"] == "string"
+
+
+async def test_rag_search_handler_accepts_session_key(monkeypatch):
+    from nanoresearch.rag.mcp_server.tools.rag_search import RAGSearchTool, rag_search_handler
+
+    captured = {}
+
+    async def fake_execute(self, query, collection="default", context=None,
+                           max_iterations=5, session_key=None):
+        captured["session_key"] = session_key
+        from nanoresearch.rag.core.response.response_builder import MCPToolResponse
+        return MCPToolResponse(content='{"success": true, "chunks": []}')
+
+    monkeypatch.setattr(RAGSearchTool, "execute", fake_execute)
+    await rag_search_handler(
+        query="q",
+        collection="c",
+        session_key="telegram:789",
+    )
+    assert captured["session_key"] == "telegram:789"
