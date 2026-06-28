@@ -237,6 +237,14 @@ class TestGenerateProposalsFullPath:
         assert "std" in first_case_sample and first_case_sample["std"] is not None
         assert "n" in first_case_sample and first_case_sample["n"] == 3
 
+        # B2 gate audit-log keys must be present on every candidate (real-path coverage).
+        for p in proposal.proposals:
+            assert "gate_decision" in p
+            assert "gate_reason" in p
+            assert "sigma_combined" in p
+            assert "delta_mean" in p
+            assert "threshold" in p
+
     @pytest.mark.asyncio
     async def test_full_path_raises_on_empty_health_set(
         self, in_memory_repo, fake_llm_provider, seeded_tool_registry
@@ -259,43 +267,6 @@ class TestGenerateProposalsFullPath:
 # ---------------------------------------------------------------------------
 # Task 5 (B2-Gate): σ-weighted gate tests
 # ---------------------------------------------------------------------------
-
-class _ControlledEvaluator:
-    """Fake evaluator that returns a controlled mean score for each snapshot.
-
-    score_by_case maps case_id (str) → (baseline_mean, candidate_mean, std).
-    When multiple repeat calls arrive for the same case, the evaluator returns
-    draws from a deterministic sequence that converges to the configured mean,
-    ensuring ScoreSample.from_observations() produces the expected statistics.
-
-    Strategy: return the configured mean directly for every call.  This gives
-    std=0.0 with n=3.  For the gate tests we only need the mean to be right;
-    std comes from the per-set config rather than from per-call variance.
-    To get a non-zero std we inject it via the ScoreSample directly in
-    _FakeDirectScorer below instead of via evaluator.evaluate().
-    """
-
-    def __init__(self, score_fn):
-        # score_fn(case_id: str) -> float | None
-        self._score_fn = score_fn
-
-    async def evaluate(self, snapshot_data, test_case) -> dict[str, float]:
-        case_id = str(test_case.id)
-        score = self._score_fn(case_id)
-        if score is None:
-            return {}
-        return {"controlled": score}
-
-
-class _FakeDirectScorer:
-    """Injected as OptimizationAgent._evaluator to produce exact ScoreSamples.
-
-    Unlike _ControlledEvaluator, this bypasses the repeat loop by patching
-    _score_candidate_set to return pre-built ScoreSamples.  See usage in
-    _PatternTarget below.
-    """
-    pass  # Kept for future extension; current tests use _ScorePatternMixin.
-
 
 class _ScorePatternTarget:
     """Mock TunableTextObject that lets _score_candidate_set return controlled ScoreSamples.
@@ -390,8 +361,6 @@ def _patch_score_one_for_target(agent, target: _ScorePatternTarget):
 
     # We override _score_candidate_set at agent level to return pre-built ScoreSamples.
     # This is the cleanest way: replace _score_candidate_set on the agent instance.
-    _orig_score_candidate_set = agent._score_candidate_set.__func__
-
     import asyncio as _asyncio
     from nanoresearch.eval.score_sample import ScoreSample as _ScoreSample
     import math as _math
@@ -399,12 +368,15 @@ def _patch_score_one_for_target(agent, target: _ScorePatternTarget):
     baseline_text_holder = []  # will be set after agent reads the target
 
     async def _fake_score_candidate_set(self_inner, tgt, candidate, test_cases, recordings_map):
-        # Determine which set we're scoring by looking at the test cases.
-        # Use the first case's dataset_type: "fix" or "health".
-        set_name = "fix"
-        if test_cases:
-            dt = getattr(test_cases[0], "dataset_type", "fix")
-            set_name = "health" if dt == "health" else "fix"
+        # Fix vs health is disambiguated by the FIRST test case's dataset_type.
+        # We assert rather than fall back: silent default would mask test-fixture drift.
+        assert test_cases, "_fake_score_candidate_set requires at least one test case"
+        dt = getattr(test_cases[0], "dataset_type", None)
+        assert dt in ("fix", "health"), (
+            f"test case {test_cases[0].id} must have dataset_type='fix' or 'health' "
+            f"(got {dt!r}); update _make_case_with_metadata or the test fixture"
+        )
+        set_name = dt
 
         pattern = tgt._get_pattern(set_name)
 
