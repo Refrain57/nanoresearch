@@ -23,7 +23,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from nanoresearch.config.schema import Config, ProviderConfig
@@ -55,8 +55,15 @@ class ModelSpec:
 class ModelResolutionError(ValueError):
     """Raised when model resolution fails to produce an API key."""
 
-    def __init__(self, message: str, *, sources_checked: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        sources_checked: list[str] | None = None,
+        missing_role: str | None = None,
+    ) -> None:
         self.sources_checked = sources_checked or []
+        self.missing_role = missing_role
         super().__init__(message)
 
 
@@ -112,6 +119,7 @@ class ModelFactory:
         rag_settings: "Settings | None" = None,
         user_model: str | None = None,
         user_providers: list[dict] | None = None,
+        mode: Literal["server", "local"] | None = None,
         **overrides: Any,
     ) -> ModelSpec:
         """Return a ModelSpec for the given role.
@@ -129,12 +137,37 @@ class ModelFactory:
         user_providers:
             user_settings.extra["providers"] list of dicts:
             [{name, api_key, api_base (opt), models: [] (opt)}]
+        mode:
+            Override deployment mode ("server" or "local"). None → auto-detect
+            via get_mode().
         **overrides:
             - model_override (str): beats everything for model selection.
             - api_key / base_url: force credentials.
             - user_extra (dict): full user_settings.extra (for ragas_* fields).
         """
+        from nanoresearch.config.loader import get_mode
+
+        effective_mode = mode or get_mode()
         _providers = user_providers or []
+
+        # server 模式：缺 user_providers 命中直接 raise，不读 config / rag_settings
+        if effective_mode == "server":
+            spec = cls._resolve_from_user_only(
+                role=role,
+                user_model=user_model,
+                user_providers=_providers,
+                **overrides,
+            )
+            if not spec.api_key:
+                raise ModelResolutionError(
+                    f"No API key for role '{role.value}' in server mode "
+                    f"(user_settings.extra.providers empty or no match)",
+                    sources_checked=["user_providers"],
+                    missing_role=role.value,
+                )
+            return spec
+
+        # local 模式 — 现有 dispatch 不变
         dispatch = {
             ModelRole.CHAT: cls._resolve_chat,
             ModelRole.INGESTION_LLM: cls._resolve_ingestion_llm,
@@ -389,6 +422,45 @@ class ModelFactory:
             return dataclasses.replace(rag_settings, vision_llm=new_vl)
 
         return rag_settings
+
+    @classmethod
+    def _resolve_from_user_only(
+        cls,
+        *,
+        role: ModelRole,
+        user_model: str | None,
+        user_providers: list[dict],
+        **overrides: Any,
+    ) -> ModelSpec:
+        """Resolve ModelSpec from user_providers only (server mode).
+
+        For CHAT / EVAL_*: model from override > user_model > first provider's first model.
+        For INGESTION / EMBEDDING / VISION: caller must pass model_override OR
+        we default to user_model; if still empty, leave spec.model="" (caller error).
+        """
+        model = (
+            overrides.get("model_override")
+            or user_model
+            or ""
+        )
+        if not model and user_providers:
+            for p in user_providers:
+                ms = p.get("models") or []
+                if ms:
+                    model = ms[0]
+                    break
+        matched = cls._match_user_provider_by_model(model, user_providers) if model else None
+        if not matched and user_providers:
+            # fallback 第一个有 api_key 的
+            matched = next((p for p in user_providers if p.get("api_key")), None)
+        if matched:
+            return ModelSpec(
+                model=model or "",
+                api_key=matched.get("api_key") or None,
+                base_url=matched.get("api_base") or None,
+                provider=matched.get("name") or None,
+            )
+        return ModelSpec(model=model or "")
 
     # ------------------------------------------------------------------
     # Internal helpers
