@@ -83,6 +83,7 @@ def test_plan_tool_schema_has_session_key():
     schema = tools.get_plan_tool_schema()
     params = schema["function"]["parameters"]
     assert "session_key" in params["properties"]
+    assert "session_key" not in params.get("required", [])
 
 
 def test_plan_query_signature_has_session_key():
