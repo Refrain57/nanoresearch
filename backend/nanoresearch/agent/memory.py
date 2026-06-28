@@ -492,7 +492,7 @@ class MemoryConsolidator:
         self,
         session: Session,
         tokens_to_remove: int,
-        tail_protect: int = 5,  # 保护最近 5 条消息
+        tail_protect: int = CONSOLIDATION_TAIL_PROTECT,
     ) -> tuple[int, int] | None:
         """Pick a user-turn boundary that removes enough old prompt tokens.
 
@@ -503,7 +503,7 @@ class MemoryConsolidator:
         Args:
             session: The session to analyze.
             tokens_to_remove: Minimum tokens to remove.
-            tail_protect: Number of recent messages to protect (default 5).
+            tail_protect: Number of recent messages to protect (default CONSOLIDATION_TAIL_PROTECT).
         """
         start = session.last_consolidated
         # Tail protection: don't consolidate beyond this index
@@ -564,7 +564,7 @@ class MemoryConsolidator:
         lock = self.get_lock(session.key)
         async with lock:
             budget = self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
-            target = budget // 2
+            target = int(budget * TOKEN_CONSOLIDATION_TARGET_RATIO)
             estimated, source = self.estimate_session_prompt_tokens(session)
             if estimated <= 0:
                 return
@@ -592,7 +592,7 @@ class MemoryConsolidator:
                 if estimated <= target:
                     return
 
-                boundary = self.pick_consolidation_boundary(session, max(1, estimated - target))
+                boundary = self.pick_consolidation_boundary(session, max(1, estimated - target), tail_protect=CONSOLIDATION_TAIL_PROTECT)
                 if boundary is None:
                     logger.debug(
                         "Token consolidation: no safe boundary for {} (round {})",
