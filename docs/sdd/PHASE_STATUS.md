@@ -212,14 +212,11 @@ apply/rollback 在 Phase 1 完整实现、可单测。**不接入生产触发路
 
 ### 已知限制（故意，不是遗漏）
 
-#### P1-L1：ToolDescriptionObject 评分 blocked until Phase 4
+#### P1-L1：ToolDescriptionObject 评分 — 已闭合（Phase 4，A1 Phase 1 清理）
 
-**现状**：`ToolDescriptionObject.generate_candidates` 能生成候选文本。但 `OptimizationAgent._score_candidate` 对 `target.kind == "tool_description"` 显式 `raise NotImplementedError("tool description scoring requires Phase 4 sandbox layering")`。
-`generate_proposals` 捕获该异常后记 warning 并持久化无分数候选（不静默失败）。
+**现状（已更新）**：`ToolDescriptionObject` 评分路径已通过 Phase 4 实现。`OptimizationAgent._score_candidate_set` 对 `target.kind == "tool_description"` 使用 `SandboxedToolRegistry(mode="side_effect_only")` 进行实际评分。`NotImplementedError` 路径已不存在。`tunable.py` 中相关 docstring 已同步更新（A1 Phase 1 B4/B2 清理，2026-06-28）。
 
-**为什么不在 Phase 1 实现**：Tool Description 优化修改的是工具配置，不是 system message。sandbox 评分需要能把候选注入到工具注册表而非 system message——这依赖 Phase 4 的 `side_effect_only` 模式和工具 `side_effect` 声明。Phase 4 之前 ToolDescriptionObject 可以 read/apply/rollback（版本注册表已实现），但不能进行完整的评分-门控闭环。
-
-**如何保持可见**：NotImplementedError 在调用栈上明确抛出，日志记 WARNING。PHASE_STATUS.md 本条记录。
+测试 `test_score_candidate_raises_for_tool_description` 调用了不存在的 `_score_candidate()` 方法并固化了已移除的 `NotImplementedError` 行为，已于 A1 Phase 1 Task 3 删除。新增 `TestGenerateProposalsFullPath` 集成测试，覆盖真实签名和 `optimizer.py:98-107` 非空不变量。
 
 #### P1-L2：PersonaObject.read 只覆盖 agents.persona
 

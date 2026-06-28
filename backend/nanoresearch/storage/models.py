@@ -161,6 +161,7 @@ class KbDocument(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_msg: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class KbChunk(Base):
@@ -358,6 +359,10 @@ class AgentRunSnapshot(Base):
     root_cause_auto_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # Phase 0: structured context assembly decisions (ids + numbers + query text, no injected full text)
     context_trace: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Phase 1: structured root-cause pointer (parallel-written alongside root_cause_auto*)
+    classification_layer: Mapped[str | None] = mapped_column(String, nullable=True)
+    classification_target_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    classification_target_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class AgentTestCase(Base):
@@ -381,6 +386,8 @@ class AgentTestCase(Base):
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)  # active | pending_review | rejected
     generated_from_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"), nullable=True)
     generation_reason: Mapped[str | None] = mapped_column(Text)
+    tool_recordings: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    set_kind: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # B4 metadata (Phase 1 of A1 tool-layer harness refactor)
     origin_badcase_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -417,10 +424,16 @@ class OptimizationProposal(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     category: Mapped[str] = mapped_column(String, nullable=False)
     proposals: Mapped[list] = mapped_column(JSONB, default=list)
-    status: Mapped[str] = mapped_column(String, default="pending", index=True)  # pending/approved/rejected
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)  # pending/approved/rejected/gate_all_rejected/signal_unreliable
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, ForeignKey("users.uid"), nullable=True)
+    baseline_score: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+    baseline_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, default=None)
+
+    # B2: per-case repeat statistics for σ-weighted gate (Phase 1 of A1).
+    # Shape: {"fix": {cand_idx: {case_id: {"mean": float, "std": float, "n": int}}}, "health": {...}}
+    score_sample: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
 
 
 class TunableObjectVersion(Base):
