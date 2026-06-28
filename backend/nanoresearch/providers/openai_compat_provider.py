@@ -353,7 +353,7 @@ class OpenAICompatProvider(LLMProvider):
             finish_reason = str(choice0.get("finish_reason") or "stop")
 
             raw_tool_calls: list[Any] = []
-            reasoning_content = msg0.get("reasoning_content")
+            reasoning_content = self._extract_reasoning_text(msg0)
             for ch in choices:
                 ch_map = self._maybe_mapping(ch) or {}
                 m = self._maybe_mapping(ch_map.get("message")) or {}
@@ -365,7 +365,7 @@ class OpenAICompatProvider(LLMProvider):
                 if not content:
                     content = self._extract_text_content(m.get("content"))
                 if not reasoning_content:
-                    reasoning_content = m.get("reasoning_content")
+                    reasoning_content = self._extract_reasoning_text(m)
 
             parsed_tool_calls = []
             for tc in raw_tool_calls:
@@ -441,7 +441,7 @@ class OpenAICompatProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason or "stop",
             usage=self._extract_usage(response),
-            reasoning_content=getattr(msg, "reasoning_content", None) or None,
+            reasoning_content=self._extract_reasoning_text(msg),
         )
 
     @classmethod
@@ -502,10 +502,12 @@ class OpenAICompatProvider(LLMProvider):
                 text = cls._extract_text_content(delta.get("content"))
                 if text:
                     content_parts.append(text)
-                if "reasoning_content" in delta:
-                    has_reasoning = True
-                    rc = cls._extract_text_content(delta["reasoning_content"]) or ""
-                    reasoning_parts.append(rc)
+                for _rc_key in ("reasoning_content", "thinking", "reasoning"):
+                    if _rc_key in delta:
+                        has_reasoning = True
+                        rc = cls._extract_text_content(delta[_rc_key]) or ""
+                        reasoning_parts.append(rc)
+                        break
                 for idx, tc in enumerate(delta.get("tool_calls") or []):
                     _accum_tc(tc, idx)
                 usage = cls._extract_usage(chunk_map) or usage
@@ -520,9 +522,12 @@ class OpenAICompatProvider(LLMProvider):
             delta = choice.delta
             if delta and delta.content:
                 content_parts.append(delta.content)
-            if delta and hasattr(delta, "reasoning_content"):
-                has_reasoning = True
-                reasoning_parts.append(delta.reasoning_content or "")
+            if delta:
+                for _rc_key in ("reasoning_content", "thinking", "reasoning"):
+                    if hasattr(delta, _rc_key) and getattr(delta, _rc_key) is not None:
+                        has_reasoning = True
+                        reasoning_parts.append(getattr(delta, _rc_key) or "")
+                        break
             for tc in (delta.tool_calls or []) if delta else []:
                 _accum_tc(tc, getattr(tc, "index", 0))
 
@@ -554,6 +559,75 @@ class OpenAICompatProvider(LLMProvider):
             ],
             finish_reason=finish_reason,
             usage=usage,
+        )
+
+    @staticmethod
+    def _extract_reasoning_text(msg: Any) -> str | None:
+        """Read reasoning content from msg, tolerating field-name variants.
+
+        Order: reasoning_content (Kimi, DeepSeek-R1, canonical) >
+               thinking (dashscope qwen3-thinking) >
+               reasoning (some siliconflow gateways)
+        Returns None if no field found or all are empty.
+        """
+        for attr in ("reasoning_content", "thinking", "reasoning"):
+            val = getattr(msg, attr, None)
+            if val is None and isinstance(msg, dict):
+                val = msg.get(attr)
+            if val:
+                return val if isinstance(val, str) else str(val)
+        return None
+
+    @classmethod
+    def _parse_response(cls, response: Any) -> LLMResponse:
+        """Parse a non-streaming SDK response object (SimpleNamespace / SDK type).
+
+        Thin classmethod entry-point used by tests and callers that have no
+        provider instance.  Mirrors the non-dict branch of ``_parse``.
+        """
+        if not response.choices:
+            return LLMResponse(content="Error: API returned empty choices.", finish_reason="error")
+
+        choice = response.choices[0]
+        msg = choice.message
+        content = getattr(msg, "content", None)
+        finish_reason = getattr(choice, "finish_reason", None)
+
+        raw_tool_calls: list[Any] = []
+        for ch in response.choices:
+            m = ch.message
+            if hasattr(m, "tool_calls") and m.tool_calls:
+                raw_tool_calls.extend(m.tool_calls)
+                if getattr(ch, "finish_reason", None) in ("tool_calls", "stop"):
+                    finish_reason = ch.finish_reason
+            if not content and getattr(m, "content", None):
+                content = m.content
+
+        tool_calls = []
+        for tc in raw_tool_calls:
+            args = tc.function.arguments
+            if isinstance(args, str):
+                args = json_repair.loads(args)
+            if isinstance(args, list) and len(args) > 0 and isinstance(args[0], dict):
+                args = args[0]
+            elif not isinstance(args, dict):
+                args = {}
+            ec, prov, fn_prov = _extract_tc_extras(tc)
+            tool_calls.append(ToolCallRequest(
+                id=_short_tool_id(),
+                name=tc.function.name,
+                arguments=args,
+                extra_content=ec,
+                provider_specific_fields=prov,
+                function_provider_specific_fields=fn_prov,
+            ))
+
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason or "stop",
+            usage=cls._extract_usage(response),
+            reasoning_content=cls._extract_reasoning_text(msg),
         )
 
     @staticmethod
