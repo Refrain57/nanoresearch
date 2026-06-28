@@ -92,3 +92,27 @@ def test_plan_query_signature_has_session_key():
     sig = inspect.signature(InternalTools.plan_query)
     assert "session_key" in sig.parameters
     assert sig.parameters["session_key"].default is None
+
+
+async def test_run_plan_phase_forwards_session_key():
+    """_run_plan_phase 必须从 session.caller_session_key 读出并传给 plan_query。"""
+    from unittest.mock import AsyncMock
+    from nanoresearch.rag.internal_loop.runner import RAGLoopRunner
+
+    runner = RAGLoopRunner()
+    # avoid heavy init
+    runner._initialized = True
+    runner._tools = AsyncMock()
+    runner._tools.plan_query = AsyncMock(return_value={"sub_queries": [], "complexity": "simple"})
+
+    session = SessionState(
+        session_id="abc",
+        original_query="它是什么",
+        caller_session_key="telegram:42",
+    )
+
+    await runner._run_plan_phase(session, messages=[])
+
+    call_kwargs = runner.tools.plan_query.call_args.kwargs
+    assert call_kwargs.get("session_key") == "telegram:42"
+    assert call_kwargs.get("query") == "它是什么"

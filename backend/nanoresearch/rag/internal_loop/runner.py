@@ -403,6 +403,7 @@ class RAGLoopRunner:
         plan_dict = await self.tools.plan_query(
             query=session.original_query,
             context=session.context,
+            session_key=session.caller_session_key,
         )
 
         # Convert to PlanResult
