@@ -122,7 +122,8 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     # RAG 图片静态文件服务（必须在前端 "/" 挂载之前）
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles
-    rag_images_dir = Path.home() / ".nanoresearch" / "rag" / "images"
+    from nanoresearch.config.loader import get_nanoresearch_home
+    rag_images_dir = get_nanoresearch_home() / "rag" / "images"
     rag_images_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/rag-images", StaticFiles(directory=str(rag_images_dir)), name="rag-images")
 

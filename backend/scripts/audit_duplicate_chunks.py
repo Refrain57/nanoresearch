@@ -9,7 +9,9 @@ from pathlib import Path
 
 import chromadb
 
-CHROMA_PATH = Path.home() / ".nanoresearch" / "rag" / "chroma"
+from nanoresearch.config.loader import get_nanoresearch_home
+
+CHROMA_PATH = get_nanoresearch_home() / "rag" / "chroma"
 if not CHROMA_PATH.exists():
     sys.exit(f"ChromaDB not found at {CHROMA_PATH}")
 

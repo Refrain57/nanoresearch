@@ -114,3 +114,12 @@ def test_nanobot_home_legacy_env_is_translated(monkeypatch, tmp_path, recwarn):
     assert any("NANORESEARCH_HOME" in m for m in deprecation_msgs), (
         f"expected a DeprecationWarning naming both NANOBOT_HOME and NANORESEARCH_HOME, got {deprecation_msgs}"
     )
+
+
+def test_default_settings_path_follows_nanoresearch_home(monkeypatch, tmp_path):
+    from nanoresearch.rag.core.settings import default_settings_path
+
+    monkeypatch.delenv("NANOBOT_HOME", raising=False)
+    monkeypatch.setenv("NANORESEARCH_HOME", str(tmp_path / "rag_tenant"))
+
+    assert default_settings_path() == tmp_path / "rag_tenant" / "settings.yaml"

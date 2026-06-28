@@ -19,6 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from nanoresearch.config.loader import get_nanoresearch_home
+
 
 async def main(workspace: Path, uid: str) -> None:
     database_url = os.environ.get("DATABASE_URL")
@@ -106,7 +108,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Migrate JSONL sessions to PostgreSQL")
     parser.add_argument(
         "--workspace",
-        default=str(Path.home() / ".nanoresearch" / "workspace"),
+        default=str(get_nanoresearch_home() / "workspace"),
         help="Workspace path (default: ~/.nanoresearch/workspace)",
     )
     parser.add_argument("--uid", default="admin", help="User UID to assign sessions to (default: admin)")

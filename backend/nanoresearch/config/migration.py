@@ -79,10 +79,10 @@ def migrate_llm_keys(
         - skipped_no_provider: list of ``{section, provider}``
         - errors: list of ``{section, message}``
     """
-    from nanoresearch.rag.core.settings import DEFAULT_SETTINGS_PATH
+    from nanoresearch.rag.core.settings import default_settings_path
 
     # --- resolve paths ---
-    settings_path = settings_path or DEFAULT_SETTINGS_PATH
+    settings_path = settings_path or default_settings_path()
     config_path = config_path or get_config_path()
 
     report: dict[str, Any] = {

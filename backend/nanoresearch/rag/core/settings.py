@@ -14,8 +14,11 @@ import yaml
 # Anchored to this file's location: <repo>/nanoresearch/rag/core/settings.py → parents[3]
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
-# Default settings path - user-level config
-DEFAULT_SETTINGS_PATH: Path = Path.home() / ".nanoresearch" / "settings.yaml"
+# Default settings path - user-level config (lazy so NANORESEARCH_HOME overrides take effect)
+def default_settings_path() -> Path:
+    """Return the active default ``settings.yaml`` path under the current NANORESEARCH_HOME."""
+    from nanoresearch.config.loader import get_nanoresearch_home
+    return get_nanoresearch_home() / "settings.yaml"
 
 
 def resolve_path(relative: Union[str, Path]) -> Path:
@@ -362,9 +365,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
         if env_path:
             path = env_path
         else:
-            path = DEFAULT_SETTINGS_PATH
+            path = default_settings_path()
 
-    settings_path = Path(path) if path is not None else DEFAULT_SETTINGS_PATH
+    settings_path = Path(path) if path is not None else default_settings_path()
     # Environment variable paths: if relative, resolve from CWD (not REPO_ROOT)
     if path is not None and not settings_path.is_absolute():
         if _os.environ.get("RAG_SETTINGS_PATH"):
@@ -410,7 +413,8 @@ def _warn_deprecated_api_keys(raw: dict) -> None:
 
 def _warn_legacy_settings_path(loaded_path: Path) -> None:
     """Warn if the old ~/.nanoresearch/rag/settings.yaml exists."""
-    rag_settings = Path.home() / ".nanoresearch" / "rag" / "settings.yaml"
+    from nanoresearch.config.loader import get_nanoresearch_home
+    rag_settings = get_nanoresearch_home() / "rag" / "settings.yaml"
     if rag_settings.exists() and rag_settings.resolve() != loaded_path.resolve():
         import warnings as _warnings
         _warnings.warn(

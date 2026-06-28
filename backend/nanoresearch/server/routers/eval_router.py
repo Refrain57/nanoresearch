@@ -1008,7 +1008,8 @@ async def _build_eval_agent_loop(uid: str, app_state):
     factory = app_state.session_factory
     user_cfg = await UserSettingsRepository(factory).get(uid)
 
-    base: Path = cfg.get("base_workspace") or Path.home() / ".nanoresearch" / "workspace"
+    from nanoresearch.config.loader import get_nanoresearch_home
+    base: Path = cfg.get("base_workspace") or get_nanoresearch_home() / "workspace"
     ws = base / "users" / uid
     ws.mkdir(parents=True, exist_ok=True)
 
