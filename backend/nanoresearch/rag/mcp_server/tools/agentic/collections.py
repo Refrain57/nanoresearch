@@ -590,9 +590,10 @@ For actual content retrieval, use memory_search to search research knowledge."""
         try:
             import json
             from pathlib import Path
+            from nanoresearch.config.loader import get_nanoresearch_home
             from nanoresearch.providers.openai_compat_provider import OpenAICompatProvider
 
-            config_path = Path.home() / ".nanoresearch" / "config.json"
+            config_path = get_nanoresearch_home() / "config.json"
             if config_path.exists():
                 config = json.loads(config_path.read_text())
                 agents_config = config.get("agents", {}).get("defaults", {})
@@ -661,9 +662,10 @@ For actual content retrieval, use memory_search to search research knowledge."""
         try:
             import json as _json
             from pathlib import Path as _Path
+            from nanoresearch.config.loader import get_nanoresearch_home as _get_nanoresearch_home
             from nanoresearch.providers.openai_compat_provider import OpenAICompatProvider
 
-            config_path = _Path.home() / ".nanoresearch" / "config.json"
+            config_path = _get_nanoresearch_home() / "config.json"
             if config_path.exists():
                 config = _json.loads(config_path.read_text())
                 agents_config = config.get("agents", {}).get("defaults", {})
@@ -790,7 +792,8 @@ Returns:
             # ── File validation ──
             path = Path(file_path)
             if not path.is_absolute():
-                path = Path.home() / ".nanoresearch" / "workspace" / file_path
+                from nanoresearch.config.loader import get_nanoresearch_home
+                path = get_nanoresearch_home() / "workspace" / file_path
 
             if not path.exists():
                 return build_json_response({
@@ -851,7 +854,8 @@ Returns:
                 })
 
             # ── Copy to permanent storage ──
-            doc_dir = Path.home() / ".nanoresearch" / "rag" / "documents" / kb_id
+            from nanoresearch.config.loader import get_nanoresearch_home
+            doc_dir = get_nanoresearch_home() / "rag" / "documents" / kb_id
             doc_dir.mkdir(parents=True, exist_ok=True)
             try:
                 path.relative_to(doc_dir)
