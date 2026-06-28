@@ -2,8 +2,22 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { getMySettings, updateMySettings } from '@/apis/settings'
 
+const ROLE_NAMES = [
+  'chat',
+  'ingestion_llm',
+  'embedding',
+  'vision',
+  'eval_generator',
+  'eval_evaluator',
+]
+
+function emptyRoles() {
+  return Object.fromEntries(ROLE_NAMES.map(r => [r, null]))
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   const providers = ref([])
+  const roles = ref(emptyRoles())
   const baseModel = ref(null)
   const ragasGeneratorModel = ref(null)
   const ragasEvaluatorModel = ref(null)
@@ -16,24 +30,19 @@ export const useSettingsStore = defineStore('settings', () => {
     return [...new Set(fromProviders)].map(m => ({ value: m, label: m }))
   })
 
-  // Provider coverage: which functional roles are covered by at least one keyed provider
-  const coverage = computed(() => {
-    const hasAny = providers.value.some(p => p.api_key_set)
-    const embProviderNames = ['dashscope', 'openai', 'azure_openai', 'siliconflow']
-    const hasEmbedding = providers.value.some(p =>
-      p.api_key_set && (
-        embProviderNames.includes((p.name || '').toLowerCase()) ||
-        (p.models || []).some(m => /embed/i.test(m))
-      )
-    )
-    return { hasChat: hasAny, hasEmbedding }
-  })
+  // Provider coverage: which roles have an explicit provider assignment.
+  const coverage = computed(() => ({
+    hasChat: !!roles.value?.chat?.provider_id,
+    hasEmbedding: !!roles.value?.embedding?.provider_id,
+  }))
 
   async function fetchAll() {
     loading.value = true
     try {
       const s = await getMySettings()
       providers.value = s.providers || []
+      const fetchedRoles = s.roles || {}
+      roles.value = { ...emptyRoles(), ...fetchedRoles }
       baseModel.value = s.model || null
       ragasGeneratorModel.value = s.ragas_generator_model
       ragasEvaluatorModel.value = s.ragas_evaluator_model
@@ -46,6 +55,12 @@ export const useSettingsStore = defineStore('settings', () => {
   async function saveProviders(providerList) {
     const s = await updateMySettings({ providers: providerList })
     providers.value = s.providers || []
+    roles.value = { ...emptyRoles(), ...(s.roles || {}) }
+  }
+
+  async function saveRoles(rolesMap) {
+    const s = await updateMySettings({ roles: rolesMap })
+    roles.value = { ...emptyRoles(), ...(s.roles || {}) }
   }
 
   async function saveBaseModel(model) {
@@ -65,9 +80,9 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   return {
-    providers, allModelOptions, coverage, baseModel,
+    providers, roles, allModelOptions, coverage, baseModel,
     ragasGeneratorModel, ragasEvaluatorModel, ragasEmbeddingModel,
     loading,
-    fetchAll, saveProviders, saveBaseModel, saveRagasSettings,
+    fetchAll, saveProviders, saveRoles, saveBaseModel, saveRagasSettings,
   }
 })
