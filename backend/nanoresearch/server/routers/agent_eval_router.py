@@ -148,6 +148,14 @@ async def annotate_badcase(
 # Test Cases
 # ---------------------------------------------------------------------------
 
+@router.get("/cases/audit")
+async def cases_audit(
+    repo: AgentEvalRepository = Depends(_repo),
+) -> dict:
+    """Return audit summary of test case metadata coverage (B4)."""
+    return await repo.audit_test_cases()
+
+
 @router.get("/testcases")
 async def list_testcases(
     dataset_type: str | None = Query(None),

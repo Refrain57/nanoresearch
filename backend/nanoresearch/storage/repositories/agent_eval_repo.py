@@ -295,6 +295,40 @@ class AgentEvalRepository:
             )
             await session.commit()
 
+    async def audit_test_cases(self) -> dict:
+        """Return audit summary of test case metadata coverage.
+
+        Returns:
+            {
+                "total": int,                              # total active test cases
+                "by_dimension": dict[str, int],            # histogram by target_dimension
+                "orphaned": list[{"id": str, "name": str}], # cases with origin_badcase_id IS NULL
+            }
+        """
+        from sqlalchemy import func, select
+
+        from nanoresearch.storage.models import AgentTestCase
+
+        async with self._factory() as session:
+            total_q = select(func.count()).select_from(AgentTestCase).where(AgentTestCase.is_active.is_(True))
+            total = (await session.execute(total_q)).scalar_one()
+
+            hist_q = (
+                select(AgentTestCase.target_dimension, func.count())
+                .where(AgentTestCase.is_active.is_(True))
+                .group_by(AgentTestCase.target_dimension)
+            )
+            by_dimension = {row[0]: row[1] for row in (await session.execute(hist_q)).all()}
+
+            orphan_q = (
+                select(AgentTestCase.id, AgentTestCase.name)
+                .where(AgentTestCase.is_active.is_(True))
+                .where(AgentTestCase.origin_badcase_id.is_(None))
+            )
+            orphaned = [{"id": str(row[0]), "name": row[1]} for row in (await session.execute(orphan_q)).all()]
+
+        return {"total": total, "by_dimension": by_dimension, "orphaned": orphaned}
+
     async def list_pending_cases(
         self,
         page: int = 1,
