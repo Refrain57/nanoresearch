@@ -66,6 +66,14 @@
             配置供应商后，模型名称可在 Agent 页面的模型选择中使用
           </div>
 
+          <a-alert
+            type="info"
+            show-icon
+            style="margin-bottom: 12px; font-size: 12px"
+            message="至少需要填两组 key"
+            :description="providerGuideDesc"
+          />
+
           <div v-if="settingsStore.providers.length === 0" class="empty-providers">
             尚未配置供应商，点击右侧「添加」
           </div>
@@ -269,6 +277,11 @@ async function saveBootstrapFile(file) {
     file.saving = false
   }
 }
+
+const providerGuideDesc = `• 一组用于 Chat（如 deepseek / openai）
+• 一组用于 Embedding（如 dashscope / openai；deepseek 不提供 embedding）
+
+每个 provider 行的"models"字段标注此 key 能跑的模型；多 provider 共存时，按 model 精确匹配优先，匹配不到走第一个有 key 的 provider 兜底。`
 
 const localBaseModel = ref('')
 const baseModelSaving = ref(false)

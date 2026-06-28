@@ -16,6 +16,19 @@ export const useSettingsStore = defineStore('settings', () => {
     return [...new Set(fromProviders)].map(m => ({ value: m, label: m }))
   })
 
+  // Provider coverage: which functional roles are covered by at least one keyed provider
+  const coverage = computed(() => {
+    const hasAny = providers.value.some(p => p.api_key_set)
+    const embProviderNames = ['dashscope', 'openai', 'azure_openai', 'siliconflow']
+    const hasEmbedding = providers.value.some(p =>
+      p.api_key_set && (
+        embProviderNames.includes((p.name || '').toLowerCase()) ||
+        (p.models || []).some(m => /embed/i.test(m))
+      )
+    )
+    return { hasChat: hasAny, hasEmbedding }
+  })
+
   async function fetchAll() {
     loading.value = true
     try {
@@ -52,7 +65,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   return {
-    providers, allModelOptions, baseModel,
+    providers, allModelOptions, coverage, baseModel,
     ragasGeneratorModel, ragasEvaluatorModel, ragasEmbeddingModel,
     loading,
     fetchAll, saveProviders, saveBaseModel, saveRagasSettings,

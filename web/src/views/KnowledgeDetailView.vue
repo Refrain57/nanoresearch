@@ -21,14 +21,17 @@
         <!-- Tab 1: Documents -->
         <a-tab-pane key="docs" tab="文档">
           <div class="tab-toolbar">
-            <a-upload
-              :show-upload-list="false"
-              :before-upload="openUploadModal"
-              accept=".pdf,.md,.txt,.docx"
-              :multiple="false"
-            >
-              <a-button type="primary"><upload-outlined /> 上传文档</a-button>
-            </a-upload>
+            <a-tooltip :title="settingsStore.coverage.hasEmbedding ? '' : '缺 embedding provider，请到 Settings 添加'">
+              <a-upload
+                :show-upload-list="false"
+                :before-upload="settingsStore.coverage.hasEmbedding ? openUploadModal : () => false"
+                accept=".pdf,.md,.txt,.docx"
+                :multiple="false"
+                :disabled="!settingsStore.coverage.hasEmbedding"
+              >
+                <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding"><upload-outlined /> 上传文档</a-button>
+              </a-upload>
+            </a-tooltip>
           </div>
 
           <a-table
@@ -112,16 +115,26 @@
         <!-- Tab 3: Test Query -->
         <a-tab-pane key="query" tab="测试检索">
           <div class="query-panel">
+            <a-alert
+              v-if="!settingsStore.coverage.hasEmbedding"
+              type="warning"
+              show-icon
+              message="缺 embedding provider，请到 Settings 添加后才能使用检索功能。"
+              style="margin-bottom: 12px"
+            />
             <div class="query-input-row">
-              <a-input
-                v-model:value="queryText"
-                placeholder="输入检索问题..."
-                @pressEnter="runQuery"
-                style="flex: 1"
-              />
+              <a-tooltip :title="settingsStore.coverage.hasEmbedding ? '' : '缺 embedding provider'">
+                <a-input
+                  v-model:value="queryText"
+                  :placeholder="settingsStore.coverage.hasEmbedding ? '输入检索问题...' : '缺 embedding provider，请到 Settings 添加'"
+                  :disabled="!settingsStore.coverage.hasEmbedding"
+                  @pressEnter="runQuery"
+                  style="flex: 1"
+                />
+              </a-tooltip>
               <a-input-number v-model:value="queryTopK" :min="1" :max="20" :step="1" style="width: 80px" />
               <a-segmented v-model:value="queryMode" :options="queryModeOptions" />
-              <a-button type="primary" :loading="queryLoading" @click="runQuery">检索</a-button>
+              <a-button type="primary" :loading="queryLoading" :disabled="!settingsStore.coverage.hasEmbedding" @click="runQuery">检索</a-button>
             </div>
 
             <a-spin :spinning="queryLoading">

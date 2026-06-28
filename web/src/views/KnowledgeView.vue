@@ -3,9 +3,11 @@
     <div class="knowledge-page">
       <div class="page-header">
         <h2>知识库</h2>
-        <a-button type="primary" @click="openCreate">
-          <plus-outlined /> 新建知识库
-        </a-button>
+        <a-tooltip :title="settingsStore.coverage.hasEmbedding ? '' : '缺 embedding provider，请到 Settings 添加'">
+          <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding" @click="openCreate">
+            <plus-outlined /> 新建知识库
+          </a-button>
+        </a-tooltip>
       </div>
 
       <a-spin :spinning="kbStore.loading">

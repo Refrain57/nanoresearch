@@ -32,6 +32,13 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       error.status = response.status
       error.data = errorData
 
+      if (response.status === 422 && errorData?.error === 'missing_provider') {
+        const role = errorData.role || 'unknown'
+        const detail = errorData.message || ''
+        message.error(`缺少 ${role} 模型的 API key${detail ? ': ' + detail : ''}，请到 Settings 添加。`)
+        // still throw so callers see the failure; the toast is just an additive user-facing hint
+      }
+
       if (response.status === 401) {
         const userStore = useUserStore()
         message.error('登录已过期，请重新登录')

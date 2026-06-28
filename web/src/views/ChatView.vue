@@ -141,18 +141,23 @@
               />
             </div>
             <div class="input-row">
-              <a-textarea
-                v-model:value="inputText"
-                :auto-size="{ minRows: 1, maxRows: 6 }"
-                placeholder="输入消息，Enter 发送，Alt+Enter 换行"
-                :disabled="chatStore.streaming"
-                @keydown="handleKeydown"
-                class="chat-input"
-              />
+              <a-tooltip
+                :title="settingsStore.coverage.hasChat ? '' : '请到 Settings 添加 Chat provider'"
+                :trigger="settingsStore.coverage.hasChat ? [] : ['hover', 'focus']"
+              >
+                <a-textarea
+                  v-model:value="inputText"
+                  :auto-size="{ minRows: 1, maxRows: 6 }"
+                  :placeholder="settingsStore.coverage.hasChat ? '输入消息，Enter 发送，Alt+Enter 换行' : '请到 Settings 添加 Chat provider'"
+                  :disabled="chatStore.streaming || !settingsStore.coverage.hasChat"
+                  @keydown="handleKeydown"
+                  class="chat-input"
+                />
+              </a-tooltip>
               <a-button
                 type="primary"
                 :loading="chatStore.streaming"
-                :disabled="!inputText.trim()"
+                :disabled="!inputText.trim() || !settingsStore.coverage.hasChat"
                 @click="handleSend"
               >发送</a-button>
             </div>
