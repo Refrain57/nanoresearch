@@ -29,7 +29,9 @@
                 :multiple="false"
                 :disabled="!settingsStore.coverage.hasEmbedding"
               >
-                <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding"><upload-outlined /> 上传文档</a-button>
+                <span :style="settingsStore.coverage.hasEmbedding ? {} : { display: 'inline-block', cursor: 'not-allowed' }">
+                  <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding"><upload-outlined /> 上传文档</a-button>
+                </span>
               </a-upload>
             </a-tooltip>
           </div>
@@ -134,7 +136,11 @@
               </a-tooltip>
               <a-input-number v-model:value="queryTopK" :min="1" :max="20" :step="1" style="width: 80px" />
               <a-segmented v-model:value="queryMode" :options="queryModeOptions" />
-              <a-button type="primary" :loading="queryLoading" :disabled="!settingsStore.coverage.hasEmbedding" @click="runQuery">检索</a-button>
+              <a-tooltip :title="settingsStore.coverage.hasEmbedding ? '' : '缺 embedding provider'">
+                <span :style="settingsStore.coverage.hasEmbedding ? {} : { display: 'inline-block', cursor: 'not-allowed' }">
+                  <a-button type="primary" :loading="queryLoading" :disabled="!settingsStore.coverage.hasEmbedding" @click="runQuery">检索</a-button>
+                </span>
+              </a-tooltip>
             </div>
 
             <a-spin :spinning="queryLoading">

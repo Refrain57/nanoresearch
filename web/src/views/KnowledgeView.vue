@@ -4,9 +4,11 @@
       <div class="page-header">
         <h2>知识库</h2>
         <a-tooltip :title="settingsStore.coverage.hasEmbedding ? '' : '缺 embedding provider，请到 Settings 添加'">
-          <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding" @click="openCreate">
-            <plus-outlined /> 新建知识库
-          </a-button>
+          <span :style="settingsStore.coverage.hasEmbedding ? {} : { display: 'inline-block', cursor: 'not-allowed' }">
+            <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding" @click="openCreate">
+              <plus-outlined /> 新建知识库
+            </a-button>
+          </span>
         </a-tooltip>
       </div>
 
