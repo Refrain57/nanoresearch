@@ -118,6 +118,14 @@ class AgentDispatcher:
         if token is None:
             return "dropped_locked"  # a run is already processing this mailbox
 
+        # Phase 1 必改 1: batch gate. If a subagent batch is in flight (pending non-empty), a
+        # user message must NOT run yet — it would read raw, un-summarized subagent results.
+        # Defer it (release the lock, leave the entry); the continuation's finalize re-notifies
+        # after the batch completes. (Platform session_key is "web:{conversation_id}".)
+        if await self._redis.scard(RedisKeys.pending(f"web:{conversation_id}")):
+            await dist_lock.release(self._redis, lock_key, token)
+            return "deferred_batch"
+
         nxt = await mailbox.read_next_after_cursor(self._redis, agent_id, conversation_id)
         if nxt is None:
             await dist_lock.release(self._redis, lock_key, token)
