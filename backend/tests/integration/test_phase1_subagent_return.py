@@ -31,3 +31,13 @@ async def test_build_run_payload_rebuilds_config_from_conversation(redis_client)
     assert payload["uid"] == "u1"
     assert payload["session_key"] == conv.session_key  # "web:bp-c1" per seed
     assert "agent_id" in payload and "skill_names" in payload  # config keys present
+
+
+async def test_has_pending_subagents(redis_client):
+    """Phase 1 T5: main run defers run_end iff it has pending subagents."""
+    import nanoresearch.worker as worker
+    sk = "web:skip-c1"
+    await redis_client.sadd(RedisKeys.pending(sk), "t1:1000")
+    assert await worker._has_pending_subagents(redis_client, sk) is True
+    await redis_client.delete(RedisKeys.pending(sk))
+    assert await worker._has_pending_subagents(redis_client, sk) is False

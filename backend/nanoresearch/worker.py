@@ -156,12 +156,23 @@ async def startup(ctx: dict) -> None:
     ctx["loop_config"] = await build_loop_config()
     ctx["session_factory"] = ctx["loop_config"]["session_factory"]
     ctx["rag_settings"] = ctx["loop_config"].get("rag_settings")
+
+    # Phase 1: ARQ pool so subagents can enqueue the continuation run directly (bypassing the
+    # inbox). The continuation reuses the original run_id and is gated by the agent lock.
+    from arq import create_pool
+    from arq.connections import RedisSettings as ArqRedisSettings
+    ctx["arq_pool"] = await create_pool(ArqRedisSettings.from_dsn(REDIS_URL))
     logger.info("ARQ worker startup complete")
 
 
 async def shutdown(ctx: dict) -> None:
     from nanoresearch.storage.database import _engine
 
+    try:
+        if ctx.get("arq_pool") is not None:
+            await ctx["arq_pool"].aclose()
+    except Exception:
+        pass
     if _engine is not None:
         try:
             await _engine.dispose()
@@ -248,6 +259,15 @@ async def _run_simple_rag_job(
 # Main ARQ job
 # ---------------------------------------------------------------------------
 
+async def _has_pending_subagents(redis, session_key: str) -> bool:
+    """Phase 1: True if this run spawned subagents that haven't all completed yet."""
+    from nanoresearch.bus.redis_keys import RedisKeys
+    try:
+        return bool(await redis.scard(RedisKeys.pending(session_key)))
+    except Exception:
+        return False
+
+
 async def _finalize_mailbox_run(redis, *, agent_id, conversation_id, lock_key, lock_token, entry_id):
     """Atomic finalize via one Lua (advance cursor → re-notify if backlog → release LAST,
     token-gated). The lock is freed only after the next notify is already in place, so there is
@@ -321,8 +341,10 @@ async def run_agent_job(
     run_repo = RunRepository(factory)
     start = _utcnow()
 
-    # Phase 0: mailbox lock lifecycle (only when the dispatcher supplied lock metadata).
-    _mailbox_enabled = bool(_lock_key and _lock_token and _entry_id)
+    # Phase 0/1: mailbox lock lifecycle. entry_id is present for dispatcher-enqueued runs and
+    # absent (None) for the Phase 1 continuation (it bypasses the inbox but still owns the lock,
+    # so it still needs the refresher + a release-only finalize).
+    _mailbox_enabled = bool(_lock_key and _lock_token)
     _refresh_stop = asyncio.Event()
     _abort_evt = asyncio.Event()
     _refresh_task = None
@@ -445,23 +467,14 @@ async def run_agent_job(
                 redis, _lock_key, _lock_token, 30_000, _refresh_stop, _abort_evt, _proc_task))
         await _proc_task   # refresher cancels this on lease loss → CancelledError
 
-        # Wait for sub-agents: SCARD-only polling.  Subagents write directly to
-        # run_events:{run_id}, so SSE picks them up without a relay.
-        _MAX_WAIT, _waited = 1800, 0
-        while _waited < _MAX_WAIT:
-            if await _check_cancel():
-                break
-            try:
-                _pending = await redis.scard(RedisKeys.pending(session_key))
-            except Exception:
-                logger.warning("Redis SCARD(pending) failed — exiting wait loop")
-                break
-            if not _pending:
-                break
-            await asyncio.sleep(5)
-            _waited += 5
-            if _waited % 30 == 0:
-                await xadd_event(redis, run_stream_key, {"type": "heartbeat"})
+        # Phase 1: if this run spawned subagents (pending non-empty), do NOT finish the turn.
+        # Leave status=running and emit NO run_end — the run_events stream stays open so the
+        # frontend keeps streaming subagent output, and the continuation run (reusing this
+        # run_id, enqueued by the join when the batch completes) emits run_end after summarizing.
+        # The Phase 0 `finally` still runs on this return (releases the inbox lock etc.).
+        if await _has_pending_subagents(redis, session_key):
+            logger.info("run_agent_job %s spawned subagents — deferring run_end to continuation", run_id)
+            return
 
         finished = _utcnow()
         duration_ms = int((finished - start).total_seconds() * 1000)
