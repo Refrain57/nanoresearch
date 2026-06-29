@@ -150,3 +150,21 @@ async def test_watchdog_stuck_running_emits_run_end(redis_client):
     evs, _ = await xread_next(redis_client, RedisKeys.run_events(str(run.id)), "0-0", timeout_ms=300)
     assert any(e.get("type") == "run_end" and e.get("status") == "failed" for e in evs)
     assert (await RunRepository(factory).get(run.id)).status == "failed"
+
+
+async def test_ac5_subagent_still_streams_to_frontend(redis_client, monkeypatch):
+    """AC5: a finished subagent still writes a subagent_result event to run_events:{orig run_id}
+    so the frontend SSE display is unchanged."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    from nanoresearch.bus.stream import xread_next
+    factory, conv = await _seed_conv()
+    sk = f"web:{conv.id}"
+    await redis_client.sadd(RedisKeys.pending(sk), "t1:1000")
+    mgr = _subagent_mgr(factory, str(conv.id), _FakeArqPool())
+    origin = {"channel": "web", "chat_id": str(conv.id), "run_id": "orig-9"}
+
+    await mgr._report_and_join("t1", "L", "task", "RESULT-BODY", origin, "ok", sk)
+
+    evs, _ = await xread_next(redis_client, RedisKeys.run_events("orig-9"), "0-0", timeout_ms=300)
+    assert any(e.get("type") == "subagent_result" for e in evs)
