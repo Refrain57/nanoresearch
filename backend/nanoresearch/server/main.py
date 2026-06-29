@@ -67,6 +67,12 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
         from nanoresearch.bus.redis_client import REDIS_URL
         app.state.arq_pool = await create_pool(ArqRedisSettings.from_dsn(REDIS_URL))
 
+        # AgentDispatcher — the SOLE job enqueuer: consumes the notify stream and enqueues
+        # run_agent_job per mailbox. Depends on redis + arq_pool (both initialised above).
+        from nanoresearch.bus.dispatcher import AgentDispatcher
+        app.state.dispatcher = AgentDispatcher(app.state.redis, app.state.arq_pool)
+        await app.state.dispatcher.start()
+
         if channel_manager:
             # Channels route inbound messages via bus → channel_loop.run() must be active
             tasks.append(asyncio.create_task(channel_loop.run()))
@@ -81,6 +87,8 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if getattr(app.state, "dispatcher", None):
+            await app.state.dispatcher.stop()
         await app.state.pending_reaper.stop()
         await app.state.redis_monitor.stop()
         try:
@@ -99,6 +107,7 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     app.state.arq_pool = None      # initialised in lifespan before first request
     app.state.redis = None         # initialised in lifespan before first request
     app.state.redis_monitor = None # initialised in lifespan before first request
+    app.state.dispatcher = None    # initialised in lifespan before first request
     app.state.rag_settings = rag_settings  # loaded lazily if None
     app.state.allowed_models = allowed_models or []
     app.state.config = config
