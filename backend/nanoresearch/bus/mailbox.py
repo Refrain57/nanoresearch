@@ -93,16 +93,87 @@ return 1
 """
 
 
+# Phase 1: release-only finalize for the continuation run (it bypasses the inbox, so there is
+# NO entry to advance the cursor past). Atomic: token-check → (if inbox backlog after the
+# current cursor) re-notify → release lock LAST. Reads/derives next-id from the cursor in Lua so
+# the whole thing is one atomic step (no exposure window before the queued user message runs).
+# KEYS[1]=lock KEYS[2]=inbox KEYS[3]=cursor KEYS[4]=notify
+# ARGV[1]=token ARGV[2]=mailbox_key ARGV[3]=cursor_key ARGV[4]=lock_key
+RELEASE_ONLY_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+local cursor = redis.call('GET', KEYS[3])
+if not cursor then cursor = '0-0' end
+local dash = string.find(cursor, '-')
+local ms = string.sub(cursor, 1, dash - 1)
+local seq = tonumber(string.sub(cursor, dash + 1))
+local nextid = ms .. '-' .. tostring(seq + 1)
+local nxt = redis.call('XRANGE', KEYS[2], nextid, '+', 'COUNT', 1)
+if #nxt > 0 then
+    redis.call('XADD', KEYS[4], '*', 'mailbox_key', ARGV[2], 'cursor_key', ARGV[3], 'lock_key', ARGV[4])
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
+
 async def finalize_and_release(
     redis: Any, *, agent_id: str, conversation_id: str,
-    lock_key: str, token: str, entry_id: str, ttl: int = RedisKeys.AGENT_INBOX_TTL,
+    lock_key: str, token: str, entry_id: str | None, ttl: int = RedisKeys.AGENT_INBOX_TTL,
 ) -> bool:
     inbox = RedisKeys.agent_inbox(agent_id, conversation_id)
     cursor = RedisKeys.agent_inbox_cursor(agent_id, conversation_id)
+    if entry_id is None:
+        # Continuation run: no inbox entry was consumed — release lock + re-notify backlog only.
+        res = await redis.eval(
+            RELEASE_ONLY_LUA, 4,
+            lock_key, inbox, cursor, RedisKeys.DISPATCH_NOTIFY,             # KEYS
+            token, inbox, cursor, lock_key,                                # ARGV
+        )
+        return bool(res)
     res = await redis.eval(
         FINALIZE_LUA, 4,
         lock_key, inbox, cursor, RedisKeys.DISPATCH_NOTIFY,                  # KEYS
         token, entry_id, str(ttl), inbox, cursor, lock_key,                 # ARGV[1..6]
         _next_stream_id(entry_id),                                          # ARGV[7]
+    )
+    return bool(res)
+
+
+# Phase 1 必改 1: atomic subagent join that ALSO acquires the agent lock the instant it
+# empties the pending set. Removing the last pending member and taking the lock happen in one
+# atomic EVAL, so a dispatcher cannot grab the (otherwise free) lock in the gap between "batch
+# done" and "continuation started" — closing the user-message-vs-continuation race.
+# KEYS[1]=pending_key KEYS[2]=lock_key  ARGV[1]=task_id ARGV[2]=lock_token ARGV[3]=lock_px_ms
+# Returns 1 iff this call removed the last member AND acquired the lock (→ fire the
+# continuation with the given token); else 0.
+JOIN_ACQUIRE_LUA = """
+local members = redis.call('SMEMBERS', KEYS[1])
+local prefix = ARGV[1] .. ':'
+for i = 1, #members do
+    local m = members[i]
+    if m == ARGV[1] or string.sub(m, 1, #prefix) == prefix then
+        redis.call('SREM', KEYS[1], m)
+        break
+    end
+end
+if redis.call('SCARD', KEYS[1]) == 0 then
+    if redis.call('SET', KEYS[2], ARGV[2], 'NX', 'PX', ARGV[3]) then
+        return 1
+    end
+end
+return 0
+"""
+
+
+async def join_and_acquire(
+    redis: Any, session_key: str, task_id: str,
+    lock_key: str, lock_token: str, lock_px_ms: int = 30_000,
+) -> bool:
+    res = await redis.eval(
+        JOIN_ACQUIRE_LUA, 2,
+        RedisKeys.pending(session_key), lock_key,        # KEYS
+        task_id, lock_token, str(lock_px_ms),            # ARGV
     )
     return bool(res)
