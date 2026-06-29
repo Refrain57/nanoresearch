@@ -409,6 +409,46 @@ async def _enqueue_via_mailbox(redis, payload: dict) -> None:
     )
 
 
+async def _build_run_payload(factory, conversation_id: str, uid: str, content: str, run_id: str) -> dict:
+    """Phase 1: rebuild a run payload (agent config from the conversation). Shared by the HTTP
+    entry and the subagent/watchdog continuation wakeup so the continuation has identical agent
+    config — no persisted 'intent' state needed."""
+    conv = await ConversationRepository(factory).get_by_id(uuid.UUID(conversation_id))
+    skill_names = None
+    custom_persona = None
+    agent_harness: dict = {}
+    agent_kb_id = None
+    if conv is not None and conv.agent_id:
+        agent = await AgentRepository(factory).get_by_id(conv.agent_id)
+        if agent is not None:
+            skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
+            custom_persona = agent.persona or None
+            agent_harness = agent.harness or {}
+            if agent_harness.get("kb_id"):
+                agent_kb_id = agent_harness["kb_id"]
+    agents_registry = [
+        {"id": str(a.id), "name": a.name, "description": a.description or ""}
+        for a in await AgentRepository(factory).list_by_user(uid)
+    ]
+    return {
+        "run_id": run_id,
+        "session_key": (conv.session_key if conv else None) or f"web:{conversation_id}",
+        "conversation_id": conversation_id,
+        "content": content,
+        "uid": uid,
+        "rag_mode": "agentic",
+        "kb_id": None,
+        "skill_names": skill_names,
+        "agent_id": str(conv.agent_id) if conv and conv.agent_id else None,
+        "agent_override": None,
+        "custom_persona": custom_persona,
+        "harness": agent_harness or None,
+        "agents_registry": agents_registry or None,
+        "agent_kb_id": agent_kb_id,
+        "job_id": None,
+    }
+
+
 async def _get_conv_or_404(conv_id: str, uid: str, request: Request):
     factory = request.app.state.session_factory
     repo = ConversationRepository(factory)
