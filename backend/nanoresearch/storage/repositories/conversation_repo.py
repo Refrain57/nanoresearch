@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from nanoresearch.storage.models import Conversation, Message
@@ -136,6 +136,25 @@ class ConversationRepository:
                     content=msg,
                     seq=seq,
                 ))
+            await db.commit()
+
+    async def append_message(self, session_key: str, message: dict) -> None:
+        """Insert ONE Message row at seq = current count (Phase 1 subagent results).
+
+        Concurrent appends may collide on seq — benign: ordering is authoritative in the
+        Redis session list, and the next replace_messages re-seqs the whole window.
+        """
+        async with self._factory() as db:
+            conv = (await db.execute(
+                select(Conversation).where(Conversation.session_key == session_key)
+            )).scalar_one_or_none()
+            if conv is None:
+                return
+            count = (await db.execute(
+                select(func.count(Message.id)).where(Message.conversation_id == conv.id)
+            )).scalar() or 0
+            db.add(Message(conversation_id=conv.id, role=message.get("role", "user"),
+                           content=message, seq=count))
             await db.commit()
 
     async def list_all(self, uid: str) -> list[dict]:

@@ -239,6 +239,43 @@ class SessionManager:
     def invalidate(self, key: str) -> None:
         self._cache.pop(key, None)
 
+    async def append_message(self, session_key: str, message: dict, uid: str) -> None:
+        """Atomically append ONE message to the session: Redis RPUSH + DB insert (Phase 1).
+
+        Atomic RPUSH makes concurrent appends (parallel subagents) safe without a
+        read-modify-write. Only used between runs (no run is writing concurrently, since the
+        join fires only when the whole batch is done), so it never races a full-overwrite save.
+        """
+        import json as _json
+
+        from nanoresearch.utils.helpers import utcnow_aware
+        entry = dict(message)
+        entry.setdefault("timestamp", utcnow_aware().isoformat())
+
+        # Redis session list — atomic append. This is the visibility-critical write (the
+        # continuation run reads the session from Redis), so let it RAISE on failure: the
+        # caller (_report_and_join) must then NOT advance the join (必改 2).
+        from nanoresearch.bus.redis_client import get_redis
+        from nanoresearch.bus.redis_keys import RedisKeys
+        redis = get_redis()
+        ch, chat_id = (session_key.split(":", 1) if ":" in session_key else (session_key, ""))
+        msg_key = RedisKeys.session_msg(uid, ch, chat_id)
+        await redis.rpush(msg_key, _json.dumps(entry, ensure_ascii=False))
+        await redis.expire(msg_key, RedisKeys.SESSION_TTL)
+
+        # L1 in-memory session, if present, stays consistent (after Redis succeeded)
+        if session_key in self._cache:
+            self._cache[session_key].messages.append(entry)
+
+        # DB insert — best-effort; seq races benign, and the continuation's replace_messages
+        # re-seqs the whole window from Redis on its next save.
+        if self._factory is not None:
+            try:
+                from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+                await ConversationRepository(self._factory).append_message(session_key, entry)
+            except Exception as e:
+                logger.warning("append_message db insert failed (non-fatal): {}", e)
+
     async def list_sessions(self) -> list[dict[str, Any]]:
         if self._factory is not None:
             return await self._db_list()
