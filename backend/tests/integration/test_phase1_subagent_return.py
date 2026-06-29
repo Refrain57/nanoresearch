@@ -113,3 +113,40 @@ async def test_subagent_append_failure_does_not_advance_join(redis_client, monke
     await mgr._report_and_join("t1", "L", "task", "result", origin, "ok", sk)
     assert await redis_client.scard(RedisKeys.pending(sk)) == 1  # NOT removed
     assert pool.jobs == []                                       # NOT fired
+
+
+async def test_watchdog_stale_pending_advances_join_and_wakes(redis_client, monkeypatch):
+    """Phase 1 T7: a stale (crashed/stuck) subagent is reaped → join advanced + main woken."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    from nanoresearch.heartbeat.stuck_run_watchdog import StuckRunWatchdog
+    factory, conv = await _seed_conv()
+    sk = f"web:{conv.id}"
+    await redis_client.sadd(RedisKeys.pending(sk), "dead:1000000000")  # ts in year 2001 → stale
+    pool = _FakeArqPool()
+
+    wd = StuckRunWatchdog(redis_client, factory, pool, subagent_stale=1)
+    await wd._scan_once()
+
+    assert await redis_client.scard(RedisKeys.pending(sk)) == 0   # join advanced
+    assert len(pool.jobs) == 1                                    # continuation woken (real run_id)
+    assert pool.jobs[0][1]["run_id"]                              # non-empty run_id (修正)
+
+
+async def test_watchdog_stuck_running_emits_run_end(redis_client):
+    """Phase 1 T7: a run stuck in 'running' past the ceiling gets reaped + run_end (unblocks SSE)."""
+    from datetime import datetime, timezone, timedelta
+    from nanoresearch.bus.stream import xread_next
+    from nanoresearch.heartbeat.stuck_run_watchdog import StuckRunWatchdog
+    from nanoresearch.storage.repositories.run_repo import RunRepository
+    factory, conv = await _seed_conv()
+    run = await RunRepository(factory).create(conversation_id=conv.id, uid="u1")
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    await RunRepository(factory).update(run.id, status="running", started_at=old)
+
+    wd = StuckRunWatchdog(redis_client, factory, _FakeArqPool(), run_stuck=1)
+    await wd._scan_once()
+
+    evs, _ = await xread_next(redis_client, RedisKeys.run_events(str(run.id)), "0-0", timeout_ms=300)
+    assert any(e.get("type") == "run_end" and e.get("status") == "failed" for e in evs)
+    assert (await RunRepository(factory).get(run.id)).status == "failed"

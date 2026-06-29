@@ -104,6 +104,15 @@ class RunRepository:
             )
             return list(result.scalars().all())
 
+    async def list_stuck_running(self, older_than: datetime) -> list[AgentRun]:
+        """Runs still 'running' whose started_at is before *older_than* (Phase 1 watchdog)."""
+        async with self._factory() as db:
+            result = await db.execute(
+                select(AgentRun).where(
+                    AgentRun.status == "running", AgentRun.started_at < older_than)
+            )
+            return list(result.scalars().all())
+
     async def list_by_conversation(self, conversation_id: uuid.UUID) -> list[AgentRun]:
         async with self._factory() as db:
             result = await db.execute(
