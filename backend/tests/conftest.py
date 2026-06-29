@@ -69,3 +69,33 @@ def make_factory(url: str = TEST_DB_URL) -> async_sessionmaker:
 def setup_database():
     """Create all tables once per session."""
     create_tables()
+
+
+# ── Redis fixture (Phase 0 bus tests) ─────────────────────────────────────────
+
+import pytest_asyncio  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def redis_client():
+    """Async Redis client against test DB 15; skip if Redis unreachable.
+
+    Flushes DB 15 before and after each test so cases never bleed into each other.
+    DB 15 keeps tests isolated from any dev/prod Redis data on DB 0.
+    """
+    import os
+
+    import redis.asyncio as aioredis
+
+    url = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
+    r = aioredis.from_url(url, decode_responses=True)
+    try:
+        await r.ping()
+    except Exception:
+        pytest.skip("Redis not reachable for tests")
+    await r.flushdb()
+    yield r
+    try:
+        await r.flushdb()
+    finally:
+        await r.aclose()
