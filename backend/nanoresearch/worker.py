@@ -248,6 +248,44 @@ async def _run_simple_rag_job(
 # Main ARQ job
 # ---------------------------------------------------------------------------
 
+async def _finalize_mailbox_run(redis, *, agent_id, conversation_id, lock_key, lock_token, entry_id):
+    """Atomic finalize via one Lua (advance cursor → re-notify if backlog → release LAST,
+    token-gated). The lock is freed only after the next notify is already in place, so there is
+    no exposure window. token mismatch → whole thing no-ops. Best-effort, never raises."""
+    from nanoresearch.bus import mailbox
+    try:
+        await mailbox.finalize_and_release(
+            redis, agent_id=agent_id, conversation_id=conversation_id,
+            lock_key=lock_key, token=lock_token, entry_id=entry_id,
+        )
+    except Exception:
+        logger.warning("finalize_mailbox_run failed (non-fatal)")
+
+
+async def _lock_refresher(redis, lock_key, lock_token, px_ms, stop_evt, abort_evt, proc_task):
+    """Extend the lock lease while the run is alive. If the lease is lost (token no longer ours),
+    set abort_evt and cancel the processing task so the run cannot keep writing unguarded — the
+    token-gated finalize then no-ops."""
+    from nanoresearch.bus import dist_lock
+    interval = px_ms / 3 / 1000.0
+    try:
+        while not stop_evt.is_set():
+            try:
+                await asyncio.wait_for(stop_evt.wait(), timeout=interval)
+                return  # stop_evt set → run finished normally
+            except asyncio.TimeoutError:
+                pass
+            if not await dist_lock.refresh(redis, lock_key, lock_token, px_ms=px_ms):
+                logger.error(
+                    "lock lease LOST for {} — aborting run to prevent unguarded writes", lock_key)
+                abort_evt.set()
+                if not proc_task.done():
+                    proc_task.cancel()
+                return
+    except asyncio.CancelledError:
+        return
+
+
 async def run_agent_job(
     ctx: dict,
     *,
@@ -266,6 +304,10 @@ async def run_agent_job(
     agent_kb_id: str | None = None,
     job_id: str | None = None,
     conversation_id: str | None = None,
+    # Phase 0 mailbox lock lifecycle (set by the dispatcher; absent for CLI/legacy).
+    _lock_key: str | None = None,
+    _lock_token: str | None = None,
+    _entry_id: str | None = None,
 ) -> None:
     """ARQ job: execute an Agent run inside the worker; events stream via Redis."""
     from nanoresearch.bus.redis_client import get_redis
@@ -278,6 +320,12 @@ async def run_agent_job(
     factory = ctx["session_factory"]
     run_repo = RunRepository(factory)
     start = _utcnow()
+
+    # Phase 0: mailbox lock lifecycle (only when the dispatcher supplied lock metadata).
+    _mailbox_enabled = bool(_lock_key and _lock_token and _entry_id)
+    _refresh_stop = asyncio.Event()
+    _abort_evt = asyncio.Event()
+    _refresh_task = None
 
     # Register idempotency lock (set in create_run, refreshed here for safety)
     if job_id:
@@ -373,7 +421,7 @@ async def run_agent_job(
                 logger.warning("Failed to build kb_map for agent %s: %s", agent_id, kb_err)
 
         _chat_id = session_key.split(":", 1)[-1]
-        await loop.process_direct(
+        _proc_task = asyncio.create_task(loop.process_direct(
             content,
             session_key=session_key,
             channel="web",
@@ -391,7 +439,11 @@ async def run_agent_job(
             kb_bindings=kb_bindings,
             kb_map=kb_map,
             conversation_id=conversation_id,
-        )
+        ))
+        if _mailbox_enabled:
+            _refresh_task = asyncio.create_task(_lock_refresher(
+                redis, _lock_key, _lock_token, 30_000, _refresh_stop, _abort_evt, _proc_task))
+        await _proc_task   # refresher cancels this on lease loss → CancelledError
 
         # Wait for sub-agents: SCARD-only polling.  Subagents write directly to
         # run_events:{run_id}, so SSE picks them up without a relay.
@@ -440,6 +492,21 @@ async def run_agent_job(
         await xadd_event(redis, run_stream_key,
                          {"type": "run_end", "status": "failed", "error": str(e)})
     finally:
+        # Phase 0: stop the lease refresher, then atomically finalize the mailbox run
+        # (advance cursor → re-notify backlog → release lock). Runs even on cancel/error.
+        if _mailbox_enabled:
+            _refresh_stop.set()
+            if _refresh_task is not None:
+                try:
+                    await _refresh_task
+                except Exception:
+                    pass
+            await _finalize_mailbox_run(
+                redis,
+                agent_id=str(agent_id) if agent_id else "none",
+                conversation_id=conversation_id,
+                lock_key=_lock_key, lock_token=_lock_token, entry_id=_entry_id,
+            )
         # Close MCP stdio connections before the job task exits to avoid anyio cancel-scope error
         if loop is not None:
             try:
