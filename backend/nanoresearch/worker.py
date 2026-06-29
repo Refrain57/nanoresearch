@@ -137,6 +137,7 @@ async def _build_agent_loop(
         uid=uid,
         session_factory=factory,
         rag_settings=cfg.get("rag_settings"),
+        arq_pool=ctx.get("arq_pool"),
     )
 
 

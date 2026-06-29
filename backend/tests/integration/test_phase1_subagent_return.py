@@ -10,14 +10,21 @@ def _clean():
     truncate_all()
 
 
-async def _seed_conv(uid="u1", key="web:bp-c1"):
+async def _seed_conv(uid="u1"):
+    """Seed a user + conversation whose session_key matches production: web:{conv.id}."""
     from nanoresearch.auth.password import hash_password
+    from nanoresearch.storage.models import Conversation
     from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
     from nanoresearch.storage.repositories.user_repo import UserRepository
     factory = make_factory()
     await UserRepository(factory).create(uid, hash_password("x"))
-    conv = await ConversationRepository(factory).create(key=key, uid=uid)
-    return factory, conv
+    conv = await ConversationRepository(factory).create(key="web:tmp", uid=uid)
+    async with factory() as db:
+        c = await db.get(Conversation, conv.id)
+        c.session_key = f"web:{conv.id}"
+        await db.commit()
+        await db.refresh(c)
+        return factory, c
 
 
 async def test_build_run_payload_rebuilds_config_from_conversation(redis_client):
@@ -29,7 +36,7 @@ async def test_build_run_payload_rebuilds_config_from_conversation(redis_client)
     assert payload["conversation_id"] == str(conv.id)
     assert payload["content"] == "请汇总"
     assert payload["uid"] == "u1"
-    assert payload["session_key"] == conv.session_key  # "web:bp-c1" per seed
+    assert payload["session_key"] == conv.session_key  # web:{conv.id} per seed
     assert "agent_id" in payload and "skill_names" in payload  # config keys present
 
 
@@ -41,3 +48,68 @@ async def test_has_pending_subagents(redis_client):
     assert await worker._has_pending_subagents(redis_client, sk) is True
     await redis_client.delete(RedisKeys.pending(sk))
     assert await worker._has_pending_subagents(redis_client, sk) is False
+
+
+class _FakeArqPool:
+    def __init__(self):
+        self.jobs = []
+
+    async def enqueue_job(self, fn, **kw):
+        self.jobs.append((fn, kw))
+
+
+def _subagent_mgr(factory, conv_id, arq_pool):
+    from pathlib import Path
+    from nanoresearch.agent.subagent import SubagentManager
+    mgr = SubagentManager(provider=None, workspace=Path("."), bus=None, model="m",
+                          uid="u1", session_factory=factory, arq_pool=arq_pool)
+    mgr.set_run_context(conversation_id=conv_id)
+    return mgr
+
+
+async def test_subagent_completion_appends_and_fires_join(redis_client, monkeypatch):
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    factory, conv = await _seed_conv()
+    sk = f"web:{conv.id}"
+    await redis_client.sadd(RedisKeys.pending(sk), "t1:1000", "t2:1001")
+    pool = _FakeArqPool()
+    mgr = _subagent_mgr(factory, str(conv.id), pool)
+    origin = {"channel": "web", "chat_id": str(conv.id), "run_id": "orig-1"}
+
+    # t1 done → append + NOT fire (t2 still pending)
+    await mgr._report_and_join("t1", "label1", "task1", "result-1", origin, "ok", sk)
+    assert await redis_client.scard(RedisKeys.pending(sk)) == 1
+    assert pool.jobs == []
+
+    # t2 done → empties pending → fire → continuation enqueued reusing original run_id
+    await mgr._report_and_join("t2", "label2", "task2", "result-2", origin, "ok", sk)
+    assert await redis_client.scard(RedisKeys.pending(sk)) == 0
+    assert len(pool.jobs) == 1
+    fn, kw = pool.jobs[0]
+    assert fn == "run_agent_job"
+    assert kw["run_id"] == "orig-1"            # reused original run_id (SSE continuity)
+    assert kw["_lock_token"] and kw.get("_entry_id") is None
+    # both results appended to the session message list
+    raw = await redis_client.lrange(RedisKeys.session_msg("u1", "web", str(conv.id)), 0, -1)
+    assert len(raw) == 2
+
+
+async def test_subagent_append_failure_does_not_advance_join(redis_client, monkeypatch):
+    """必改 2: if append fails, the join is NOT advanced (member stays for the watchdog)."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    factory, conv = await _seed_conv()
+    sk = f"web:{conv.id}"
+    await redis_client.sadd(RedisKeys.pending(sk), "t1:1000")
+    pool = _FakeArqPool()
+    mgr = _subagent_mgr(factory, str(conv.id), pool)
+    # force append_message to fail
+    import nanoresearch.session.manager as m
+    monkeypatch.setattr(m.SessionManager, "append_message",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    origin = {"channel": "web", "chat_id": str(conv.id), "run_id": "orig-1"}
+
+    await mgr._report_and_join("t1", "L", "task", "result", origin, "ok", sk)
+    assert await redis_client.scard(RedisKeys.pending(sk)) == 1  # NOT removed
+    assert pool.jobs == []                                       # NOT fired

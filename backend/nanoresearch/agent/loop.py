@@ -88,6 +88,7 @@ class AgentLoop:
         uid: str | None = None,
         session_factory: Any = None,
         rag_settings: Any = None,
+        arq_pool: Any = None,
     ):
         from nanoresearch.config.schema import ExecToolConfig, ResearchConfig, WebSearchConfig
 
@@ -133,6 +134,8 @@ class AgentLoop:
             rag_store=rag_store,
             settings=rag_settings,
             uid=uid,
+            session_factory=session_factory,
+            arq_pool=arq_pool,
         )
 
         self._uid = uid
@@ -253,6 +256,10 @@ class AgentLoop:
         """Update context for all tools that need routing info."""
         session_key = f"{channel}:{chat_id}"
         _kb_map = kb_map or {}
+
+        # Phase 1: tell the subagent manager which conversation this run belongs to, so a
+        # finished subagent can append its result + wake the main agent (web platform only).
+        self.subagents.set_run_context(conversation_id=chat_id if channel == "web" else None)
 
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
