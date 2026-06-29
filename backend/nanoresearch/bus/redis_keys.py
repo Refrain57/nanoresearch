@@ -63,6 +63,24 @@ class RedisKeys:
     def embedding(text_hash: str) -> str:
         return f"embedding:{text_hash}"
 
+    # Agent inbox / dispatch (Phase 0) — per-(agent_id, conversation_id) addressing.
+    # agent_id is "none" until Phase 2 fills real identity; structure is forward-compatible.
+    AGENT_INBOX_TTL = 86400
+    DISPATCH_NOTIFY = "dispatch_notify"
+    DISPATCH_GROUP = "dispatch_cg"
+
+    @staticmethod
+    def agent_inbox(agent_id: str, conversation_id: str) -> str:
+        return f"agent_inbox:{agent_id}:{conversation_id}"
+
+    @staticmethod
+    def agent_inbox_cursor(agent_id: str, conversation_id: str) -> str:
+        return f"agent_inbox_cursor:{agent_id}:{conversation_id}"
+
+    @staticmethod
+    def agent_lock(agent_id: str, conversation_id: str) -> str:
+        return f"agent_lock:{agent_id}:{conversation_id}"
+
     # SSE stream (unchanged)
     @staticmethod
     def chat_events(chat_id: str) -> str:

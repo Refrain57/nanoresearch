@@ -287,24 +287,35 @@ async def create_run(
     all_agents = await AgentRepository(factory).list_by_user(uid)
     agents_registry = [{"id": str(a.id), "name": a.name, "description": a.description or ""} for a in all_agents]
 
-    await request.app.state.arq_pool.enqueue_job(
-        "run_agent_job",
-        run_id=str(run_id),
-        session_key=session_key,
-        conversation_id=str(conv.id),
-        content=body.content,
-        uid=uid,
-        rag_mode=body.rag_mode,
-        kb_id=body.kb_id,
-        skill_names=skill_names,
-        agent_id=str(conv.agent_id) if conv.agent_id else None,
-        agent_override=agent_override or None,
-        custom_persona=custom_persona,
-        harness=agent_harness or None,
-        agents_registry=agents_registry or None,
-        agent_kb_id=agent_kb_id,
-        job_id=_job_id,
-    )
+    # Phase 0 (Must-fix 1): atomic idempotency gate BEFORE posting to the inbox. A duplicate
+    # submit/retry must NOT create a second inbox entry (→ second run + LLM call + write). On a
+    # lost race, return the winner's run_id without posting.
+    _JOB_TTL = 3600
+    _won = await _redis.set(RedisKeys.job(_job_id), str(run_id), nx=True, ex=_JOB_TTL)
+    if not _won:
+        _existing = await _redis.get(RedisKeys.job(_job_id))
+        return {"run_id": _existing or str(run_id),
+                "conversation_id": str(conv.id), "status": "dedup"}
+
+    # Sole-enqueuer path: post to the mailbox + notify; the dispatcher does the actual enqueue.
+    payload = {
+        "run_id": str(run_id),
+        "session_key": session_key,
+        "conversation_id": str(conv.id),
+        "content": body.content,
+        "uid": uid,
+        "rag_mode": body.rag_mode,
+        "kb_id": body.kb_id,
+        "skill_names": skill_names,
+        "agent_id": str(conv.agent_id) if conv.agent_id else None,
+        "agent_override": agent_override or None,
+        "custom_persona": custom_persona,
+        "harness": agent_harness or None,
+        "agents_registry": agents_registry or None,
+        "agent_kb_id": agent_kb_id,
+        "job_id": _job_id,
+    }
+    await _enqueue_via_mailbox(_redis, payload)
 
     return {
         "run_id": str(run_id),
@@ -376,6 +387,27 @@ async def run_events(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+async def _enqueue_via_mailbox(redis, payload: dict) -> None:
+    """Phase 0: post to the per-(agent, conversation) inbox + signal the dispatcher.
+
+    Replaces the direct ARQ enqueue so the long-lived dispatcher is the sole enqueuer
+    (no "HTTP enqueues + dispatcher enqueues" double source). agent_id is "none" until
+    Phase 2 fills real identity — so the inbox is effectively per-conversation today.
+    """
+    from nanoresearch.bus import mailbox
+    from nanoresearch.bus.redis_keys import RedisKeys
+
+    agent_id = payload.get("agent_id") or "none"
+    conversation_id = payload["conversation_id"]
+    await mailbox.post_message(redis, agent_id, conversation_id, payload)
+    await mailbox.post_notify(
+        redis,
+        mailbox_key=RedisKeys.agent_inbox(agent_id, conversation_id),
+        cursor_key=RedisKeys.agent_inbox_cursor(agent_id, conversation_id),
+        lock_key=RedisKeys.agent_lock(agent_id, conversation_id),
+    )
+
 
 async def _get_conv_or_404(conv_id: str, uid: str, request: Request):
     factory = request.app.state.session_factory
