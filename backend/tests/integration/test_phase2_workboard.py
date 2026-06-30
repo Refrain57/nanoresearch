@@ -247,3 +247,141 @@ async def test_claim_token_is_dist_lock_token(redis_client):
 
     assert token is not None
     assert await dist_lock.acquire(redis_client, RedisKeys.workboard_claim(str(card.id))) is None
+
+
+# ---------------------------------------------------------------------------
+# Task 6: card-working produce-to-card
+# ---------------------------------------------------------------------------
+
+async def test_attach_result_token_guarded(redis_client):
+    from nanoresearch.bus import workboard
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card.id, agent_id=agent.id, conv_id=conv.id)
+
+    assert await repo.attach_result(card.id, "RES", [{"f": "x"}], token=token) is True
+    assert (await repo.get(card.id)).result == "RES"
+    assert await repo.attach_result(card.id, "BAD", [], token="wrong") is False
+    assert (await repo.get(card.id)).result == "RES"  # unchanged
+
+
+async def test_create_card_rejects_oversized_spec():
+    from nanoresearch.storage.repositories.workboard_repo import WORKBOARD_MAX_SPEC_CHARS, WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x" * 100_000)
+    assert len(card.spec) <= WORKBOARD_MAX_SPEC_CHARS
+
+
+async def test_finish_card_working_ok_marks_done_and_promotes(redis_client):
+    import nanoresearch.worker as worker
+    from nanoresearch.bus import workboard
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+    child = await repo.create_card(conversation_id=conv.id, title="c", spec="x", status="todo")
+    await repo.link(card.id, child.id)
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card.id, agent_id=agent.id, conv_id=conv.id)
+
+    await worker._finish_card_working(
+        redis_client, repo, card_id=card.id, token=token, ok=True, result="R", artifacts=[])
+
+    got = await repo.get(card.id)
+    assert got.status == "done" and got.result == "R"
+    assert (await repo.get(child.id)).status == "ready"
+    assert await redis_client.get(RedisKeys.workboard_claim(str(card.id))) is None
+
+
+async def test_finish_card_working_error_marks_blocked(redis_client):
+    import nanoresearch.worker as worker
+    from nanoresearch.bus import workboard
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card.id, agent_id=agent.id, conv_id=conv.id)
+
+    await worker._finish_card_working(
+        redis_client, repo, card_id=card.id, token=token, ok=False, result="boom")
+
+    got = await repo.get(card.id)
+    assert got.status == "blocked" and "boom" in (got.result or "")
+    assert await redis_client.get(RedisKeys.workboard_claim(str(card.id))) is None
+
+
+class _FakeArqPool:
+    def __init__(self):
+        self.jobs = []
+
+    async def enqueue_job(self, fn, **kw):
+        self.jobs.append((fn, kw))
+
+
+async def test_drive_board_claims_ready_card_and_enqueues(redis_client):
+    import nanoresearch.worker as worker
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="do x",
+                                  status="ready", target_agent_id=agent.id)
+    pool = _FakeArqPool()
+
+    result = await worker._drive_board(redis_client, repo, pool, str(conv.id), conv.uid)
+
+    assert result == f"claimed:{card.id}"
+    assert (await repo.get(card.id)).status == "running"
+    fn, kw = pool.jobs[0]
+    assert fn == "run_agent_job"
+    assert kw["_card_id"] == str(card.id) and kw["_card_token"]
+    assert kw["content"] == "do x" and kw["agent_id"] == str(agent.id)
+    assert kw["session_key"] == f"web:{conv.id}"
+
+
+async def test_drive_board_wip_busy_does_nothing(redis_client):
+    import nanoresearch.worker as worker
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="run", spec="x", status="running")
+    await repo.create_card(conversation_id=conv.id, title="rdy", spec="x", status="ready",
+                           target_agent_id=agent.id)
+    pool = _FakeArqPool()
+
+    result = await worker._drive_board(redis_client, repo, pool, str(conv.id), conv.uid)
+
+    assert result == "wip_busy"
+    assert pool.jobs == []
+
+
+async def test_process_direct_forwards_session_readonly():
+    """process_direct forwards session_readonly to _process_message, where the inline guard skips
+    the session save + consolidation (serial-MVP conclusion ①(b): card-working never persists the
+    shared session). Built via __new__ to avoid AgentLoop's heavy native init in the shared suite."""
+    from nanoresearch.agent.loop import AgentLoop
+    loop = AgentLoop.__new__(AgentLoop)
+    captured = {}
+
+    async def _noop_mcp():
+        return None
+
+    async def _fake_pm(msg, **kw):
+        captured.update(kw)
+        return None
+
+    loop._connect_mcp = _noop_mcp
+    loop._process_message = _fake_pm
+
+    await loop.process_direct("hello", session_key="web:c", channel="web", chat_id="c",
+                              session_readonly=True)
+    assert captured["session_readonly"] is True
+
+    await loop.process_direct("hello", session_key="web:c", channel="web", chat_id="c")
+    assert captured["session_readonly"] is False

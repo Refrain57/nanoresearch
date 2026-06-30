@@ -365,6 +365,58 @@ async def _continuation_drain_and_append(redis, sessions, session_key, uid):
             logger.warning("continuation append staged result failed (non-fatal): {}", e)
 
 
+async def _finish_card_working(redis, repo, *, card_id, token, ok, result, artifacts=None):
+    """Phase 2 Task 6: finish a card-working run. On success write the product to the card
+    (token-gated), mark it done, and promote any now-unblocked child cards. On failure mark the
+    card blocked with the error. Always releases the per-card claim lock (token-gated). The
+    card-working run never writes the shared conversation session — the collector is the single
+    session writer (serial-MVP conclusion ①(b))."""
+    from nanoresearch.bus import dist_lock
+    from nanoresearch.bus.redis_keys import RedisKeys
+    if ok:
+        await repo.attach_result(card_id, result, artifacts or [], token=token)
+        await repo.transition(card_id, expect_status="running", to_status="done")
+        await repo.promote_ready_children(card_id)
+    else:
+        await repo.transition(card_id, expect_status="running", to_status="blocked", result=result)
+    await dist_lock.release(redis, RedisKeys.workboard_claim(str(card_id)), token)
+
+
+async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
+    """Phase 2 serial board driver: enforce global WIP=1. If no card is running and a ready card
+    exists, claim it for its target agent (fallback: the conversation's primary) and enqueue a
+    card-working run. Returns a short status string for tests/telemetry."""
+    import uuid as _uuid
+
+    from nanoresearch.bus import workboard
+    if await repo.list_by_conversation(conv_id, statuses={"running"}):
+        return "wip_busy"
+    ready = await repo.list_by_conversation(conv_id, statuses={"ready"})
+    if not ready:
+        return "idle"
+    card = ready[0]
+    target = card.target_agent_id
+    if target is None:
+        from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+        conv = await ConversationRepository(repo._factory).get_by_id(_uuid.UUID(str(conv_id)))
+        target = conv.agent_id if conv else None
+    token = await workboard.claim_card(redis, repo, card_id=card.id, agent_id=target, conv_id=conv_id)
+    if token is None:
+        return "claim_failed"
+    await arq.enqueue_job(
+        "run_agent_job",
+        run_id=_uuid.uuid4().hex,
+        session_key=f"web:{conv_id}",
+        content=card.spec or card.title,
+        uid=uid,
+        agent_id=str(target) if target else None,
+        conversation_id=str(conv_id),
+        _card_id=str(card.id),
+        _card_token=token,
+    )
+    return f"claimed:{card.id}"
+
+
 async def run_agent_job(
     ctx: dict,
     *,
@@ -390,6 +442,9 @@ async def run_agent_job(
     # Phase 1 continuation (set by the join / watchdog; bypasses the inbox, holds continuation_lock).
     _cont_lock_key: str | None = None,
     _cont_lock_token: str | None = None,
+    # Phase 2 card-working (set by the board driver; runs a card spec session-read-only).
+    _card_id: str | None = None,
+    _card_token: str | None = None,
 ) -> None:
     """ARQ job: execute an Agent run inside the worker; events stream via Redis."""
     from nanoresearch.bus.redis_client import get_redis
@@ -504,6 +559,62 @@ async def run_agent_job(
                         kb_map[_kid] = _kb.chroma_collection
             except Exception as kb_err:
                 logger.warning("Failed to build kb_map for agent %s: %s", agent_id, kb_err)
+
+        # Phase 2: card-working run — execute the card spec session-read-only, write the product to
+        # the CARD (never the conversation session), finish the card, and drive the board to the
+        # next ready card. A heartbeat keeps the claim lease alive across a long run.
+        if _card_id and _card_token:
+            from nanoresearch.bus import workboard
+            from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+            _wrepo = WorkboardRepository(factory)
+            _card_buf: list[str] = []
+
+            async def _card_stream(delta: str) -> None:
+                _card_buf.append(delta)
+                await xadd_event(redis, run_stream_key, {"type": "message_delta", "chunk": delta})
+
+            _hb_stop = asyncio.Event()
+
+            async def _heartbeat() -> None:
+                while not _hb_stop.is_set():
+                    try:
+                        await asyncio.wait_for(_hb_stop.wait(), timeout=10)
+                        return
+                    except asyncio.TimeoutError:
+                        try:
+                            await workboard.heartbeat_card(redis, _wrepo, card_id=_card_id, token=_card_token)
+                        except Exception:
+                            pass
+
+            _hb_task = asyncio.create_task(_heartbeat())
+            _chat_id = session_key.split(":", 1)[-1]
+            ok, result_text = True, ""
+            try:
+                await loop.process_direct(
+                    content, session_key=session_key, channel="web", chat_id=_chat_id,
+                    run_id=run_id, on_stream=_card_stream, on_progress=on_progress,
+                    on_tool_call=on_tool_call, skill_names=skill_names, agent_id=agent_id,
+                    agent_override=agent_override, custom_persona=custom_persona, harness=harness,
+                    agents_registry=agents_registry, kb_bindings=kb_bindings, kb_map=kb_map,
+                    conversation_id=conversation_id, session_readonly=True)
+                result_text = "".join(_card_buf) or "(card produced no text output)"
+            except Exception as e:
+                logger.error("card-working run %s failed: %s", run_id, e, exc_info=True)
+                ok, result_text = False, f"Error: {e}"
+            finally:
+                _hb_stop.set()
+                try:
+                    await _hb_task
+                except Exception:
+                    pass
+            await _finish_card_working(redis, _wrepo, card_id=_card_id, token=_card_token,
+                                       ok=ok, result=result_text, artifacts=[])
+            await run_repo.update(run_id, status="completed" if ok else "failed", finished_at=_utcnow())
+            try:
+                await _drive_board(redis, _wrepo, ctx["arq_pool"], conversation_id, uid)
+            except Exception as e:
+                logger.warning("card-working board drive failed (non-fatal): %s", e)
+            return
 
         # Phase 1 continuation: acquire agent_lock (bounded retry; self-clean on timeout) BEFORE any
         # session read/write, then drain staged subagent results into the session — all in-lock, so

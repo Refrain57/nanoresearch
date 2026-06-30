@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from nanoresearch.storage.models import WorkboardCard, WorkboardCardLink
 
+# Cap a single card's spec so one oversized instruction can't blow the card-working context window.
+WORKBOARD_MAX_SPEC_CHARS = 16_000
+
 # Legal card state transitions. Status CAS rejects anything not listed here.
 _LEGAL_TRANSITIONS = {
     ("backlog", "todo"),
@@ -36,6 +39,9 @@ class WorkboardRepository:
         created_by_agent_id: uuid.UUID | None = None,
         depth: int = 0,
     ) -> WorkboardCard:
+        if spec is not None and len(spec) > WORKBOARD_MAX_SPEC_CHARS:
+            _marker = "\n... (spec truncated)"
+            spec = spec[:WORKBOARD_MAX_SPEC_CHARS - len(_marker)] + _marker
         card = WorkboardCard(
             conversation_id=conversation_id,
             title=title,
@@ -79,6 +85,18 @@ class WorkboardRepository:
                 update(WorkboardCard)
                 .where(WorkboardCard.id == card_id, WorkboardCard.status == expect_status)
                 .values(status=to_status, updated_at=datetime.now(timezone.utc), **fields)
+            )
+            await db.commit()
+            return res.rowcount == 1
+
+    async def attach_result(self, card_id: uuid.UUID, result: str, artifacts: list, *, token: str) -> bool:
+        """Token-gated: write the card's product (result + artifacts) iff *token* owns the claim.
+        Status is left unchanged (the caller transitions running→done separately)."""
+        async with self._factory() as db:
+            res = await db.execute(
+                update(WorkboardCard)
+                .where(WorkboardCard.id == card_id, WorkboardCard.claim_token == token)
+                .values(result=result, artifacts=artifacts, updated_at=datetime.now(timezone.utc))
             )
             await db.commit()
             return res.rowcount == 1

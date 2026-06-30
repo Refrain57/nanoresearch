@@ -64,6 +64,10 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 16_000
+    # Phase 2 Task 6: a card-working (session_readonly) run trims its in-memory baseline to this
+    # many recent messages (ephemeral — never persisted) so an unconsolidated shared session can't
+    # blow its context window. The shared session's persistent compaction stays owned by the collector.
+    _CARD_READONLY_HISTORY_CAP = 400
 
     def __init__(
         self,
@@ -711,6 +715,7 @@ class AgentLoop:
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
         conversation_id: str | None = None,
+        session_readonly: bool = False,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -787,7 +792,11 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return result
 
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
+        # Phase 2 Task 6: a card-working (read-only) run must not mutate the shared session, so it
+        # skips persistent consolidation (LTRIM + save). Its baseline overflow risk is handled by
+        # the ephemeral history trim below + the collector keeping the shared session consolidated.
+        if not session_readonly:
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id, agent_id=agent_id)
         if message_tool := self.tools.get("message"):
@@ -799,6 +808,8 @@ class AgentLoop:
         _memory_budget_ratio = _harness.get("memory_budget_ratio", 0.6)
 
         history = session.get_history(max_messages=0)
+        if session_readonly and len(history) > self._CARD_READONLY_HISTORY_CAP:
+            history = history[-self._CARD_READONLY_HISTORY_CAP:]  # ephemeral baseline trim (not persisted)
         # Capture context assembly decisions once at run start; not updated on subsequent turns.
         _ctx_trace: dict = {}
         initial_messages = self.context.build_messages(
@@ -848,9 +859,12 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, 1 + len(history))
-        await self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid))
+        # Phase 2 Task 6: card-working (read-only) runs never persist the shared session — the
+        # collector is the single session writer (serial-MVP conclusion ①(b)).
+        if not session_readonly:
+            self._save_turn(session, all_msgs, 1 + len(history))
+            await self.sessions.save(session)
+            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -949,8 +963,13 @@ class AgentLoop:
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
         conversation_id: str | None = None,
+        session_readonly: bool = False,
     ) -> OutboundMessage | None:
-        """Process a message directly and return the outbound payload."""
+        """Process a message directly and return the outbound payload.
+
+        Phase 2 Task 6: session_readonly=True (card-working run) reads the shared conversation as
+        baseline but never persists — no session save, no consolidation — so a non-collector main
+        cannot mutate the shared session (serial-MVP conclusion ①(b))."""
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         return await self._process_message(
@@ -966,4 +985,5 @@ class AgentLoop:
             kb_map=kb_map,
             run_id=run_id,
             conversation_id=conversation_id,
+            session_readonly=session_readonly,
         )
