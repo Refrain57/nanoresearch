@@ -581,8 +581,14 @@ async def _reroute_card(redis, repo, arq, conv_id, uid, card, passed_agent_id: s
         await _offer_next_or_collect(redis, repo, arq, conv_id, uid)
         return f"rerouted:{candidates[0].id}"
     else:
-        if primary is None:
-            return "no_target"
+        # No non-primary candidate left. Fall back to the primary ONCE; if the primary has
+        # already passed its own fallback card (now in `tried`) or there is no primary, block the
+        # card so the board still quiesces. Guarantees termination — no infinite reroute loop
+        # (final-review B-1: primary gets exactly one shot at a card no specialist accepted).
+        if primary is None or primary in tried:
+            await repo.transition(card.id, expect_status="ready", to_status="blocked",
+                                  result="[no member agent accepted this card]")
+            return "blocked_no_taker"
         await repo.set_target(card.id, _uuid.UUID(primary))
         await _offer_next_or_collect(redis, repo, arq, conv_id, uid)
         return "fallback_primary"
@@ -817,6 +823,12 @@ async def run_agent_job(
             _hb_stop = asyncio.Event()
 
             async def _heartbeat() -> None:
+                # final-review B-2: the _lock_refresher isn't started on the card-working branch, so
+                # this heartbeat must also keep the mailbox lease (agent_lock) AND the round gate
+                # (board_round) alive across a long card-working run — otherwise agent_lock expires
+                # (>30s) and the end-of-run finalize token-gate no-ops, and board_round (>10min) lets
+                # a user message slip into the round.
+                from nanoresearch.bus import dist_lock as _dl
                 while not _hb_stop.is_set():
                     try:
                         await asyncio.wait_for(_hb_stop.wait(), timeout=10)
@@ -824,6 +836,10 @@ async def run_agent_job(
                     except asyncio.TimeoutError:
                         try:
                             await workboard.heartbeat_card(redis, _wrepo, card_id=_card_id, token=_card_token)
+                            if _mailbox_enabled and _lock_key and _lock_token:
+                                await _dl.refresh(redis, _lock_key, _lock_token, px_ms=30_000)
+                            if conversation_id:
+                                await workboard.begin_round(redis, conversation_id)
                         except Exception:
                             pass
 

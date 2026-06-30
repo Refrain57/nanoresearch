@@ -1117,3 +1117,36 @@ async def test_should_defer_run_end_on_board_round(redis_client):
     # pending subagents in flight → defer (Phase 1 condition preserved)
     await redis_client.sadd(RedisKeys.pending(sk), "t1:1")
     assert await worker._should_defer_run_end(redis_client, sk, conv_id) is True
+
+
+# ---------------------------------------------------------------------------
+# Final-review B-1: reroute termination — primary fallback gets exactly one shot
+# ---------------------------------------------------------------------------
+
+async def test_reroute_blocks_when_primary_also_passes(redis_client, monkeypatch):
+    """If every member AND the primary pass the card, it is blocked (no infinite reroute loop)."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    import nanoresearch.worker as worker
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, primary, research, writing = await _seed_two_specialist_agents()
+    await ConversationRepository(factory).activate_agents(conv.id, [research.id, writing.id])
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready",
+                                  target_agent_id=research.id)
+
+    # research passes → reroute to writing
+    r1 = await worker._reroute_card(redis_client, repo, _FakeArqPool(), str(conv.id), conv.uid,
+                                    await repo.get(card.id), passed_agent_id=str(research.id))
+    assert r1 == f"rerouted:{writing.id}"
+    # writing passes → no specialist left → fall back to primary (one shot)
+    r2 = await worker._reroute_card(redis_client, repo, _FakeArqPool(), str(conv.id), conv.uid,
+                                    await repo.get(card.id), passed_agent_id=str(writing.id))
+    assert r2 == "fallback_primary"
+    assert str((await repo.get(card.id)).target_agent_id) == str(primary.id)
+    # primary passes its own fallback → card blocked (terminates), board can quiesce
+    r3 = await worker._reroute_card(redis_client, repo, _FakeArqPool(), str(conv.id), conv.uid,
+                                    await repo.get(card.id), passed_agent_id=str(primary.id))
+    assert r3 == "blocked_no_taker"
+    assert (await repo.get(card.id)).status == "blocked"

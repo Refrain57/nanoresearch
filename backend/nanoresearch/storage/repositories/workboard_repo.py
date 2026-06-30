@@ -23,6 +23,7 @@ _LEGAL_TRANSITIONS = {
     ("backlog", "todo"),
     ("todo", "ready"),
     ("ready", "running"),
+    ("ready", "blocked"),   # no member agent accepted the card (reroute exhausted) — terminate
     ("running", "done"),
     ("running", "blocked"),
     ("running", "ready"),   # release returns the card to the board
