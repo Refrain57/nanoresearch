@@ -457,12 +457,18 @@ async def _build_run_payload(factory, conversation_id: str, uid: str, content: s
     value so the continuation/collector routes through the same identity the dispatcher gate sees
     (dispatcher.py:115,125). None keeps the Phase 1 conv.agent_id behaviour (single-main)."""
     conv = await ConversationRepository(factory).get_by_id(uuid.UUID(conversation_id))
+    # Phase 2: load persona/skills from the EFFECTIVE agent (explicit agent_id wins over conv's),
+    # so a card-working run for a non-primary main carries that main's persona — not the primary's.
+    _eff_aid = agent_id or (str(conv.agent_id) if conv and conv.agent_id else None)
     skill_names = None
     custom_persona = None
     agent_harness: dict = {}
     agent_kb_id = None
-    if conv is not None and conv.agent_id:
-        agent = await AgentRepository(factory).get_by_id(conv.agent_id)
+    if _eff_aid:
+        try:
+            agent = await AgentRepository(factory).get_by_id(uuid.UUID(_eff_aid))
+        except Exception:
+            agent = None
         if agent is not None:
             skill_names = [s["name"] for s in (agent.skills_config or []) if s.get("enabled", True)]
             custom_persona = agent.persona or None
@@ -482,7 +488,7 @@ async def _build_run_payload(factory, conversation_id: str, uid: str, content: s
         "rag_mode": "agentic",
         "kb_id": None,
         "skill_names": skill_names,
-        "agent_id": agent_id if agent_id is not None else (str(conv.agent_id) if conv and conv.agent_id else None),
+        "agent_id": _eff_aid,
         "agent_override": None,
         "custom_persona": custom_persona,
         "harness": agent_harness or None,

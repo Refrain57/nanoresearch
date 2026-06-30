@@ -410,19 +410,15 @@ async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
     if not ready:
         # no claimable work → collect if the board is quiesced (fire-once)
         if await workboard.try_claim_collector(redis, repo, conv_id):
+            from nanoresearch.server.routers.chat_router import _build_run_payload
             from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
             conv = await ConversationRepository(repo._factory).get_by_id(_uuid.UUID(str(conv_id)))
             primary = str(conv.agent_id) if conv and conv.agent_id else None
-            await arq.enqueue_job(
-                "run_agent_job",
-                run_id=_uuid.uuid4().hex,
-                session_key=f"web:{conv_id}",
+            payload = await _build_run_payload(
+                repo._factory, str(conv_id), uid,
                 content="请基于看板上各卡片的产出，综合并给用户最终答复。",
-                uid=uid,
-                agent_id=primary,
-                conversation_id=str(conv_id),
-                _collect=True,
-            )
+                run_id=_uuid.uuid4().hex, agent_id=primary)
+            await arq.enqueue_job("run_agent_job", **payload, _collect=True)
             return f"collect:{conv_id}"
         return "idle"
     card = ready[0]
@@ -435,17 +431,11 @@ async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
     if token is None:
         return "claim_failed"
     await workboard.begin_round(redis, conv_id)  # round in flight → dispatcher defers user msgs
-    await arq.enqueue_job(
-        "run_agent_job",
-        run_id=_uuid.uuid4().hex,
-        session_key=f"web:{conv_id}",
-        content=card.spec or card.title,
-        uid=uid,
-        agent_id=str(target) if target else None,
-        conversation_id=str(conv_id),
-        _card_id=str(card.id),
-        _card_token=token,
-    )
+    from nanoresearch.server.routers.chat_router import _build_run_payload
+    payload = await _build_run_payload(
+        repo._factory, str(conv_id), uid, content=card.spec or card.title,
+        run_id=_uuid.uuid4().hex, agent_id=str(target) if target else None)
+    await arq.enqueue_job("run_agent_job", **payload, _card_id=str(card.id), _card_token=token)
     return f"claimed:{card.id}"
 
 
