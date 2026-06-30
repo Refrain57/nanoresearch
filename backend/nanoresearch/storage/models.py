@@ -87,6 +87,24 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
+class ConversationAgent(Base):
+    """Many-to-many: Conversation ↔ Agent (Phase 2 multi-main membership).
+
+    Additive to Conversation.agent_id (the primary / collector main); rows here activate
+    additional peer mains into the conversation. Empty membership ⇒ single-main (the
+    repository defaults to Conversation.agent_id)."""
+    __tablename__ = "conversation_agents"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String, default="main")
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Message(Base):
     __tablename__ = "messages"
 

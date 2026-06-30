@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from nanoresearch.storage.models import Conversation, Message
+from nanoresearch.storage.models import Agent, Conversation, ConversationAgent, Message
 
 
 class ConversationRepository:
@@ -156,6 +156,53 @@ class ConversationRepository:
             db.add(Message(conversation_id=conv.id, role=message.get("role", "user"),
                            content=message, seq=count))
             await db.commit()
+
+    # ---- Phase 2: multi-main membership ----
+
+    async def activate_agents(self, conv_id: uuid.UUID, agent_ids: list[uuid.UUID]) -> None:
+        """Activate the given agents as peer mains on the conversation (idempotent)."""
+        async with self._factory() as db:
+            for aid in agent_ids:
+                exists = (await db.execute(
+                    select(ConversationAgent).where(
+                        ConversationAgent.conversation_id == conv_id,
+                        ConversationAgent.agent_id == aid,
+                    )
+                )).scalar_one_or_none()
+                if exists is None:
+                    db.add(ConversationAgent(conversation_id=conv_id, agent_id=aid))
+            await db.commit()
+
+    async def list_member_agents(self, conv_id: uuid.UUID) -> list[Agent]:
+        """Member agents of the conversation. Empty membership defaults to {conv.agent_id}
+        (single-main backward compatibility)."""
+        async with self._factory() as db:
+            rows = (await db.execute(
+                select(Agent)
+                .join(ConversationAgent, ConversationAgent.agent_id == Agent.id)
+                .where(ConversationAgent.conversation_id == conv_id)
+            )).scalars().all()
+            if rows:
+                return list(rows)
+            conv = (await db.execute(
+                select(Conversation).where(Conversation.id == conv_id)
+            )).scalar_one_or_none()
+            if conv is not None and conv.agent_id is not None:
+                agent = (await db.execute(
+                    select(Agent).where(Agent.id == conv.agent_id)
+                )).scalar_one_or_none()
+                return [agent] if agent is not None else []
+            return []
+
+    async def is_member(self, conv_id: uuid.UUID, agent_id: uuid.UUID) -> bool:
+        async with self._factory() as db:
+            row = (await db.execute(
+                select(ConversationAgent).where(
+                    ConversationAgent.conversation_id == conv_id,
+                    ConversationAgent.agent_id == agent_id,
+                )
+            )).scalar_one_or_none()
+            return row is not None
 
     async def list_all(self, uid: str) -> list[dict]:
         async with self._factory() as db:

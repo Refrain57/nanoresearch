@@ -102,6 +102,8 @@ async def check_schema_migrations() -> None:
         # Phase 5: baseline anchor + deployment gate (migrate_phase5_baseline_gate.sql)
         ("optimization_proposals", "baseline_score"),
         ("optimization_proposals", "baseline_version_id"),
+        # Phase 2 workboard (migrate_phase2_workboard.sql)
+        ("conversation_agents", "agent_id"),
     ]
     missing = []
     async with _engine.connect() as conn:
