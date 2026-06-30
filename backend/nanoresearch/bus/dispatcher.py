@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import uuid
 from typing import Any
 
 from loguru import logger
@@ -108,7 +109,12 @@ class AgentDispatcher:
     async def _handle_notify(self, fields: dict) -> str:
         """Acquire the mailbox lock and enqueue the next unprocessed entry.
 
-        Returns one of: "enqueued" | "dropped_locked" | "empty_released" (for tests/telemetry).
+        Returns one of:
+          "enqueued"           — normal user turn dispatched
+          "enqueued_self_claim"— board_offer bypassed the round gate and dispatched
+          "dropped_locked"     — mailbox already held by a running job
+          "empty_released"     — no unprocessed entries; lock released
+          "deferred_batch"     — ordinary turn deferred while round/batch/continuation in flight
         """
         mailbox_key = fields["mailbox_key"]
         lock_key = fields["lock_key"]
@@ -118,6 +124,33 @@ class AgentDispatcher:
         if token is None:
             return "dropped_locked"  # a run is already processing this mailbox
 
+        # Read the next entry BEFORE the deferral gate so we can inspect its kind.
+        # A deferred turn is NOT cursor-advanced here — it will be re-read on the next notify.
+        nxt = await mailbox.read_next_after_cursor(self._redis, agent_id, conversation_id)
+        if nxt is None:
+            await dist_lock.release(self._redis, lock_key, token)
+            return "empty_released"
+
+        entry_id, payload = nxt
+
+        if payload.get("kind") == "board_offer":
+            # board_offer IS the round's engine — bypass the round/batch/continuation gate.
+            await self._arq.enqueue_job(
+                "run_agent_job",
+                run_id=uuid.uuid4().hex,
+                session_key=f"web:{conversation_id}",
+                content="",                    # self-claim branch (Task 4) loads the card spec
+                uid=payload.get("uid"),
+                agent_id=agent_id,             # the inbox owner = the offered-to main agent
+                conversation_id=conversation_id,
+                _board_offer_card_id=payload["card_id"],
+                _lock_key=lock_key,
+                _lock_token=token,
+                _entry_id=entry_id,
+            )
+            return "enqueued_self_claim"
+
+        # Ordinary user turn: apply the Phase 1/2 deferral gate.
         # Phase 1 redesign batch gate. Defer a user message while a subagent batch is in flight
         # (pending>0) OR a continuation is pending/running (continuation_lock set). The two are
         # switched atomically by the join (SREM-to-zero + SET continuation_lock in one EVAL), so
@@ -131,12 +164,6 @@ class AgentDispatcher:
             await dist_lock.release(self._redis, lock_key, token)
             return "deferred_batch"
 
-        nxt = await mailbox.read_next_after_cursor(self._redis, agent_id, conversation_id)
-        if nxt is None:
-            await dist_lock.release(self._redis, lock_key, token)
-            return "empty_released"
-
-        entry_id, payload = nxt
         await self._arq.enqueue_job(
             "run_agent_job",
             **payload,

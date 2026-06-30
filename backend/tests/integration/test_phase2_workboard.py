@@ -593,3 +593,88 @@ async def test_record_pass_increments_and_logs():
     assert got2.pass_count == 2
     assert {"passed": "B"} in got2.artifacts
     assert {"passed": "A"} in got2.artifacts
+
+
+# ---------------------------------------------------------------------------
+# Task 3: dispatcher board_offer kind distinction
+# ---------------------------------------------------------------------------
+
+def _notify_fields(aid, cid):
+    from nanoresearch.bus.redis_keys import RedisKeys
+    return {
+        "mailbox_key": RedisKeys.agent_inbox(aid, cid),
+        "cursor_key": RedisKeys.agent_inbox_cursor(aid, cid),
+        "lock_key": RedisKeys.agent_lock(aid, cid),
+    }
+
+
+async def test_dispatcher_board_offer_bypasses_round_gate(redis_client):
+    """board_round set + board_offer in inbox → enqueued_self_claim; gate not applied."""
+    from nanoresearch.bus import mailbox, workboard
+    from nanoresearch.bus.dispatcher import AgentDispatcher
+
+    aid, cid = "agent-A", "disp-offer-1"
+    card_id = "card-xyz"
+    await mailbox.post_message(redis_client, aid, cid, {
+        "kind": "board_offer",
+        "card_id": card_id,
+        "conversation_id": cid,
+        "uid": "u1",
+    })
+    await workboard.begin_round(redis_client, cid)
+
+    pool = _FakeArqPool()
+    disp = AgentDispatcher(redis_client, pool)
+
+    result = await disp._handle_notify(_notify_fields(aid, cid))
+
+    assert result == "enqueued_self_claim"
+    assert len(pool.jobs) == 1
+    fn, kw = pool.jobs[0]
+    assert fn == "run_agent_job"
+    assert kw["_board_offer_card_id"] == card_id
+    assert kw["agent_id"] == aid
+
+
+async def test_dispatcher_user_turn_still_deferred_in_round(redis_client):
+    """board_round set + ordinary user turn (no kind) → deferred_batch (regression)."""
+    from nanoresearch.bus import mailbox, workboard
+    from nanoresearch.bus.dispatcher import AgentDispatcher
+
+    aid, cid = "agent-B", "disp-offer-2"
+    await mailbox.post_message(redis_client, aid, cid, {
+        "conversation_id": cid,
+        "content": "hello",
+        "agent_id": aid,
+    })
+    await workboard.begin_round(redis_client, cid)
+
+    pool = _FakeArqPool()
+    disp = AgentDispatcher(redis_client, pool)
+
+    result = await disp._handle_notify(_notify_fields(aid, cid))
+
+    assert result == "deferred_batch"
+    assert pool.jobs == []
+
+
+async def test_dispatcher_user_turn_enqueues_when_idle(redis_client):
+    """No gate conditions → ordinary turn is enqueued (regression)."""
+    from nanoresearch.bus import mailbox
+    from nanoresearch.bus.dispatcher import AgentDispatcher
+
+    aid, cid = "agent-C", "disp-offer-3"
+    await mailbox.post_message(redis_client, aid, cid, {
+        "conversation_id": cid,
+        "content": "hi",
+        "agent_id": aid,
+    })
+
+    pool = _FakeArqPool()
+    disp = AgentDispatcher(redis_client, pool)
+
+    result = await disp._handle_notify(_notify_fields(aid, cid))
+
+    assert result == "enqueued"
+    assert len(pool.jobs) == 1
+    assert pool.jobs[0][0] == "run_agent_job"
