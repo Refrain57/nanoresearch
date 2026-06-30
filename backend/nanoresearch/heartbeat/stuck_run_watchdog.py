@@ -94,20 +94,21 @@ class StuckRunWatchdog:
             return  # orphan pending (no conversation) — PendingReaper's job, not ours
         conv_id = str(conv.id)
 
-        # append a failure marker (best-effort — we still advance the join either way here,
-        # because the subagent is presumed dead and would otherwise hang the conversation)
+        # Stage a failure marker (same channel as a live subagent: RPUSH subagent_results), so the
+        # continuation drains it like any other result. Best-effort.
+        import json as _json
         try:
-            from nanoresearch.session.manager import SessionManager
-            mgr = SessionManager(Path("."), session_factory=self._factory, default_uid=conv.uid)
-            await mgr.append_message(
-                session_key, {"role": "user", "content": f"[Subagent {task_id} timed out / crashed]"},
-                uid=conv.uid)
+            await self._redis.rpush(RedisKeys.subagent_results(session_key), _json.dumps(
+                {"task_id": task_id, "label": task_id, "task": "",
+                 "status": "error", "result": "[subagent timed out / crashed]"}, ensure_ascii=False))
+            await self._redis.expire(RedisKeys.subagent_results(session_key), 86400)
         except Exception:
-            logger.warning("watchdog append failure marker failed (non-fatal)")
+            logger.warning("watchdog stage failure marker failed (non-fatal)")
 
-        token = uuid.uuid4().hex
-        lock_key = RedisKeys.agent_lock("none", conv_id)
-        fired = await mailbox.join_and_acquire(self._redis, session_key, task_id, lock_key, token)
+        # atomic join → set continuation_lock (NOT agent_lock; consistent with the subagent path)
+        cont_token = uuid.uuid4().hex
+        cont_lock_key = RedisKeys.continuation_lock("none", conv_id)
+        fired = await mailbox.join_and_fire(self._redis, session_key, task_id, cont_lock_key, cont_token)
         if not fired:
             return
 
@@ -121,7 +122,7 @@ class StuckRunWatchdog:
             content="部分子任务超时/失败，结果已并入对话。请基于已有结果尽力汇总并回复用户。",
             run_id=str(run.id))
         await self._arq.enqueue_job(
-            "run_agent_job", **payload, _lock_key=lock_key, _lock_token=token)
+            "run_agent_job", **payload, _cont_lock_key=cont_lock_key, _cont_lock_token=cont_token)
         logger.info("watchdog reaped stale subagent {} → woke continuation run {}", task_id, run.id)
 
     async def _scan_stuck_running(self) -> None:
