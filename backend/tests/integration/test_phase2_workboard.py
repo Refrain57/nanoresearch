@@ -634,6 +634,11 @@ async def test_dispatcher_board_offer_bypasses_round_gate(redis_client):
     assert fn == "run_agent_job"
     assert kw["_board_offer_card_id"] == card_id
     assert kw["agent_id"] == aid
+    assert kw["session_key"] == f"web:{cid}"
+    assert kw["content"] == ""
+    assert kw["uid"] == "u1"
+    assert "_lock_token" in kw and kw["_lock_token"]
+    assert "_lock_key" in kw and "_entry_id" in kw
 
 
 async def test_dispatcher_user_turn_still_deferred_in_round(redis_client):
