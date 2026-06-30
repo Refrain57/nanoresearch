@@ -880,3 +880,62 @@ async def test_self_claim_judge_claim_claims_card(redis_client, monkeypatch):
     assert got.status == "running"
     assert str(got.owner_agent_id) == str(agent.id)
     assert await redis_client.get(RedisKeys.workboard_claim(str(card.id))) == tok
+
+
+async def test_self_claim_judge_claim_runs_card_working(redis_client, monkeypatch):
+    """run_agent_job with _board_offer_card_id: when judge claims, fall-through wiring fires the
+    card-working branch and the card ends status='done' with owner=target.
+
+    Uses a lightweight fake AgentLoop (no real provider/MCP) and monkeypatches _judge_claim →
+    True. A real factory + redis_client are used for all DB/Redis state so the claim + finish
+    path is exercised end-to-end without constructing a real AgentLoop."""
+    import uuid
+
+    import nanoresearch.bus.redis_client as rc
+    import nanoresearch.worker as worker
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+
+    factory, conv, target = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(
+        conversation_id=conv.id, title="research task", spec="Analyze topic X",
+        status="ready", target_agent_id=target.id,
+    )
+
+    class _FakeLoop:
+        async def process_direct(self, content, **kw):
+            return None
+
+        async def close_mcp(self):
+            pass
+
+    async def _fake_build_loop(*a, **kw):
+        return _FakeLoop()
+
+    monkeypatch.setattr(worker, "_build_agent_loop", _fake_build_loop)
+    monkeypatch.setattr(worker, "_judge_claim", lambda *a, **kw: _async_val(True))
+
+    pool = _FakeArqPool()
+    ctx = {
+        "session_factory": factory,
+        "arq_pool": pool,
+        "loop_config": {},
+        "rag_settings": None,
+    }
+
+    await worker.run_agent_job(
+        ctx,
+        run_id=uuid.uuid4().hex,
+        session_key=f"web:{conv.id}",
+        content="",
+        uid=conv.uid,
+        agent_id=str(target.id),
+        conversation_id=str(conv.id),
+        _board_offer_card_id=str(card.id),
+    )
+
+    got = await repo.get(card.id)
+    assert got.status == "done", f"expected 'done', got '{got.status}'"
+    assert str(got.owner_agent_id) == str(target.id)

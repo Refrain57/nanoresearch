@@ -450,18 +450,30 @@ async def _offer_next_or_collect(redis, repo, arq, conv_id, uid) -> str:
     return f"offered:{card.id}"
 
 
-async def _judge_claim(loop, card, agent_id) -> bool:
+async def _judge_claim(loop, card, agent_id, custom_persona: str | None = None) -> bool:
     """One lightweight LLM call: ask whether this main (agent_id) should claim the card.
 
-    Returns True (claim) or False (pass). Defaults to True on any provider failure so work
-    is never silently dropped due to a transient error. Kept as a module-level function so
-    tests can ``monkeypatch.setattr(worker, "_judge_claim", fake)``."""
+    When custom_persona is provided the prompt leads with it so the LLM can judge whether
+    this card matches the agent's specialty — without it, the agent id string alone gives
+    the model no basis to ever reply "pass". Returns True (claim) or False (pass). Defaults
+    to True on any provider failure so work is never silently dropped. Kept as a module-level
+    function so tests can ``monkeypatch.setattr(worker, "_judge_claim", fake)``."""
     try:
+        if custom_persona:
+            persona_section = f"Your persona/role: {custom_persona}\n\n"
+            question = (
+                "Given your persona above, should you claim this card (it matches your "
+                "specialty) or pass (it is better suited to a different specialist)?"
+            )
+        else:
+            persona_section = ""
+            question = "Should you claim this card and work on it, or pass it to another agent?"
         prompt = (
+            f"{persona_section}"
             f"You are agent '{agent_id}'. A work card has been offered to you:\n"
             f"Title: {card.title}\n"
             f"Spec: {card.spec or '(no spec)'}\n\n"
-            "Should you claim this card and work on it, or pass it to another agent? "
+            f"{question} "
             "Reply with exactly one word: 'claim' if you should do it, 'pass' if you should not."
         )
         resp = await loop.provider.chat_with_retry(
@@ -487,6 +499,7 @@ async def _decide_board_offer(
     uid: str,
     agent_id,
     card,
+    custom_persona: str | None = None,
 ) -> tuple[str, str | None, str | None]:
     """Route a board_offer: decide claim or pass, then act.
 
@@ -498,11 +511,13 @@ async def _decide_board_offer(
 
     Extracted as a separate function so the routing logic can be tested independently
     (monkeypatch _judge_claim + stub loop) without needing a full ARQ ctx.
+    custom_persona is threaded through to _judge_claim so the LLM judges by role, not
+    just agent UUID.
     """
     from nanoresearch.bus import workboard
     if card.status != "ready":
         return "not_ready", None, None
-    judge = await _judge_claim(loop, card, agent_id)
+    judge = await _judge_claim(loop, card, agent_id, custom_persona=custom_persona)
     if not judge:
         await _reroute_card(redis, wrepo, arq, conv_id, uid, card, passed_agent_id=str(agent_id))
         return "passed", None, None
@@ -747,7 +762,7 @@ async def run_agent_job(
             from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
             _wrepo = WorkboardRepository(factory)
             _offer_card = await _wrepo.get(uuid.UUID(_board_offer_card_id))
-            if _offer_card is None:
+            if _offer_card is None or _offer_card.status != "ready":
                 return
             # Enrich this run with the target main's persona/skills so the card-working run has
             # the right identity (the dispatcher passed a minimal payload).
@@ -756,7 +771,8 @@ async def run_agent_job(
                 content=(_offer_card.spec or _offer_card.title),
                 run_id=run_id, agent_id=agent_id)
             _bo_decision, _bo_card_id, _bo_token = await _decide_board_offer(
-                loop, redis, _wrepo, ctx["arq_pool"], conversation_id, uid, agent_id, _offer_card)
+                loop, redis, _wrepo, ctx["arq_pool"], conversation_id, uid, agent_id, _offer_card,
+                custom_persona=cfg.get("custom_persona"))
             if _bo_decision != "claimed":
                 return   # "not_ready" | "passed" | "claim_failed" — finally still runs (mailbox release)
             # Bind card-working locals so the branch below executes for this card:
