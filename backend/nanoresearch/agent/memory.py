@@ -186,8 +186,14 @@ class MemoryStore:
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None):
-        if agent_id:
+    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None,
+                 conversation_id: str | None = None):
+        # Phase 2 scope adjustment: a conversation-scoped summary is shared by all mains in the
+        # conversation (not forked per agent_id). conversation_id takes precedence; falling back to
+        # the legacy per-agent / workspace dir keeps single-main behaviour unchanged.
+        if conversation_id:
+            self.memory_dir = ensure_dir(workspace / "conversations" / conversation_id / "memory")
+        elif agent_id:
             self.memory_dir = ensure_dir(workspace / "agents" / agent_id / "memory")
         else:
             self.memory_dir = ensure_dir(workspace / "memory")
@@ -195,6 +201,7 @@ class MemoryStore:
         self._consecutive_failures = 0
         self._cached_hash: str | None = None
         self._knowledge_search = knowledge_search
+        self._conversation_id = conversation_id
 
     def get_content_hash(self) -> str:
         """Calculate stable SHA-256 hash of memory content.
@@ -359,7 +366,7 @@ Call save_memory with your updated memory following the exact format specified."
                     "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
                     "is_evergreen": False,
                     "created_at": datetime.now().isoformat(),
-                }], uid=uid)
+                }], uid=uid, conversation_id=self._conversation_id)
 
             update = _ensure_text(update)
             if update != current_memory:
@@ -397,7 +404,7 @@ Call save_memory with your updated memory following the exact format specified."
                 "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
                 "is_evergreen": False,
                 "created_at": datetime.now().isoformat(),
-            }], uid=uid)
+            }], uid=uid, conversation_id=self._conversation_id)
 
         logger.warning(
             "Memory consolidation degraded: raw-archived {} messages", len(messages)
@@ -440,16 +447,23 @@ class MemoryConsolidator:
         # Anti-shake: track last token count to avoid repeated small consolidations
         self._last_session_tokens: dict[str, int] = {}
 
-    def _get_store(self, agent_id: str | None = None) -> MemoryStore:
-        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search, agent_id=agent_id)
+    def _get_store(self, agent_id: str | None = None, conversation_id: str | None = None) -> MemoryStore:
+        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search,
+                           agent_id=agent_id, conversation_id=conversation_id)
+
+    @staticmethod
+    def _conversation_id_from_session_key(session_key: str) -> str | None:
+        # Web session keys are "web:{conversation_id}"; the summary is shared at conversation scope.
+        ch, _, chat = session_key.partition(":")
+        return chat if ch == "web" and chat else None
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
-    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None, uid: str | None = None) -> bool:
+    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None, uid: str | None = None, conversation_id: str | None = None) -> bool:
         """Archive a selected message chunk into persistent memory."""
-        success = await self._get_store(agent_id).consolidate(messages, self.provider, self.model, uid=uid)
+        success = await self._get_store(agent_id, conversation_id).consolidate(messages, self.provider, self.model, uid=uid)
 
         # After successful consolidation, extract knowledge from conversation
         if success and self._knowledge_search:
@@ -562,6 +576,7 @@ class MemoryConsolidator:
             return
 
         lock = self.get_lock(session.key)
+        _conv_id = self._conversation_id_from_session_key(session.key)
         async with lock:
             budget = self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
             target = int(budget * TOKEN_CONSOLIDATION_TARGET_RATIO)
@@ -616,7 +631,7 @@ class MemoryConsolidator:
                     source,
                     len(chunk),
                 )
-                if not await self.consolidate_messages(chunk, agent_id=agent_id, uid=uid):
+                if not await self.consolidate_messages(chunk, agent_id=agent_id, uid=uid, conversation_id=_conv_id):
                     return
 
                 # Lua LTRIM: atomically advance Redis list start to new boundary (fast-path).

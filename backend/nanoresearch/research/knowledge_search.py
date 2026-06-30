@@ -95,6 +95,7 @@ class KnowledgeSearch:
         top_k: int = 5,
         apply_decay: bool = True,
         uid: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search user memory using BM25 + vector → RRF → optional Rerank → time decay."""
         if not self.user_memory_store:
@@ -108,6 +109,11 @@ class KnowledgeSearch:
 
         if uid:
             candidates = [r for r in candidates if r.get("metadata", {}).get("uid") == uid]
+
+        # Phase 2 scope adjustment: narrow L2/L3 recall to the conversation when requested.
+        if conversation_id:
+            candidates = [r for r in candidates
+                          if r.get("metadata", {}).get("conversation_id") == conversation_id]
 
         if not candidates:
             return []
@@ -145,6 +151,7 @@ class KnowledgeSearch:
         memories: list[dict[str, Any]],
         similarity_threshold: float = 0.85,
         uid: str | None = None,
+        conversation_id: str | None = None,
     ) -> tuple[int, int]:
         """Write user memories with deduplication (sync version)."""
         if not memories or not self.user_memory_store:
@@ -179,6 +186,7 @@ class KnowledgeSearch:
                         "created_at": mem.get("created_at", datetime.now().isoformat()),
                         "text": mem["text"],
                         "uid": uid or "",
+                        "conversation_id": conversation_id or "",
                     }
                 })
                 written_ids.append(record_id)

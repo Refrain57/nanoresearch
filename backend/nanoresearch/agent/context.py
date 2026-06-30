@@ -47,6 +47,7 @@ class ContextBuilder:
         token_budget: int = 500,
         uid: str | None = None,
         _ids_out: list | None = None,
+        conversation_id: str | None = None,
     ) -> str:
         """Build history context from user_memory for a given query.
 
@@ -67,7 +68,7 @@ class ContextBuilder:
         try:
             # Search user_memory collection (filter by uid if available)
             memories = self.knowledge_search.search_user_memory_sync(
-                query, top_k=5, apply_decay=True, uid=uid,
+                query, top_k=5, apply_decay=True, uid=uid, conversation_id=conversation_id,
             )
 
             if memories and _ids_out is not None:
@@ -122,6 +123,7 @@ class ContextBuilder:
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
         kb_bindings: list[dict] | None = None,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> str:
         """Build the system prompt (single string, no cache blocks)."""
@@ -134,6 +136,7 @@ class ContextBuilder:
             agent_id=agent_id,
             memory_budget_ratio=memory_budget_ratio,
             _trace_out=_trace_out,
+            conversation_id=conversation_id,
         )
         if _trace_out is not None:
             _trace_out["skill_names"] = list(skill_names) if skill_names is not None else None  # list[str] | None — names only
@@ -156,6 +159,7 @@ class ContextBuilder:
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
         kb_bindings: list[dict] | None = None,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Return system prompt as 3 blocks with cache_control markers.
@@ -189,6 +193,7 @@ class ContextBuilder:
             agent_id=agent_id,
             memory_budget_ratio=memory_budget_ratio,
             _trace_out=_trace_out,
+            conversation_id=conversation_id,
         )
         if dynamic:
             blocks.append({"type": "text", "text": dynamic})
@@ -319,6 +324,7 @@ Skills with available="false" need dependencies installed first - you can try in
         agent_id: str | None = None,
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         _trace_out: dict | None = None,
+        conversation_id: str | None = None,
     ) -> str:
         """Build the dynamic suffix (may change per request, non-cacheable).
 
@@ -345,7 +351,7 @@ Skills with available="false" need dependencies installed first - you can try in
         if topic:
             history_context = self.build_history_context(
                 topic, token_budget=knowledge_budget, uid=self._uid,
-                _ids_out=_fragment_ids,
+                _ids_out=_fragment_ids, conversation_id=conversation_id,
             )
             if history_context:
                 _injected_history_chars = len(history_context)  # int — chars of content after truncation (no full text stored)
@@ -531,6 +537,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
         kb_bindings: list[dict] | None = None,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
@@ -541,6 +548,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
                 skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
                 agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
                 agents_registry=agents_registry, kb_bindings=kb_bindings,
+                conversation_id=conversation_id,
                 _trace_out=_trace_out,
             )
         else:
@@ -548,6 +556,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
                 skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
                 agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
                 agents_registry=agents_registry, kb_bindings=kb_bindings,
+                conversation_id=conversation_id,
                 _trace_out=_trace_out,
             )
 

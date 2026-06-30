@@ -739,6 +739,7 @@ class AgentLoop:
                 use_cache_blocks=self._use_cache_blocks,
                 agent_id=agent_id,
                 kb_bindings=kb_bindings,
+                conversation_id=conversation_id,
                 _trace_out=_sys_ctx_trace,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
@@ -827,6 +828,7 @@ class AgentLoop:
             total_token_budget=_total_token_budget,
             memory_budget_ratio=_memory_budget_ratio,
             agents_registry=agents_registry,
+            conversation_id=conversation_id,
             _trace_out=_ctx_trace,
         )
 

@@ -13,7 +13,7 @@ class _CapturingKnowledge:
     def __init__(self):
         self.written: list[dict] = []
 
-    def write_user_memory_sync(self, memories, uid=None):  # noqa: ARG002
+    def write_user_memory_sync(self, memories, uid=None, conversation_id=None):  # noqa: ARG002
         self.written.extend(memories)
         return (len(memories), 0)
 
