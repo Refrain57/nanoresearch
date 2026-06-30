@@ -73,6 +73,22 @@ async def test_reclaim_pending_reprocesses_unacked_notify(redis_client):
     assert any(j[1].get("run_id") == "r9" for j in pool.jobs)
 
 
+async def test_handle_notify_defers_when_continuation_lock_present(redis_client):
+    """Phase 1 redesign: pending empty but a continuation is pending/running → still defer
+    (closes the pending-empty → continuation-running window)."""
+    aid, cid = "none", "disp-cont"
+    await mailbox.post_message(redis_client, aid, cid, {
+        "content": "x", "agent_id": None, "conversation_id": cid, "run_id": "r1"})
+    await redis_client.set(RedisKeys.continuation_lock(aid, cid), "ctok", px=120_000)
+    pool = _FakePool()
+    disp = AgentDispatcher(redis_client, pool)
+
+    decision = await disp._handle_notify(_notify(aid, cid))
+
+    assert decision == "deferred_batch"
+    assert pool.jobs == []
+
+
 async def test_handle_notify_defers_during_subagent_batch(redis_client):
     """Phase 1 必改 1: a user message must not run while a subagent batch is in flight."""
     from nanoresearch.bus import dist_lock
