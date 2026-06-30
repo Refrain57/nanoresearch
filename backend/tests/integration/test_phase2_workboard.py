@@ -179,3 +179,71 @@ async def test_promote_idempotent():
     assert child.id in await repo.promote_ready_children(p.id)
     assert await repo.promote_ready_children(p.id) == []  # already ready (todo CAS fails)
     assert (await repo.get(child.id)).status == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: serial claim (global WIP=1) + claim token
+# ---------------------------------------------------------------------------
+
+async def test_claim_moves_ready_to_running_with_token(redis_client):
+    from nanoresearch.bus import workboard
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card.id, agent_id=agent.id, conv_id=conv.id)
+
+    assert token is not None
+    got = await repo.get(card.id)
+    assert got.status == "running" and str(got.owner_agent_id) == str(agent.id)
+    assert str(got.claim_token) == token
+    assert await redis_client.get(RedisKeys.workboard_claim(str(card.id))) == token
+
+
+async def test_claim_rejects_when_a_card_already_running(redis_client):
+    from nanoresearch.bus import workboard
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="r", spec="x", status="running")
+    card2 = await repo.create_card(conversation_id=conv.id, title="t2", spec="x", status="ready")
+
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card2.id, agent_id=agent.id, conv_id=conv.id)
+
+    assert token is None  # global WIP=1
+    assert (await repo.get(card2.id)).status == "ready"
+
+
+async def test_heartbeat_then_release_returns_card(redis_client):
+    from nanoresearch.bus import workboard
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card.id, agent_id=agent.id, conv_id=conv.id)
+
+    assert await workboard.heartbeat_card(redis_client, repo, card_id=card.id, token=token) is True
+    assert await workboard.release_card(redis_client, repo, card_id=card.id, token=token) is True
+    assert (await repo.get(card.id)).status == "ready"
+    assert await redis_client.get(RedisKeys.workboard_claim(str(card.id))) is None
+
+
+async def test_claim_token_is_dist_lock_token(redis_client):
+    """claim token is a real dist_lock token: a second acquire on the card lock fails."""
+    from nanoresearch.bus import dist_lock, workboard
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+    token = await workboard.claim_card(
+        redis_client, repo, card_id=card.id, agent_id=agent.id, conv_id=conv.id)
+
+    assert token is not None
+    assert await dist_lock.acquire(redis_client, RedisKeys.workboard_claim(str(card.id))) is None

@@ -83,6 +83,15 @@ class WorkboardRepository:
             await db.commit()
             return res.rowcount == 1
 
+    async def touch_heartbeat(self, card_id: uuid.UUID) -> None:
+        """Refresh heartbeat_at (claim liveness; the watchdog reaps cards whose lease lapsed)."""
+        async with self._factory() as db:
+            await db.execute(
+                update(WorkboardCard).where(WorkboardCard.id == card_id)
+                .values(heartbeat_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
     # ---- Task 4: dependency links + promote ----
 
     async def link(self, parent_card_id: uuid.UUID, child_card_id: uuid.UUID) -> None:

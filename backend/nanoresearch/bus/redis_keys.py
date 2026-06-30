@@ -93,6 +93,24 @@ class RedisKeys:
         # Phase 1: append-only staging list of subagent results for the continuation to drain.
         return f"subagent_results:{session_key}"
 
+    # Phase 2 workboard (serial-MVP). claim token = dist_lock token on the per-card lock.
+    @staticmethod
+    def workboard_claim(card_id: str) -> str:
+        return f"workboard_claim:{card_id}"
+
+    @staticmethod
+    def board_round(conversation_id: str) -> str:
+        # Set while a collaboration round is in flight; the dispatcher gate defers user messages
+        # on it, the collector DELs it on delivery (round-not-overlap → no epoch counter needed).
+        return f"board_round:{conversation_id}"
+
+    @staticmethod
+    def collector_lock(conversation_id: str) -> str:
+        # Fire-once idempotency for the collector (continuation_lock analog, conversation-scoped).
+        return f"collector_lock:{conversation_id}"
+
+    WORKBOARD_NOTIFY = "workboard_notify"
+
     # SSE stream (unchanged)
     @staticmethod
     def chat_events(chat_id: str) -> str:
