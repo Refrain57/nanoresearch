@@ -683,3 +683,100 @@ async def test_dispatcher_user_turn_enqueues_when_idle(redis_client):
     assert result == "enqueued"
     assert len(pool.jobs) == 1
     assert pool.jobs[0][0] == "run_agent_job"
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (collab): pass reroute + cap + fallback primary
+# ---------------------------------------------------------------------------
+
+async def test_reroute_offers_next_member(redis_client):
+    """A passes card → rerouted to B; target_agent_id updated, board_offer in B's inbox."""
+    import json
+    import nanoresearch.worker as worker
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    # primary = agents[0], A = agents[1], B = agents[2]
+    factory, agents = await _seed_user_agents(n=3)
+    primary, A, B = agents[0], agents[1], agents[2]
+    conv = await _seed_conv(factory, agent_id=primary.id)
+
+    conv_repo = ConversationRepository(factory)
+    await conv_repo.activate_agents(conv.id, [A.id, B.id])
+
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(
+        conversation_id=conv.id, title="t", spec="x",
+        status="ready", target_agent_id=A.id,
+    )
+
+    result = await worker._reroute_card(
+        redis_client, repo, _FakeArqPool(), str(conv.id), conv.uid, card,
+        passed_agent_id=str(A.id),
+    )
+
+    assert result == f"rerouted:{B.id}"
+    got = await repo.get(card.id)
+    assert got.target_agent_id == B.id
+    assert got.pass_count == 1
+
+    # board_offer must be in B's inbox
+    inbox_key = RedisKeys.agent_inbox(str(B.id), str(conv.id))
+    entries = await redis_client.xrange(inbox_key, "-", "+")
+    assert len(entries) == 1
+    _, fields = entries[0]
+    payload = json.loads(fields["data"])
+    assert payload["kind"] == "board_offer"
+    assert payload["card_id"] == str(card.id)
+
+
+async def test_reroute_fallback_primary_when_all_passed(redis_client):
+    """All non-primary members pass → target falls back to primary, offer in primary's inbox."""
+    import json
+    import nanoresearch.worker as worker
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    factory, agents = await _seed_user_agents(n=3)
+    primary, A, B = agents[0], agents[1], agents[2]
+    conv = await _seed_conv(factory, agent_id=primary.id)
+
+    conv_repo = ConversationRepository(factory)
+    await conv_repo.activate_agents(conv.id, [A.id, B.id])
+
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(
+        conversation_id=conv.id, title="t", spec="x",
+        status="ready", target_agent_id=A.id,
+    )
+
+    # First pass: A → reroute to B
+    await worker._reroute_card(
+        redis_client, repo, _FakeArqPool(), str(conv.id), conv.uid, card,
+        passed_agent_id=str(A.id),
+    )
+
+    # Re-fetch card so it reflects updated state
+    card = await repo.get(card.id)
+
+    # Second pass: B → fallback to primary
+    result = await worker._reroute_card(
+        redis_client, repo, _FakeArqPool(), str(conv.id), conv.uid, card,
+        passed_agent_id=str(B.id),
+    )
+
+    assert result == "fallback_primary"
+    got = await repo.get(card.id)
+    assert got.target_agent_id == primary.id
+    assert got.pass_count == 2
+
+    # board_offer must be in primary's inbox
+    inbox_key = RedisKeys.agent_inbox(str(primary.id), str(conv.id))
+    entries = await redis_client.xrange(inbox_key, "-", "+")
+    assert len(entries) == 1
+    _, fields = entries[0]
+    payload = json.loads(fields["data"])
+    assert payload["kind"] == "board_offer"
+    assert payload["card_id"] == str(card.id)

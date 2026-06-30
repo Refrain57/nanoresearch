@@ -450,6 +450,48 @@ async def _offer_next_or_collect(redis, repo, arq, conv_id, uid) -> str:
     return f"offered:{card.id}"
 
 
+async def _reroute_card(redis, repo, arq, conv_id, uid, card, passed_agent_id: str) -> str:
+    """Phase 2 Task 5: re-route a ready card after the target passes (declines it).
+
+    Records the pass, then finds the next untried non-primary member agent and redirects the
+    card to them. When all non-primary members have passed, falls back to the primary so the card
+    always finds a doer (termination guarantee). Returns a telemetry string.
+
+    Return values: "rerouted:{agent_id}" | "fallback_primary" | "no_target"
+    """
+    import uuid as _uuid
+
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+
+    # Step 1: record this pass (increments pass_count, appends {"passed": …} to artifacts).
+    await repo.record_pass(card.id, passed_agent_id)
+
+    # Step 2: resolve the conversation's primary agent and current member list.
+    _conv_uuid = _uuid.UUID(str(conv_id))
+    conv = await ConversationRepository(repo._factory).get_by_id(_conv_uuid)
+    primary = str(conv.agent_id) if conv and conv.agent_id else None
+    members = await ConversationRepository(repo._factory).list_member_agents(_conv_uuid)
+
+    # Step 3: re-fetch card so artifacts include the just-recorded pass.
+    card = await repo.get(card.id)
+    tried = {entry["passed"] for entry in (card.artifacts or []) if "passed" in entry}
+
+    # Step 4: candidates = non-primary members not yet tried.
+    candidates = [m for m in members if str(m.id) != primary and str(m.id) not in tried]
+
+    # Step 5: offer to the next candidate, or fall back to the primary.
+    if candidates:
+        await repo.set_target(card.id, candidates[0].id)
+        await _offer_next_or_collect(redis, repo, arq, conv_id, uid)
+        return f"rerouted:{candidates[0].id}"
+    else:
+        if primary is None:
+            return "no_target"
+        await repo.set_target(card.id, _uuid.UUID(primary))
+        await _offer_next_or_collect(redis, repo, arq, conv_id, uid)
+        return "fallback_primary"
+
+
 async def run_agent_job(
     ctx: dict,
     *,

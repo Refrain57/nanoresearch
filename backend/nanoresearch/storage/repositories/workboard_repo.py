@@ -216,6 +216,15 @@ class WorkboardRepository:
 
     # ---- Task 1 (collab layer): pass tracking ----
 
+    async def set_target(self, card_id: uuid.UUID, agent_id: uuid.UUID) -> None:
+        """Set target_agent_id on a card (reroute without changing status)."""
+        async with self._factory() as db:
+            await db.execute(
+                update(WorkboardCard).where(WorkboardCard.id == card_id)
+                .values(target_agent_id=agent_id, updated_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
     async def record_pass(self, card_id: uuid.UUID, passed_agent_id: str) -> int:
         """Increment pass_count and append {"passed": passed_agent_id} to artifacts.
         Returns the new pass_count."""
