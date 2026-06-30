@@ -177,6 +177,34 @@ async def test_subagent_staging_failure_does_not_advance_join(redis_client, monk
     assert pool.jobs == []                                       # NOT fired
 
 
+async def test_staging_rpush_retry_then_marker_advances(redis_client, monkeypatch):
+    """确认 2: full RPUSH fails, the minimal marker succeeds → THIS subagent advances the join
+    (marker has real advancing effect, not just a log)."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    factory, conv = await _seed_conv()
+    sk = f"web:{conv.id}"
+    await redis_client.sadd(RedisKeys.pending(sk), "t1:1000")
+    pool = _FakeArqPool()
+    mgr = _subagent_mgr(factory, str(conv.id), pool)
+    real_rpush = redis_client.rpush
+    calls = {"n": 0}
+    async def _flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 3:                  # the 3 full-result attempts fail
+            raise RuntimeError("flaky")
+        return await real_rpush(*a, **k)     # the 4th call (the marker) succeeds
+    monkeypatch.setattr(redis_client, "rpush", _flaky)
+    origin = {"channel": "web", "chat_id": str(conv.id), "run_id": "orig-1"}
+
+    await mgr._report_and_join("t1", "L", "task", "result", origin, "ok", sk)
+
+    assert await redis_client.scard(RedisKeys.pending(sk)) == 0   # join advanced (marker worked)
+    assert len(pool.jobs) == 1                                    # continuation fired
+    raw = await redis_client.lrange(RedisKeys.subagent_results(sk), 0, -1)
+    assert len(raw) == 1 and "unavailable" in raw[0]             # the staged entry is the marker
+
+
 async def test_watchdog_stale_pending_advances_join_and_wakes(redis_client, monkeypatch):
     """Phase 1 T7: a stale (crashed/stuck) subagent is reaped → join advanced + main woken."""
     import nanoresearch.bus.redis_client as rc

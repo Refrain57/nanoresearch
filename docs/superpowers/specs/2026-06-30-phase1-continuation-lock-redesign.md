@@ -1,6 +1,8 @@
 # Phase 1 锁模型结构性重设计:continuation_lock 闸门 + subagent_results 暂存
 
-> 状态:设计待评审(不写代码)。本文档**取代** Phase 1 计划里的锁/数据流模型(原 `join_and_acquire` 占 agent_lock + 子直接 append 会话),修复两个已实证的洞:
+> 状态:**已实现并合入分支 feature/phase1-subagent-async-return**(T1 join_and_fire / T4 闸门 / T6 子暂存 / T5 worker 续接 / T7 watchdog + 清理)。47 redesign+Phase0 测试 + 37 非 SSE 回归全绿。下方为设计原文(评审已通过)。
+>
+> 原状态:设计待评审(不写代码)。本文档**取代** Phase 1 计划里的锁/数据流模型(原 `join_and_acquire` 占 agent_lock + 子直接 append 会话),修复两个已实证的洞:
 > - **洞 1(已实证)**:`join_and_acquire` 占的是 agent_lock,R1 持锁期间最后一个子 join 的 `SET NX` 失败 → `fired=False` → pending 已空却无续接 → 挂死等 watchdog。
 > - **洞 2(分析确认)**:R1 的会话保存是全量 `DEL+RPUSH`,子的 `append_message` 是裸 `RPUSH` 不拿锁 → 快子/秒错子在 R1 保存前 append 会被 `DEL` 冲掉。
 
