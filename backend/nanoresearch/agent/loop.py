@@ -233,6 +233,12 @@ class AgentLoop:
                 self.tools.register(RetrieveByEntityTool(session_factory=self._session_factory))
             except Exception as _e:
                 logger.warning("RetrieveByEntityTool unavailable: {}", _e)
+        if self._session_factory is not None and getattr(self.subagents, "arq_pool", None) is not None:
+            try:
+                from nanoresearch.agent.tools.workboard_plan import DecomposeToBoardTool
+                self.tools.register(DecomposeToBoardTool(self._session_factory, self.subagents.arq_pool))
+            except Exception as _e:
+                logger.warning("DecomposeToBoardTool unavailable: {}", _e)
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -256,7 +262,7 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, kb_map: dict[str, str] | None = None, run_id: str | None = None, agent_id: str | None = None) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, kb_map: dict[str, str] | None = None, run_id: str | None = None, agent_id: str | None = None, agents_registry: list[dict] | None = None) -> None:
         """Update context for all tools that need routing info."""
         session_key = f"{channel}:{chat_id}"
         _kb_map = kb_map or {}
@@ -278,6 +284,19 @@ class AgentLoop:
                         tool.set_context(channel, chat_id, run_id=run_id)
                     else:
                         tool.set_context(channel, chat_id)
+
+        # Phase 2 Task 6: inject conversation context into DecomposeToBoardTool (web only).
+        # Only update when agents_registry is provided so repeated hook calls (which don't carry
+        # the registry) don't overwrite the context set at the start of the run.
+        if agents_registry is not None:
+            if tool := self.tools.get("decompose_to_board"):
+                if hasattr(tool, "set_context") and channel == "web":
+                    tool.set_context(
+                        conversation_id=chat_id,
+                        uid=self._uid,
+                        primary_agent_id=agent_id,
+                        agents_registry=agents_registry,
+                    )
 
         # Set session_key for MCP tools (for query rewriting)
         for tool_name in self.tools.tool_names:
@@ -799,7 +818,7 @@ class AgentLoop:
         if not session_readonly:
             await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id, agent_id=agent_id)
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id, agent_id=agent_id, agents_registry=agents_registry)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()

@@ -939,3 +939,155 @@ async def test_self_claim_judge_claim_runs_card_working(redis_client, monkeypatc
     got = await repo.get(card.id)
     assert got.status == "done", f"expected 'done', got '{got.status}'"
     assert str(got.owner_agent_id) == str(target.id)
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (collab): DecomposeToBoardTool — primary decomposes task into cards
+# ---------------------------------------------------------------------------
+
+async def _seed_two_specialist_agents(uid="u1"):
+    """Seed user + two specialist agents + a conversation owned by the first agent."""
+    from nanoresearch.auth.password import hash_password
+    from nanoresearch.storage.repositories.agent_repo import AgentRepository
+    from nanoresearch.storage.repositories.user_repo import UserRepository
+    factory = make_factory()
+    await UserRepository(factory).create(uid, hash_password("x"))
+    research_agent = await AgentRepository(factory).create(
+        {"name": "研究主", "created_by": uid, "description": "深度研究专家"})
+    writing_agent = await AgentRepository(factory).create(
+        {"name": "写作主", "created_by": uid, "description": "文章写作专家"})
+    primary_agent = await AgentRepository(factory).create(
+        {"name": "主协调", "created_by": uid, "description": "协调主"})
+    conv = await _seed_conv(factory, uid=uid, agent_id=primary_agent.id)
+    return factory, conv, primary_agent, research_agent, writing_agent
+
+
+def _make_registry(*agents):
+    return [{"id": str(a.id), "name": a.name, "description": a.description or ""}
+            for a in agents]
+
+
+async def test_decompose_creates_cards_and_links(redis_client, monkeypatch):
+    """execute() creates cards with correct statuses and links; both agents activated."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+
+    from nanoresearch.agent.tools.workboard_plan import DecomposeToBoardTool
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    factory, conv, primary, research, writing = await _seed_two_specialist_agents()
+    registry = _make_registry(research, writing)
+
+    tool = DecomposeToBoardTool(factory, _FakeArqPool())
+    tool.set_context(
+        conversation_id=str(conv.id),
+        uid=conv.uid,
+        primary_agent_id=str(primary.id),
+        agents_registry=registry,
+    )
+
+    result = await tool.execute(cards=[
+        {"title": "研究阶段", "spec": "深度研究量子计算现状", "target_agent": "研究主", "depends_on": []},
+        {"title": "写作阶段", "spec": "根据研究结果撰写综述", "target_agent": "写作主", "depends_on": [0]},
+    ])
+
+    assert "2 张卡片" in result, f"receipt should mention 2 cards; got: {result!r}"
+    assert "Error" not in result, f"unexpected error: {result!r}"
+
+    repo = WorkboardRepository(factory)
+    all_cards = await repo.list_by_conversation(conv.id)
+    assert len(all_cards) == 2
+
+    research_card = next(c for c in all_cards if c.title == "研究阶段")
+    writing_card = next(c for c in all_cards if c.title == "写作阶段")
+
+    assert research_card.status == "ready", f"root card should be ready; got {research_card.status}"
+    assert str(research_card.target_agent_id) == str(research.id)
+    assert writing_card.status == "todo", f"dependent card should be todo; got {writing_card.status}"
+    assert str(writing_card.target_agent_id) == str(writing.id)
+
+    # Dependency link: research → writing
+    assert await repo.parents_all_done(writing_card.id) is False  # research not done yet
+
+    # Both specialist agents (+ primary) should be activated
+    members = await ConversationRepository(factory).list_member_agents(conv.id)
+    member_ids = {str(m.id) for m in members}
+    assert str(research.id) in member_ids, "research agent should be activated"
+    assert str(writing.id) in member_ids, "writing agent should be activated"
+
+
+async def test_decompose_activates_and_offers_first(redis_client, monkeypatch):
+    """After execute: board_round key set, first ready card offered to research main's inbox."""
+    import json
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+
+    from nanoresearch.agent.tools.workboard_plan import DecomposeToBoardTool
+    from nanoresearch.bus.redis_keys import RedisKeys
+
+    factory, conv, primary, research, writing = await _seed_two_specialist_agents()
+    registry = _make_registry(research, writing)
+
+    tool = DecomposeToBoardTool(factory, _FakeArqPool())
+    tool.set_context(
+        conversation_id=str(conv.id),
+        uid=conv.uid,
+        primary_agent_id=str(primary.id),
+        agents_registry=registry,
+    )
+
+    await tool.execute(cards=[
+        {"title": "研究阶段", "spec": "深度研究量子计算", "target_agent": "研究主", "depends_on": []},
+        {"title": "写作阶段", "spec": "撰写综述文章", "target_agent": "写作主", "depends_on": [0]},
+    ])
+
+    # board_round key must be set
+    board_round_key = RedisKeys.board_round(str(conv.id))
+    assert await redis_client.get(board_round_key) is not None, "board_round key must be set"
+
+    # A board_offer must be in the research main's inbox (first ready card)
+    inbox_key = RedisKeys.agent_inbox(str(research.id), str(conv.id))
+    entries = await redis_client.xrange(inbox_key, "-", "+")
+    assert len(entries) == 1, f"expected 1 inbox entry for research agent; got {len(entries)}"
+    _, fields = entries[0]
+    payload = json.loads(fields["data"])
+    assert payload["kind"] == "board_offer", f"expected board_offer; got {payload!r}"
+    assert "card_id" in payload
+
+    # Writing agent's inbox should be empty (its card is still todo)
+    writing_inbox = RedisKeys.agent_inbox(str(writing.id), str(conv.id))
+    writing_entries = await redis_client.xrange(writing_inbox, "-", "+")
+    assert len(writing_entries) == 0, "writing agent inbox should be empty; card is still todo"
+
+
+async def test_decompose_unknown_target_returns_error(redis_client, monkeypatch):
+    """Unknown target_agent → error string returned, no cards created."""
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+
+    from nanoresearch.agent.tools.workboard_plan import DecomposeToBoardTool
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    factory, conv, primary, research, writing = await _seed_two_specialist_agents()
+    registry = _make_registry(research, writing)
+
+    tool = DecomposeToBoardTool(factory, _FakeArqPool())
+    tool.set_context(
+        conversation_id=str(conv.id),
+        uid=conv.uid,
+        primary_agent_id=str(primary.id),
+        agents_registry=registry,
+    )
+
+    result = await tool.execute(cards=[
+        {"title": "任务", "spec": "do something", "target_agent": "不存在的Agent", "depends_on": []},
+    ])
+
+    assert "Error" in result, f"expected error string; got: {result!r}"
+    assert "不存在的Agent" in result or "不存在" in result
+
+    # No cards should have been created
+    repo = WorkboardRepository(factory)
+    all_cards = await repo.list_by_conversation(conv.id)
+    assert len(all_cards) == 0, f"no cards should be created on error; got {len(all_cards)}"
