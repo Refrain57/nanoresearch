@@ -106,6 +106,7 @@ async def check_schema_migrations() -> None:
         ("conversation_agents", "agent_id"),
         ("workboard_cards", "status"),
         ("workboard_cards", "collected"),
+        ("workboard_cards", "pass_count"),
         ("workboard_card_links", "child_card_id"),
     ]
     missing = []

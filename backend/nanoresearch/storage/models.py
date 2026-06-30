@@ -501,6 +501,7 @@ class WorkboardCard(Base):
     artifacts: Mapped[list] = mapped_column(JSONB, default=list)
     result: Mapped[str | None] = mapped_column(Text)
     depth: Mapped[int] = mapped_column(Integer, default=0)
+    pass_count: Mapped[int] = mapped_column(Integer, default=0)
     collected: Mapped[bool] = mapped_column(Boolean, default=False)  # merged into the conversation by the collector
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

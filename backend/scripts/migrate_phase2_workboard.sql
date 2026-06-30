@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS workboard_cards (
 CREATE INDEX IF NOT EXISTS idx_workboard_cards_conversation ON workboard_cards (conversation_id);
 CREATE INDEX IF NOT EXISTS idx_workboard_cards_status ON workboard_cards (status);
 
+-- Task 1 (collab layer): pass_count tracks how many agents have "passed" on this card.
+ALTER TABLE workboard_cards ADD COLUMN IF NOT EXISTS pass_count INTEGER NOT NULL DEFAULT 0;
+
 -- Task 4: parent → child dependency (child waits in todo until all parents are done).
 CREATE TABLE IF NOT EXISTS workboard_card_links (
     parent_card_id UUID NOT NULL REFERENCES workboard_cards(id) ON DELETE CASCADE,

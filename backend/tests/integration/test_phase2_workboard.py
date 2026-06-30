@@ -549,3 +549,35 @@ async def test_watchdog_reaps_stale_running_card(redis_client, monkeypatch):
     wd = StuckRunWatchdog(redis_client, factory, _FakeArqPool())
     await wd._scan_stale_cards()
     assert (await repo.get(card.id)).status == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (collab layer): workboard_cards.pass_count + record_pass
+# ---------------------------------------------------------------------------
+
+async def test_create_card_pass_count_zero():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x")
+    assert card.pass_count == 0
+
+
+async def test_record_pass_increments_and_logs():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x")
+
+    result1 = await repo.record_pass(card.id, "A")
+    got = await repo.get(card.id)
+    assert result1 == 1
+    assert got.pass_count == 1
+    assert {"passed": "A"} in got.artifacts
+
+    result2 = await repo.record_pass(card.id, "B")
+    got2 = await repo.get(card.id)
+    assert result2 == 2
+    assert got2.pass_count == 2
+    assert {"passed": "B"} in got2.artifacts
+    assert {"passed": "A"} in got2.artifacts

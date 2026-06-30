@@ -214,6 +214,30 @@ class WorkboardRepository:
             )).scalar()
             return not_done == 0
 
+    # ---- Task 1 (collab layer): pass tracking ----
+
+    async def record_pass(self, card_id: uuid.UUID, passed_agent_id: str) -> int:
+        """Increment pass_count and append {"passed": passed_agent_id} to artifacts.
+        Returns the new pass_count."""
+        async with self._factory() as db:
+            card = (await db.execute(
+                select(WorkboardCard).where(WorkboardCard.id == card_id)
+            )).scalar_one()
+            card.pass_count = (card.pass_count or 0) + 1
+            card.artifacts = list(card.artifacts or []) + [{"passed": passed_agent_id}]
+            card.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            return card.pass_count
+
+    async def reset_pass(self, card_id: uuid.UUID) -> None:
+        """Reset pass_count to 0 (optional; used by collector after merging pass results)."""
+        async with self._factory() as db:
+            await db.execute(
+                update(WorkboardCard).where(WorkboardCard.id == card_id)
+                .values(pass_count=0, updated_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
     async def promote_ready_children(self, done_card_id: uuid.UUID) -> list[uuid.UUID]:
         """For each todo child of *done_card_id* whose parents are all done, transition it to
         ready. Returns the promoted child ids. Card-level analog of the Phase 1 join SCARD==0."""
