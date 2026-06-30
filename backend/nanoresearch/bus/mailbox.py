@@ -141,44 +141,6 @@ async def finalize_and_release(
     return bool(res)
 
 
-# Phase 1 必改 1: atomic subagent join that ALSO acquires the agent lock the instant it
-# empties the pending set. Removing the last pending member and taking the lock happen in one
-# atomic EVAL, so a dispatcher cannot grab the (otherwise free) lock in the gap between "batch
-# done" and "continuation started" — closing the user-message-vs-continuation race.
-# KEYS[1]=pending_key KEYS[2]=lock_key  ARGV[1]=task_id ARGV[2]=lock_token ARGV[3]=lock_px_ms
-# Returns 1 iff this call removed the last member AND acquired the lock (→ fire the
-# continuation with the given token); else 0.
-JOIN_ACQUIRE_LUA = """
-local members = redis.call('SMEMBERS', KEYS[1])
-local prefix = ARGV[1] .. ':'
-for i = 1, #members do
-    local m = members[i]
-    if m == ARGV[1] or string.sub(m, 1, #prefix) == prefix then
-        redis.call('SREM', KEYS[1], m)
-        break
-    end
-end
-if redis.call('SCARD', KEYS[1]) == 0 then
-    if redis.call('SET', KEYS[2], ARGV[2], 'NX', 'PX', ARGV[3]) then
-        return 1
-    end
-end
-return 0
-"""
-
-
-async def join_and_acquire(
-    redis: Any, session_key: str, task_id: str,
-    lock_key: str, lock_token: str, lock_px_ms: int = 30_000,
-) -> bool:
-    res = await redis.eval(
-        JOIN_ACQUIRE_LUA, 2,
-        RedisKeys.pending(session_key), lock_key,        # KEYS
-        task_id, lock_token, str(lock_px_ms),            # ARGV
-    )
-    return bool(res)
-
-
 # Phase 1 redesign: atomic join that, on emptying pending, SETs the **continuation_lock** (a key
 # the parent run NEVER holds) — so it never contends with the parent's agent_lock (fixes the
 # "R1 holds agent_lock → join SET NX fails → lost wakeup" hole). Overwrite SET (not NX): only the
