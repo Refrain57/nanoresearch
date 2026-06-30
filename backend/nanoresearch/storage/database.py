@@ -105,6 +105,7 @@ async def check_schema_migrations() -> None:
         # Phase 2 workboard (migrate_phase2_workboard.sql)
         ("conversation_agents", "agent_id"),
         ("workboard_cards", "status"),
+        ("workboard_cards", "collected"),
         ("workboard_card_links", "child_card_id"),
     ]
     missing = []

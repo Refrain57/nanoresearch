@@ -382,10 +382,25 @@ async def _finish_card_working(redis, repo, *, card_id, token, ok, result, artif
     await dist_lock.release(redis, RedisKeys.workboard_claim(str(card_id)), token)
 
 
+async def _collect_cards_into_session(redis, sessions, repo, conv_id, session_key, uid) -> None:
+    """Append each uncollected done card's product into the conversation session (atomic
+    append_message — safe), then mark them collected. Called under the primary's agent_lock so the
+    collector is the single session writer (serial-MVP conclusion ①)."""
+    cards = await repo.list_done_cards_for_collection(conv_id)
+    for card in cards:
+        body = f"[Card '{card.title}' done]\n\n{card.result or '(no result)'}"
+        try:
+            await sessions.append_message(session_key, {"role": "user", "content": body}, uid=uid)
+        except Exception as e:
+            logger.warning("collector append card result failed (non-fatal): {}", e)
+    await repo.mark_collected(conv_id)
+
+
 async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
     """Phase 2 serial board driver: enforce global WIP=1. If no card is running and a ready card
     exists, claim it for its target agent (fallback: the conversation's primary) and enqueue a
-    card-working run. Returns a short status string for tests/telemetry."""
+    card-working run. If no ready card but the board is quiesced, fire the collector. Returns a
+    short status string for tests/telemetry."""
     import uuid as _uuid
 
     from nanoresearch.bus import workboard
@@ -393,6 +408,22 @@ async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
         return "wip_busy"
     ready = await repo.list_by_conversation(conv_id, statuses={"ready"})
     if not ready:
+        # no claimable work → collect if the board is quiesced (fire-once)
+        if await workboard.try_claim_collector(redis, repo, conv_id):
+            from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+            conv = await ConversationRepository(repo._factory).get_by_id(_uuid.UUID(str(conv_id)))
+            primary = str(conv.agent_id) if conv and conv.agent_id else None
+            await arq.enqueue_job(
+                "run_agent_job",
+                run_id=_uuid.uuid4().hex,
+                session_key=f"web:{conv_id}",
+                content="请基于看板上各卡片的产出，综合并给用户最终答复。",
+                uid=uid,
+                agent_id=primary,
+                conversation_id=str(conv_id),
+                _collect=True,
+            )
+            return f"collect:{conv_id}"
         return "idle"
     card = ready[0]
     target = card.target_agent_id
@@ -445,6 +476,8 @@ async def run_agent_job(
     # Phase 2 card-working (set by the board driver; runs a card spec session-read-only).
     _card_id: str | None = None,
     _card_token: str | None = None,
+    # Phase 2 collector (set by the board driver on quiescence; the primary merges the cards).
+    _collect: bool = False,
 ) -> None:
     """ARQ job: execute an Agent run inside the worker; events stream via Redis."""
     from nanoresearch.bus.redis_client import get_redis
@@ -559,6 +592,40 @@ async def run_agent_job(
                         kb_map[_kid] = _kb.chroma_collection
             except Exception as kb_err:
                 logger.warning("Failed to build kb_map for agent %s: %s", agent_id, kb_err)
+
+        # Phase 2 collector: the primary main merges all done cards into the conversation and emits
+        # the final answer. Writes the session under agent_lock:{primary}:{conv} — the single
+        # session writer (serial-MVP conclusion ①: no new lock needed).
+        if _collect and conversation_id:
+            from nanoresearch.bus import dist_lock as _dl
+            from nanoresearch.bus import workboard as _wb
+            from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+            _wrepo = WorkboardRepository(factory)
+            _aid2 = str(agent_id) if agent_id else "none"
+            _alk = RedisKeys.agent_lock(_aid2, conversation_id)
+            _atok = await _dl.acquire(redis, _alk, px_ms=30_000)
+            if _atok is None:
+                logger.warning("collector %s could not acquire agent_lock — skipping", run_id)
+                return
+            try:
+                await _collect_cards_into_session(
+                    redis, loop.sessions, _wrepo, conversation_id, session_key, uid)
+                _chat_id = session_key.split(":", 1)[-1]
+                await loop.process_direct(
+                    content, session_key=session_key, channel="web", chat_id=_chat_id,
+                    run_id=run_id, on_stream=on_stream, on_progress=on_progress,
+                    on_tool_call=on_tool_call, skill_names=skill_names, agent_id=agent_id,
+                    agent_override=agent_override, custom_persona=custom_persona, harness=harness,
+                    agents_registry=agents_registry, kb_bindings=kb_bindings, kb_map=kb_map,
+                    conversation_id=conversation_id)
+                _fin = _utcnow()
+                await run_repo.update(run_id, status="completed", finished_at=_fin,
+                                      duration_ms=int((_fin - start).total_seconds() * 1000))
+                await xadd_event(redis, run_stream_key, {"type": "run_end", "status": "completed"})
+            finally:
+                await _wb.end_round(redis, conversation_id)
+                await _dl.release(redis, _alk, _atok)
+            return
 
         # Phase 2: card-working run — execute the card spec session-read-only, write the product to
         # the CARD (never the conversation session), finish the card, and drive the board to the

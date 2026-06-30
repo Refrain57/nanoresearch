@@ -385,3 +385,98 @@ async def test_process_direct_forwards_session_readonly():
 
     await loop.process_direct("hello", session_key="web:c", channel="web", chat_id="c")
     assert captured["session_readonly"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 7: collector single-writer
+# ---------------------------------------------------------------------------
+
+async def test_is_board_quiesced_true_when_done_and_no_active():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
+    assert await repo.is_board_quiesced(conv.id) is True
+
+
+async def test_is_board_quiesced_false_when_running():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
+    await repo.create_card(conversation_id=conv.id, title="r", spec="x", status="running")
+    assert await repo.is_board_quiesced(conv.id) is False
+
+
+async def test_is_board_quiesced_false_when_promotable_todo():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    parent = await repo.create_card(conversation_id=conv.id, title="p", spec="x", status="done")
+    child = await repo.create_card(conversation_id=conv.id, title="c", spec="x", status="todo")
+    await repo.link(parent.id, child.id)  # child's parents all done → promotable → not quiesced
+    assert await repo.is_board_quiesced(conv.id) is False
+
+
+async def test_is_board_quiesced_false_when_all_collected():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
+    await repo.mark_collected(conv.id)
+    assert await repo.is_board_quiesced(conv.id) is False  # nothing uncollected to collect
+
+
+async def test_try_claim_collector_fires_once(redis_client):
+    from nanoresearch.bus import workboard
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
+    assert await workboard.try_claim_collector(redis_client, repo, str(conv.id)) is True
+    assert await workboard.try_claim_collector(redis_client, repo, str(conv.id)) is False
+
+
+async def test_collect_cards_into_session_appends_and_marks(redis_client, monkeypatch, tmp_path):
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    import nanoresearch.worker as worker
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.session.manager import SessionManager
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    c1 = await repo.create_card(conversation_id=conv.id, title="L1", spec="x", status="done")
+    c2 = await repo.create_card(conversation_id=conv.id, title="L2", spec="x", status="done")
+    await repo.transition(c1.id, expect_status="done", to_status="done")  # no-op (illegal) ignore
+    # set results directly
+    async with factory() as db:
+        from nanoresearch.storage.models import WorkboardCard
+        for cid, res in ((c1.id, "r1"), (c2.id, "r2")):
+            card = await db.get(WorkboardCard, cid)
+            card.result = res
+        await db.commit()
+    sk = f"web:{conv.id}"
+    sessions = SessionManager(tmp_path, session_factory=factory, default_uid=conv.uid)
+
+    await worker._collect_cards_into_session(redis_client, sessions, repo, str(conv.id), sk, conv.uid)
+
+    raw = await redis_client.lrange(RedisKeys.session_msg(conv.uid, "web", str(conv.id)), 0, -1)
+    assert len(raw) == 2
+    assert await repo.is_board_quiesced(conv.id) is False  # all collected now
+
+
+async def test_drive_board_quiesced_enqueues_collector(redis_client):
+    import nanoresearch.worker as worker
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
+    pool = _FakeArqPool()
+
+    result = await worker._drive_board(redis_client, repo, pool, str(conv.id), conv.uid)
+
+    assert result == f"collect:{conv.id}"
+    fn, kw = pool.jobs[0]
+    assert fn == "run_agent_job" and kw["_collect"] is True
+    assert kw["conversation_id"] == str(conv.id)

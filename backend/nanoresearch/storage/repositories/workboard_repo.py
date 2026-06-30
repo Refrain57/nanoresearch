@@ -110,6 +110,61 @@ class WorkboardRepository:
             )
             await db.commit()
 
+    # ---- Task 7: collector quiescence ----
+
+    async def list_done_cards_for_collection(self, conversation_id: uuid.UUID) -> list[WorkboardCard]:
+        async with self._factory() as db:
+            return list((await db.execute(
+                select(WorkboardCard).where(
+                    WorkboardCard.conversation_id == conversation_id,
+                    WorkboardCard.status == "done",
+                    WorkboardCard.collected.is_(False),
+                ).order_by(WorkboardCard.created_at)
+            )).scalars().all())
+
+    async def mark_collected(self, conversation_id: uuid.UUID) -> None:
+        async with self._factory() as db:
+            await db.execute(
+                update(WorkboardCard).where(
+                    WorkboardCard.conversation_id == conversation_id,
+                    WorkboardCard.status == "done",
+                    WorkboardCard.collected.is_(False),
+                ).values(collected=True, updated_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
+    async def is_board_quiesced(self, conversation_id: uuid.UUID) -> bool:
+        """True iff there is ≥1 uncollected done card, AND no ready/running card, AND no promotable
+        todo card (a todo whose parents are all done). Serial-MVP: WIP=1 → this read is settled."""
+        async with self._factory() as db:
+            uncollected_done = (await db.execute(
+                select(func.count()).select_from(WorkboardCard).where(
+                    WorkboardCard.conversation_id == conversation_id,
+                    WorkboardCard.status == "done",
+                    WorkboardCard.collected.is_(False),
+                )
+            )).scalar()
+            if not uncollected_done:
+                return False
+            active = (await db.execute(
+                select(func.count()).select_from(WorkboardCard).where(
+                    WorkboardCard.conversation_id == conversation_id,
+                    WorkboardCard.status.in_(("ready", "running")),
+                )
+            )).scalar()
+            if active:
+                return False
+            todo_ids = (await db.execute(
+                select(WorkboardCard.id).where(
+                    WorkboardCard.conversation_id == conversation_id,
+                    WorkboardCard.status == "todo",
+                )
+            )).scalars().all()
+        for tid in todo_ids:
+            if await self.parents_all_done(tid):
+                return False  # a todo can still be promoted → board not quiesced
+        return True
+
     # ---- Task 4: dependency links + promote ----
 
     async def link(self, parent_card_id: uuid.UUID, child_card_id: uuid.UUID) -> None:

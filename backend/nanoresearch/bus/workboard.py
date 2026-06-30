@@ -49,6 +49,27 @@ async def heartbeat_card(redis: Any, repo: Any, *, card_id: Any, token: str, px_
     return ok
 
 
+async def try_claim_collector(redis: Any, repo: Any, conv_id: Any) -> bool:
+    """Fire-once collector trigger: if the board is quiesced, SET NX collector_lock and return
+    True (this caller should enqueue the collector). Else False. Serial-MVP: WIP=1 means the
+    quiescence read is settled, so there's no concurrent-completion race (conclusion ②)."""
+    if not await repo.is_board_quiesced(conv_id):
+        return False
+    ok = await redis.set(RedisKeys.collector_lock(str(conv_id)), "1", nx=True, px=120_000)
+    return bool(ok)
+
+
+async def begin_round(redis: Any, conv_id: Any, px_ms: int = 600_000) -> None:
+    """Mark a collaboration round in flight (the dispatcher gate defers user messages on it)."""
+    await redis.set(RedisKeys.board_round(str(conv_id)), "1", px=px_ms)
+
+
+async def end_round(redis: Any, conv_id: Any) -> None:
+    """Clear the round + collector markers after the collector delivers (round-not-overlap)."""
+    await redis.delete(RedisKeys.board_round(str(conv_id)))
+    await redis.delete(RedisKeys.collector_lock(str(conv_id)))
+
+
 async def release_card(redis: Any, repo: Any, *, card_id: Any, token: str, to_status: str = "ready") -> bool:
     """Token-gated release: drop the lock (token-checked) then move the card running→to_status,
     clearing owner/claim_token. Returns False if *token* no longer owns the lock."""

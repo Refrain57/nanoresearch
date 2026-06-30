@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS workboard_cards (
     artifacts           JSONB       NOT NULL DEFAULT '[]'::jsonb,
     result              TEXT,
     depth               INTEGER     NOT NULL DEFAULT 0,
+    collected           BOOLEAN     NOT NULL DEFAULT false,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
