@@ -472,3 +472,44 @@ class TunableObjectVersion(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()"),
     )
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Workboard (serial-MVP multi-main collaboration)
+# ---------------------------------------------------------------------------
+
+class WorkboardCard(Base):
+    """A task card on a conversation's workboard. State machine:
+    backlog → todo → ready → running → done|blocked (running → ready on release)."""
+    __tablename__ = "workboard_cards"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    spec: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, default="backlog", index=True)
+    owner_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    target_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    created_by_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    artifacts: Mapped[list] = mapped_column(JSONB, default=list)
+    result: Mapped[str | None] = mapped_column(Text)
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class WorkboardCardLink(Base):
+    """Parent → child dependency: a child stays in todo until all parents are done."""
+    __tablename__ = "workboard_card_links"
+
+    parent_card_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workboard_cards.id", ondelete="CASCADE"), primary_key=True)
+    child_card_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workboard_cards.id", ondelete="CASCADE"), primary_key=True)

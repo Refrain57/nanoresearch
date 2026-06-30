@@ -48,8 +48,8 @@ def truncate_all() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE TABLE conversation_agents, agent_runs, messages, conversations, "
-                "agents, users RESTART IDENTITY CASCADE"
+                "TRUNCATE TABLE workboard_card_links, workboard_cards, conversation_agents, "
+                "agent_runs, messages, conversations, agents, users RESTART IDENTITY CASCADE"
             )
     finally:
         conn.close()

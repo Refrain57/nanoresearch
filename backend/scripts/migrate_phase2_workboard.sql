@@ -10,3 +10,32 @@ CREATE TABLE IF NOT EXISTS conversation_agents (
     activated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (conversation_id, agent_id)
 );
+
+-- Task 3: workboard cards (state machine backlog→todo→ready→running→done|blocked).
+CREATE TABLE IF NOT EXISTS workboard_cards (
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id     UUID        NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    title               VARCHAR     NOT NULL,
+    spec                TEXT,
+    status              VARCHAR     NOT NULL DEFAULT 'backlog',
+    owner_agent_id      UUID        REFERENCES agents(id) ON DELETE SET NULL,
+    target_agent_id     UUID        REFERENCES agents(id) ON DELETE SET NULL,
+    created_by_agent_id UUID        REFERENCES agents(id) ON DELETE SET NULL,
+    claim_token         VARCHAR,
+    claimed_at          TIMESTAMPTZ,
+    heartbeat_at        TIMESTAMPTZ,
+    artifacts           JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    result              TEXT,
+    depth               INTEGER     NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_workboard_cards_conversation ON workboard_cards (conversation_id);
+CREATE INDEX IF NOT EXISTS idx_workboard_cards_status ON workboard_cards (status);
+
+-- Task 4: parent → child dependency (child waits in todo until all parents are done).
+CREATE TABLE IF NOT EXISTS workboard_card_links (
+    parent_card_id UUID NOT NULL REFERENCES workboard_cards(id) ON DELETE CASCADE,
+    child_card_id  UUID NOT NULL REFERENCES workboard_cards(id) ON DELETE CASCADE,
+    PRIMARY KEY (parent_card_id, child_card_id)
+);

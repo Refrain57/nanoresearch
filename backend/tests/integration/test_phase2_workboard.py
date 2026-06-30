@@ -81,3 +81,56 @@ async def test_membership_cascade_delete():
             select(func.count()).select_from(ConversationAgent)
             .where(ConversationAgent.conversation_id == conv.id))).scalar()
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3: workboard_cards state machine
+# ---------------------------------------------------------------------------
+
+async def _seed_conv_with_agent(uid="u1"):
+    factory, agents = await _seed_user_agents(uid=uid, n=1)
+    conv = await _seed_conv(factory, uid=uid, agent_id=agents[0].id)
+    return factory, conv, agents[0]
+
+
+async def test_create_card_defaults_backlog():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="do x")
+    assert card.status == "backlog"
+    got = await repo.get(card.id)
+    assert got is not None and got.title == "t"
+
+
+async def test_transition_status_cas():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="ready")
+    assert await repo.transition(card.id, expect_status="ready", to_status="running",
+                                 owner_agent_id=agent.id) is True
+    assert await repo.transition(card.id, expect_status="ready", to_status="running") is False
+    got = await repo.get(card.id)
+    assert got.status == "running" and str(got.owner_agent_id) == str(agent.id)
+
+
+async def test_illegal_transition_rejected():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="done")
+    assert await repo.transition(card.id, expect_status="done", to_status="running") is False
+    assert (await repo.get(card.id)).status == "done"
+
+
+async def test_list_by_conversation_filtered():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="a", spec="x", status="ready")
+    await repo.create_card(conversation_id=conv.id, title="b", spec="x", status="running")
+    await repo.create_card(conversation_id=conv.id, title="c", spec="x", status="done")
+    active = await repo.list_by_conversation(conv.id, statuses={"ready", "running"})
+    assert {c.title for c in active} == {"a", "b"}
+    assert len(await repo.list_by_conversation(conv.id)) == 3
