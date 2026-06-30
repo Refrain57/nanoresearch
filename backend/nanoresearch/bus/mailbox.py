@@ -215,3 +215,23 @@ async def join_and_fire(
         task_id, cont_token, str(cont_px_ms),            # ARGV
     )
     return bool(res)
+
+
+# Atomic read+clear of the staging list (the continuation drains it once, under agent_lock).
+DRAIN_LUA = """
+local items = redis.call('LRANGE', KEYS[1], 0, -1)
+redis.call('DEL', KEYS[1])
+return items
+"""
+
+
+async def drain_subagent_results(redis: Any, session_key: str) -> list[dict]:
+    """Atomically read and clear `subagent_results:{session_key}` → list of result dicts."""
+    raw = await redis.eval(DRAIN_LUA, 1, RedisKeys.subagent_results(session_key))
+    out: list[dict] = []
+    for r in (raw or []):
+        try:
+            out.append(json.loads(r))
+        except Exception:
+            pass
+    return out

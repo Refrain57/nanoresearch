@@ -283,10 +283,12 @@ async def _finalize_mailbox_run(redis, *, agent_id, conversation_id, lock_key, l
         logger.warning("finalize_mailbox_run failed (non-fatal)")
 
 
-async def _lock_refresher(redis, lock_key, lock_token, px_ms, stop_evt, abort_evt, proc_task):
-    """Extend the lock lease while the run is alive. If the lease is lost (token no longer ours),
-    set abort_evt and cancel the processing task so the run cannot keep writing unguarded — the
-    token-gated finalize then no-ops."""
+async def _lock_refresher(redis, lock_key, lock_token, px_ms, stop_evt, abort_evt, proc_task,
+                          cont_lock_key=None, cont_lock_token=None, cont_px_ms=120_000):
+    """Extend the agent_lock lease while the run is alive. If the lease is lost (token no longer
+    ours), set abort_evt and cancel the processing task so the run cannot keep writing unguarded —
+    the token-gated finalize then no-ops. For a continuation run also best-effort refresh the
+    continuation_lock each tick (over-refresh is harmless; its loss is backstopped by PX + watchdog)."""
     from nanoresearch.bus import dist_lock
     interval = px_ms / 3 / 1000.0
     try:
@@ -303,8 +305,63 @@ async def _lock_refresher(redis, lock_key, lock_token, px_ms, stop_evt, abort_ev
                 if not proc_task.done():
                     proc_task.cancel()
                 return
+            if cont_lock_key:
+                try:
+                    await dist_lock.refresh(redis, cont_lock_key, cont_lock_token, px_ms=cont_px_ms)
+                except Exception:
+                    pass
     except asyncio.CancelledError:
         return
+
+
+async def _continuation_acquire(redis, run_repo, run_id, run_stream_key, conversation_id,
+                                cont_lock_key, cont_lock_token, *, timeout_s=30):
+    """Continuation run: acquire agent_lock (bounded retry) before any session read/write so it
+    is mutually exclusive with a parent that may still be saving. On timeout, SELF-CLEAN (token-
+    gated DEL continuation_lock + run_end failed + re-notify) and return (None, None). No reliance
+    on PX/watchdog for the timeout path → no exposure window (§3.5)."""
+    import time as _time
+
+    from nanoresearch.bus import dist_lock, mailbox
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.bus.stream import xadd_event
+    agent_lock_key = RedisKeys.agent_lock("none", conversation_id)
+    deadline = _time.time() + timeout_s
+    while _time.time() < deadline:
+        tok = await dist_lock.acquire(redis, agent_lock_key, px_ms=30_000)
+        if tok:
+            return agent_lock_key, tok
+        await asyncio.sleep(0.5)
+    logger.error("continuation %s could not acquire agent_lock in %ss — self-cleaning", run_id, timeout_s)
+    try:
+        await dist_lock.release(redis, cont_lock_key, cont_lock_token)  # token-gated DEL
+        await run_repo.update(run_id, status="failed", finished_at=_utcnow(),
+                              error_message="continuation could not acquire agent_lock")
+        await xadd_event(redis, run_stream_key,
+                         {"type": "run_end", "status": "failed", "error": "continuation lock timeout"})
+        await mailbox.post_notify(
+            redis,
+            mailbox_key=RedisKeys.agent_inbox("none", conversation_id),
+            cursor_key=RedisKeys.agent_inbox_cursor("none", conversation_id),
+            lock_key=agent_lock_key)
+    except Exception:
+        logger.warning("continuation %s self-clean cleanup failed (non-fatal)", run_id)
+    return None, None
+
+
+async def _continuation_drain_and_append(redis, sessions, session_key, uid):
+    """Drain subagent_results (atomic LRANGE+DEL) and append each into the session — INSIDE the
+    agent_lock (caller holds it), so the baseline read in process_direct sees a single, latest state."""
+    from nanoresearch.bus import mailbox
+    staged = await mailbox.drain_subagent_results(redis, session_key)
+    for item in staged:
+        body = (f"[Subagent '{item.get('label', '')}' "
+                f"{'completed' if item.get('status') == 'ok' else 'failed'}]\n\n"
+                f"Task: {item.get('task', '')}\n\nResult:\n{item.get('result', '')}")
+        try:
+            await sessions.append_message(session_key, {"role": "user", "content": body}, uid=uid)
+        except Exception as e:
+            logger.warning("continuation append staged result failed (non-fatal): {}", e)
 
 
 async def run_agent_job(
@@ -329,6 +386,9 @@ async def run_agent_job(
     _lock_key: str | None = None,
     _lock_token: str | None = None,
     _entry_id: str | None = None,
+    # Phase 1 continuation (set by the join / watchdog; bypasses the inbox, holds continuation_lock).
+    _cont_lock_key: str | None = None,
+    _cont_lock_token: str | None = None,
 ) -> None:
     """ARQ job: execute an Agent run inside the worker; events stream via Redis."""
     from nanoresearch.bus.redis_client import get_redis
@@ -346,6 +406,7 @@ async def run_agent_job(
     # absent (None) for the Phase 1 continuation (it bypasses the inbox but still owns the lock,
     # so it still needs the refresher + a release-only finalize).
     _mailbox_enabled = bool(_lock_key and _lock_token)
+    _is_continuation = bool(_cont_lock_key and _cont_lock_token)
     _refresh_stop = asyncio.Event()
     _abort_evt = asyncio.Event()
     _refresh_task = None
@@ -443,6 +504,18 @@ async def run_agent_job(
             except Exception as kb_err:
                 logger.warning("Failed to build kb_map for agent %s: %s", agent_id, kb_err)
 
+        # Phase 1 continuation: acquire agent_lock (bounded retry; self-clean on timeout) BEFORE any
+        # session read/write, then drain staged subagent results into the session — all in-lock, so
+        # process_direct's baseline read sees the single latest state (§4.2 / §5).
+        if _is_continuation:
+            _lock_key, _lock_token = await _continuation_acquire(
+                redis, run_repo, run_id, run_stream_key, conversation_id,
+                _cont_lock_key, _cont_lock_token)
+            if _lock_token is None:
+                return  # self-cleaned (run_end emitted, continuation_lock released, re-notified)
+            _mailbox_enabled = True
+            await _continuation_drain_and_append(redis, loop.sessions, session_key, uid)
+
         _chat_id = session_key.split(":", 1)[-1]
         _proc_task = asyncio.create_task(loop.process_direct(
             content,
@@ -465,7 +538,9 @@ async def run_agent_job(
         ))
         if _mailbox_enabled:
             _refresh_task = asyncio.create_task(_lock_refresher(
-                redis, _lock_key, _lock_token, 30_000, _refresh_stop, _abort_evt, _proc_task))
+                redis, _lock_key, _lock_token, 30_000, _refresh_stop, _abort_evt, _proc_task,
+                cont_lock_key=_cont_lock_key if _is_continuation else None,
+                cont_lock_token=_cont_lock_token if _is_continuation else None))
         await _proc_task   # refresher cancels this on lease loss → CancelledError
 
         # Phase 1: if this run spawned subagents (pending non-empty), do NOT finish the turn.
@@ -521,6 +596,14 @@ async def run_agent_job(
                 conversation_id=conversation_id,
                 lock_key=_lock_key, lock_token=_lock_token, entry_id=_entry_id,
             )
+            # Phase 1 continuation: also DEL the continuation_lock (token-gated) so the gate clears
+            # and deferred user messages can run. (finalize above already released agent_lock + re-notified.)
+            if _is_continuation:
+                try:
+                    from nanoresearch.bus import dist_lock as _dl
+                    await _dl.release(redis, _cont_lock_key, _cont_lock_token)
+                except Exception:
+                    logger.warning("continuation_lock release failed (non-fatal); PX will clear it")
         # Close MCP stdio connections before the job task exits to avoid anyio cancel-scope error
         if loop is not None:
             try:

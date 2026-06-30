@@ -40,6 +40,66 @@ async def test_build_run_payload_rebuilds_config_from_conversation(redis_client)
     assert "agent_id" in payload and "skill_names" in payload  # config keys present
 
 
+async def test_continuation_acquire_succeeds_when_free(redis_client):
+    """T5: continuation acquires agent_lock when it is free → returns (agent_lock_key, token)."""
+    import nanoresearch.worker as worker
+    from nanoresearch.storage.repositories.run_repo import RunRepository
+    factory, conv = await _seed_conv()
+    run = await RunRepository(factory).create(conversation_id=conv.id, uid="u1")
+    cont_lock = RedisKeys.continuation_lock("none", str(conv.id))
+    await redis_client.set(cont_lock, "ctok", px=120_000)
+    lk, tok = await worker._continuation_acquire(
+        redis_client, RunRepository(factory), str(run.id),
+        RedisKeys.run_events(str(run.id)), str(conv.id), cont_lock, "ctok", timeout_s=2)
+    assert lk == RedisKeys.agent_lock("none", str(conv.id))
+    assert tok is not None
+
+
+async def test_continuation_acquire_self_cleans_on_timeout(redis_client):
+    """T5/§3.5: agent_lock held → continuation self-cleans (DEL continuation_lock + run_end), no window."""
+    import nanoresearch.worker as worker
+    from nanoresearch.bus import dist_lock
+    from nanoresearch.bus.stream import xread_next
+    from nanoresearch.storage.repositories.run_repo import RunRepository
+    factory, conv = await _seed_conv()
+    run = await RunRepository(factory).create(conversation_id=conv.id, uid="u1")
+    agent_lock = RedisKeys.agent_lock("none", str(conv.id))
+    cont_lock = RedisKeys.continuation_lock("none", str(conv.id))
+    await dist_lock.acquire(redis_client, agent_lock, px_ms=30_000)   # someone else holds agent_lock
+    await redis_client.set(cont_lock, "ctok", px=120_000)
+
+    lk, tok = await worker._continuation_acquire(
+        redis_client, RunRepository(factory), str(run.id),
+        RedisKeys.run_events(str(run.id)), str(conv.id), cont_lock, "ctok", timeout_s=1)
+
+    assert tok is None                                               # could not acquire
+    assert await redis_client.get(cont_lock) is None                # continuation_lock DEL'd (self-clean)
+    evs, _ = await xread_next(redis_client, RedisKeys.run_events(str(run.id)), "0-0", timeout_ms=200)
+    assert any(e.get("type") == "run_end" and e.get("status") == "failed" for e in evs)
+    assert (await RunRepository(factory).get(run.id)).status == "failed"
+
+
+async def test_continuation_drain_and_append(redis_client, monkeypatch, tmp_path):
+    """T5/§4.2: continuation drains staging (atomic) + appends to the session list."""
+    import json as _json
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    import nanoresearch.worker as worker
+    from nanoresearch.session.manager import SessionManager
+    factory, conv = await _seed_conv()
+    sk = f"web:{conv.id}"
+    rk = RedisKeys.subagent_results(sk)
+    await redis_client.rpush(rk, _json.dumps({"label": "L1", "task": "t", "status": "ok", "result": "r1"}))
+    await redis_client.rpush(rk, _json.dumps({"label": "L2", "task": "t", "status": "ok", "result": "r2"}))
+    sessions = SessionManager(tmp_path, session_factory=factory, default_uid="u1")
+
+    await worker._continuation_drain_and_append(redis_client, sessions, sk, "u1")
+
+    assert await redis_client.exists(rk) == 0                        # staging drained (DEL)
+    raw = await redis_client.lrange(RedisKeys.session_msg("u1", "web", str(conv.id)), 0, -1)
+    assert len(raw) == 2                                            # appended to the session
+
+
 async def test_has_pending_subagents(redis_client):
     """Phase 1 T5: main run defers run_end iff it has pending subagents."""
     import nanoresearch.worker as worker
