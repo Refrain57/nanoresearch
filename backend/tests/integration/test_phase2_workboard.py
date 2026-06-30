@@ -480,3 +480,72 @@ async def test_drive_board_quiesced_enqueues_collector(redis_client):
     fn, kw = pool.jobs[0]
     assert fn == "run_agent_job" and kw["_collect"] is True
     assert kw["conversation_id"] == str(conv.id)
+
+
+# ---------------------------------------------------------------------------
+# Task 8: serial termination (board_round + caps + late-drop + watchdog)
+# ---------------------------------------------------------------------------
+
+async def test_user_msg_deferred_during_round(redis_client):
+    from nanoresearch.bus import mailbox, workboard
+    from nanoresearch.bus.dispatcher import AgentDispatcher
+    from nanoresearch.bus.redis_keys import RedisKeys
+    factory, conv, agent = await _seed_conv_with_agent()
+    cid = str(conv.id)
+    await mailbox.post_message(redis_client, "none", cid, {"conversation_id": cid, "content": "hi"})
+    fields = {"mailbox_key": RedisKeys.agent_inbox("none", cid),
+              "cursor_key": RedisKeys.agent_inbox_cursor("none", cid),
+              "lock_key": RedisKeys.agent_lock("none", cid)}
+    disp = AgentDispatcher(redis_client, _FakeArqPool())
+
+    await workboard.begin_round(redis_client, cid)
+    assert await disp._handle_notify(fields) == "deferred_batch"
+
+    await workboard.end_round(redis_client, cid)
+    assert await disp._handle_notify(fields) == "enqueued"
+
+
+async def test_can_create_successor_depth_cap():
+    from nanoresearch.storage.repositories.workboard_repo import MAX_SUCCESSOR_DEPTH, WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    assert await repo.can_create_successor(conv.id, parent_depth=0) is True
+    assert await repo.can_create_successor(conv.id, parent_depth=MAX_SUCCESSOR_DEPTH) is False
+
+
+async def test_can_create_successor_count_cap(monkeypatch):
+    import nanoresearch.storage.repositories.workboard_repo as wr
+    monkeypatch.setattr(wr, "MAX_CARDS_PER_ROUND", 2)
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = wr.WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="a", spec="x")
+    assert await repo.can_create_successor(conv.id, parent_depth=0) is True
+    await repo.create_card(conversation_id=conv.id, title="b", spec="x")
+    assert await repo.can_create_successor(conv.id, parent_depth=0) is False
+
+
+async def test_late_fire_after_collection_is_dropped(redis_client):
+    from nanoresearch.bus import workboard
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
+    assert await workboard.try_claim_collector(redis_client, repo, str(conv.id)) is True
+    await repo.mark_collected(conv.id)
+    await workboard.end_round(redis_client, str(conv.id))
+    # late completion tries to fire again → board no longer quiesced (all collected) → dropped
+    assert await workboard.try_claim_collector(redis_client, repo, str(conv.id)) is False
+
+
+async def test_watchdog_reaps_stale_running_card(redis_client, monkeypatch):
+    import nanoresearch.bus.redis_client as rc
+    monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
+    from nanoresearch.heartbeat.stuck_run_watchdog import StuckRunWatchdog
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="r", spec="x", status="running")
+    # running card with NO claim lock (lease lapsed) → watchdog reaps it to blocked
+    wd = StuckRunWatchdog(redis_client, factory, _FakeArqPool())
+    await wd._scan_stale_cards()
+    assert (await repo.get(card.id)).status == "blocked"

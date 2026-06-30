@@ -65,6 +65,35 @@ class StuckRunWatchdog:
     async def _scan_once(self) -> None:
         await self._scan_stale_pending()
         await self._scan_stuck_running()
+        await self._scan_stale_cards()
+
+    async def _scan_stale_cards(self) -> None:
+        """Phase 2: reap running workboard cards whose claim lease lapsed (no workboard_claim lock)
+        → blocked, so a crashed card-working run doesn't hang the board. Best-effort drives the
+        board afterwards so the relay resumes."""
+        from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+        repo = WorkboardRepository(self._factory)
+        try:
+            running = await repo.list_running_cards()
+        except Exception:
+            return
+        for card in running:
+            if await self._redis.exists(RedisKeys.workboard_claim(str(card.id))):
+                continue  # claim lease still alive
+            reaped = await repo.transition(
+                card.id, expect_status="running", to_status="blocked",
+                result="[card reaped: claim lease lapsed]")
+            if not reaped:
+                continue
+            logger.info("watchdog reaped stale card {} → blocked", card.id)
+            try:
+                from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+                from nanoresearch.worker import _drive_board
+                conv = await ConversationRepository(self._factory).get_by_id(card.conversation_id)
+                if conv is not None and self._arq is not None:
+                    await _drive_board(self._redis, repo, self._arq, str(card.conversation_id), conv.uid)
+            except Exception:
+                logger.warning("watchdog post-reap board drive failed (non-fatal)")
 
     async def _scan_stale_pending(self) -> None:
         now = time.time()

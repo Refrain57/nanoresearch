@@ -434,6 +434,7 @@ async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
     token = await workboard.claim_card(redis, repo, card_id=card.id, agent_id=target, conv_id=conv_id)
     if token is None:
         return "claim_failed"
+    await workboard.begin_round(redis, conv_id)  # round in flight → dispatcher defers user msgs
     await arq.enqueue_job(
         "run_agent_job",
         run_id=_uuid.uuid4().hex,

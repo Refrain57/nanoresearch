@@ -122,9 +122,12 @@ class AgentDispatcher:
         # (pending>0) OR a continuation is pending/running (continuation_lock set). The two are
         # switched atomically by the join (SREM-to-zero + SET continuation_lock in one EVAL), so
         # there is no gap. (Platform session_key is "web:{conversation_id}".)
+        # Phase 2: also defer while a workboard collaboration round is in flight (board_round) so a
+        # user message can't插进协作循环中段 — it runs after the collector delivers + ends the round.
         cont_lock_key = RedisKeys.continuation_lock(agent_id, conversation_id)
         if (await self._redis.scard(RedisKeys.pending(f"web:{conversation_id}"))
-                or await self._redis.exists(cont_lock_key)):
+                or await self._redis.exists(cont_lock_key)
+                or await self._redis.exists(RedisKeys.board_round(conversation_id))):
             await dist_lock.release(self._redis, lock_key, token)
             return "deferred_batch"
 

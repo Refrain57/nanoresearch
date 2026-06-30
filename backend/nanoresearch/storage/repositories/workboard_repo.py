@@ -13,6 +13,11 @@ from nanoresearch.storage.models import WorkboardCard, WorkboardCardLink
 # Cap a single card's spec so one oversized instruction can't blow the card-working context window.
 WORKBOARD_MAX_SPEC_CHARS = 16_000
 
+# Termination guarantees (serial-MVP): bound the collaboration graph so a successor-creating loop
+# can't expand forever → the board is guaranteed to quiesce.
+MAX_CARDS_PER_ROUND = 50
+MAX_SUCCESSOR_DEPTH = 8
+
 # Legal card state transitions. Status CAS rejects anything not listed here.
 _LEGAL_TRANSITIONS = {
     ("backlog", "todo"),
@@ -109,6 +114,27 @@ class WorkboardRepository:
                 .values(heartbeat_at=datetime.now(timezone.utc))
             )
             await db.commit()
+
+    # ---- Task 8: termination caps + watchdog ----
+
+    async def can_create_successor(self, conversation_id: uuid.UUID, parent_depth: int) -> bool:
+        """Cost cap: reject a new successor card if the round已达卡片上限 or the successor depth would
+        exceed MAX_SUCCESSOR_DEPTH. Guarantees the board quiesces (no infinite successor loop)."""
+        if parent_depth + 1 > MAX_SUCCESSOR_DEPTH:
+            return False
+        async with self._factory() as db:
+            count = (await db.execute(
+                select(func.count()).select_from(WorkboardCard)
+                .where(WorkboardCard.conversation_id == conversation_id)
+            )).scalar()
+        return count < MAX_CARDS_PER_ROUND
+
+    async def list_running_cards(self) -> list[WorkboardCard]:
+        """All running cards across conversations (watchdog stale-card scan)."""
+        async with self._factory() as db:
+            return list((await db.execute(
+                select(WorkboardCard).where(WorkboardCard.status == "running")
+            )).scalars().all())
 
     # ---- Task 7: collector quiescence ----
 
