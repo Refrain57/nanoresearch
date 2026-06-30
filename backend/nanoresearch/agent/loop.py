@@ -252,14 +252,18 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, kb_map: dict[str, str] | None = None, run_id: str | None = None) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, kb_map: dict[str, str] | None = None, run_id: str | None = None, agent_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
         session_key = f"{channel}:{chat_id}"
         _kb_map = kb_map or {}
 
         # Phase 1: tell the subagent manager which conversation this run belongs to, so a
         # finished subagent can append its result + wake the main agent (web platform only).
-        self.subagents.set_run_context(conversation_id=chat_id if channel == "web" else None)
+        # Phase 2 Task 1: also the run's real agent_id, so the join keys continuation routing by
+        # the same identity the dispatcher gate parses (dispatcher.py:115,125).
+        self.subagents.set_run_context(
+            conversation_id=chat_id if channel == "web" else None,
+            agent_id=agent_id if channel == "web" else None)
 
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
@@ -327,6 +331,7 @@ class AgentLoop:
         session_key: str | None = None,
         context_trace: dict | None = None,
         conversation_id: str | None = None,
+        agent_id: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -367,7 +372,7 @@ class AgentLoop:
 
             async def before_execute_tools(self, context: AgentHookContext) -> None:
                 # Set session_key and kb_map BEFORE tool execution
-                loop_self._set_tool_context(channel, chat_id, message_id, kb_map=kb_map, run_id=run_id)
+                loop_self._set_tool_context(channel, chat_id, message_id, kb_map=kb_map, run_id=run_id, agent_id=agent_id)
 
                 if on_progress:
                     if not on_stream:
@@ -716,7 +721,7 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = await self.sessions.get_or_create(key)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id)
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id, agent_id=agent_id)
             history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             _sys_ctx_trace: dict = {}
@@ -739,6 +744,7 @@ class AgentLoop:
                 run_id=run_id,
                 session_key=key,
                 context_trace=_sys_ctx_trace,
+                agent_id=agent_id,
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             await self.sessions.save(session)
@@ -783,7 +789,7 @@ class AgentLoop:
 
         await self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id)
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), kb_map=kb_map or {}, run_id=run_id, agent_id=agent_id)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -836,6 +842,7 @@ class AgentLoop:
             session_key=key,
             context_trace=_ctx_trace,
             conversation_id=conversation_id,
+            agent_id=agent_id,
         )
 
         if final_content is None:

@@ -106,8 +106,11 @@ class StuckRunWatchdog:
             logger.warning("watchdog stage failure marker failed (non-fatal)")
 
         # atomic join → set continuation_lock (NOT agent_lock; consistent with the subagent path)
+        # Phase 2 Task 1: key by the conversation's real agent_id so it matches the dispatcher
+        # gate (dispatcher.py:115,125); "none" only when the conversation has no bound agent.
+        _aid = str(conv.agent_id) if conv.agent_id else "none"
         cont_token = uuid.uuid4().hex
-        cont_lock_key = RedisKeys.continuation_lock("none", conv_id)
+        cont_lock_key = RedisKeys.continuation_lock(_aid, conv_id)
         fired = await mailbox.join_and_fire(self._redis, session_key, task_id, cont_lock_key, cont_token)
         if not fired:
             return
@@ -120,7 +123,7 @@ class StuckRunWatchdog:
         payload = await _build_run_payload(
             self._factory, conv_id, conv.uid,
             content="部分子任务超时/失败，结果已并入对话。请基于已有结果尽力汇总并回复用户。",
-            run_id=str(run.id))
+            run_id=str(run.id), agent_id=(str(conv.agent_id) if conv.agent_id else None))
         await self._arq.enqueue_job(
             "run_agent_job", **payload, _cont_lock_key=cont_lock_key, _cont_lock_token=cont_token)
         logger.info("watchdog reaped stale subagent {} → woke continuation run {}", task_id, run.id)

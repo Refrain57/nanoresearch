@@ -315,7 +315,7 @@ async def _lock_refresher(redis, lock_key, lock_token, px_ms, stop_evt, abort_ev
 
 
 async def _continuation_acquire(redis, run_repo, run_id, run_stream_key, conversation_id,
-                                cont_lock_key, cont_lock_token, *, timeout_s=30):
+                                cont_lock_key, cont_lock_token, *, agent_id=None, timeout_s=30):
     """Continuation run: acquire agent_lock (bounded retry) before any session read/write so it
     is mutually exclusive with a parent that may still be saving. On timeout, SELF-CLEAN (token-
     gated DEL continuation_lock + run_end failed + re-notify) and return (None, None). No reliance
@@ -325,7 +325,8 @@ async def _continuation_acquire(redis, run_repo, run_id, run_stream_key, convers
     from nanoresearch.bus import dist_lock, mailbox
     from nanoresearch.bus.redis_keys import RedisKeys
     from nanoresearch.bus.stream import xadd_event
-    agent_lock_key = RedisKeys.agent_lock("none", conversation_id)
+    _aid = agent_id or "none"
+    agent_lock_key = RedisKeys.agent_lock(_aid, conversation_id)
     deadline = _time.time() + timeout_s
     while _time.time() < deadline:
         tok = await dist_lock.acquire(redis, agent_lock_key, px_ms=30_000)
@@ -341,8 +342,8 @@ async def _continuation_acquire(redis, run_repo, run_id, run_stream_key, convers
                          {"type": "run_end", "status": "failed", "error": "continuation lock timeout"})
         await mailbox.post_notify(
             redis,
-            mailbox_key=RedisKeys.agent_inbox("none", conversation_id),
-            cursor_key=RedisKeys.agent_inbox_cursor("none", conversation_id),
+            mailbox_key=RedisKeys.agent_inbox(_aid, conversation_id),
+            cursor_key=RedisKeys.agent_inbox_cursor(_aid, conversation_id),
             lock_key=agent_lock_key)
     except Exception:
         logger.warning("continuation %s self-clean cleanup failed (non-fatal)", run_id)
@@ -510,7 +511,8 @@ async def run_agent_job(
         if _is_continuation:
             _lock_key, _lock_token = await _continuation_acquire(
                 redis, run_repo, run_id, run_stream_key, conversation_id,
-                _cont_lock_key, _cont_lock_token)
+                _cont_lock_key, _cont_lock_token,
+                agent_id=str(agent_id) if agent_id else None)
             if _lock_token is None:
                 return  # self-cleaned (run_end emitted, continuation_lock released, re-notified)
             _mailbox_enabled = True

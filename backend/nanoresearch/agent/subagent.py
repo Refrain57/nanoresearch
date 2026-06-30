@@ -61,13 +61,19 @@ class SubagentManager:
         self.session_factory = session_factory
         self.arq_pool = arq_pool
         self._conversation_id: str | None = None
+        # Phase 2 Task 1: the owning/primary main's real agent_id, so the join keys the
+        # continuation_lock + continuation payload by the SAME identity the dispatcher gate
+        # parses (dispatcher.py:115,125). None → "none" placeholder (Phase 1 single-main).
+        self._agent_id: str | None = None
         self.runner = AgentRunner(provider) if provider else None
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
-    def set_run_context(self, conversation_id: str | None) -> None:
-        """Phase 1: the main run's conversation id (for the continuation wakeup)."""
+    def set_run_context(self, conversation_id: str | None, agent_id: str | None = None) -> None:
+        """Phase 1: the main run's conversation id (for the continuation wakeup).
+        Phase 2 Task 1: also the owning main's real agent_id (continuation routing alignment)."""
         self._conversation_id = conversation_id
+        self._agent_id = agent_id
 
     async def spawn(
         self,
@@ -280,7 +286,7 @@ class SubagentManager:
         # (3) atomic join → set continuation_lock (NOT agent_lock; never contends with the parent)
         import uuid as _uuid
         cont_token = _uuid.uuid4().hex
-        cont_lock_key = RedisKeys.continuation_lock("none", self._conversation_id)
+        cont_lock_key = RedisKeys.continuation_lock(self._agent_id or "none", self._conversation_id)
         try:
             from nanoresearch.bus import mailbox
             fired = await mailbox.join_and_fire(redis, session_key, task_id, cont_lock_key, cont_token)
@@ -300,7 +306,7 @@ class SubagentManager:
             payload = await _build_run_payload(
                 self.session_factory, self._conversation_id, self.uid,
                 content="所有子任务已完成，结果已并入对话。请基于这些子任务结果汇总并回复用户。",
-                run_id=origin.get("run_id") or "")
+                run_id=origin.get("run_id") or "", agent_id=self._agent_id)
             await self.arq_pool.enqueue_job(
                 "run_agent_job", **payload, _cont_lock_key=cont_lock_key, _cont_lock_token=cont_token)
             logger.info("Subagent [{}] batch complete — woke continuation run %s", task_id,

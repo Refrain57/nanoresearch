@@ -447,10 +447,15 @@ async def _enqueue_via_mailbox(redis, payload: dict) -> None:
     )
 
 
-async def _build_run_payload(factory, conversation_id: str, uid: str, content: str, run_id: str) -> dict:
+async def _build_run_payload(factory, conversation_id: str, uid: str, content: str, run_id: str,
+                             *, agent_id: str | None = None) -> dict:
     """Phase 1: rebuild a run payload (agent config from the conversation). Shared by the HTTP
     entry and the subagent/watchdog continuation wakeup so the continuation has identical agent
-    config — no persisted 'intent' state needed."""
+    config — no persisted 'intent' state needed.
+
+    Phase 2 Task 1: an explicit *agent_id* (the owning/primary main) overrides the conv-derived
+    value so the continuation/collector routes through the same identity the dispatcher gate sees
+    (dispatcher.py:115,125). None keeps the Phase 1 conv.agent_id behaviour (single-main)."""
     conv = await ConversationRepository(factory).get_by_id(uuid.UUID(conversation_id))
     skill_names = None
     custom_persona = None
@@ -477,7 +482,7 @@ async def _build_run_payload(factory, conversation_id: str, uid: str, content: s
         "rag_mode": "agentic",
         "kb_id": None,
         "skill_names": skill_names,
-        "agent_id": str(conv.agent_id) if conv and conv.agent_id else None,
+        "agent_id": agent_id if agent_id is not None else (str(conv.agent_id) if conv and conv.agent_id else None),
         "agent_override": None,
         "custom_persona": custom_persona,
         "harness": agent_harness or None,
