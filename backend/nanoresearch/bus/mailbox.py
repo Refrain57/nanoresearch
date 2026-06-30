@@ -177,3 +177,41 @@ async def join_and_acquire(
         task_id, lock_token, str(lock_px_ms),            # ARGV
     )
     return bool(res)
+
+
+# Phase 1 redesign: atomic join that, on emptying pending, SETs the **continuation_lock** (a key
+# the parent run NEVER holds) — so it never contends with the parent's agent_lock (fixes the
+# "R1 holds agent_lock → join SET NX fails → lost wakeup" hole). Overwrite SET (not NX): only the
+# pending-emptying subagent reaches it within a batch; across layers a lingering continuation_lock
+# is overwritten, and the previous continuation's token-gated DEL won't delete the new value.
+# KEYS[1]=pending_key KEYS[2]=continuation_lock_key  ARGV[1]=task_id ARGV[2]=cont_token ARGV[3]=cont_px_ms
+JOIN_FIRE_LUA = """
+local members = redis.call('SMEMBERS', KEYS[1])
+local prefix = ARGV[1] .. ':'
+for i = 1, #members do
+    local m = members[i]
+    if m == ARGV[1] or string.sub(m, 1, #prefix) == prefix then
+        redis.call('SREM', KEYS[1], m)
+        break
+    end
+end
+if redis.call('SCARD', KEYS[1]) == 0 then
+    redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+    return 1
+end
+return 0
+"""
+
+
+async def join_and_fire(
+    redis: Any, session_key: str, task_id: str,
+    cont_lock_key: str, cont_token: str, cont_px_ms: int = 120_000,
+) -> bool:
+    """Remove this subagent's pending member; iff that empties the batch, SET continuation_lock
+    and return True (fire the continuation with cont_token). Never touches agent_lock."""
+    res = await redis.eval(
+        JOIN_FIRE_LUA, 2,
+        RedisKeys.pending(session_key), cont_lock_key,   # KEYS
+        task_id, cont_token, str(cont_px_ms),            # ARGV
+    )
+    return bool(res)

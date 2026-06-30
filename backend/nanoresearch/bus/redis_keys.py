@@ -81,6 +81,18 @@ class RedisKeys:
     def agent_lock(agent_id: str, conversation_id: str) -> str:
         return f"agent_lock:{agent_id}:{conversation_id}"
 
+    @staticmethod
+    def continuation_lock(agent_id: str, conversation_id: str) -> str:
+        # Phase 1: gate marker — "a subagent batch is completing / a continuation is pending or
+        # running". Set atomically by the join when it empties pending; the parent run never
+        # holds it (so the join never contends with the parent's agent_lock).
+        return f"continuation_lock:{agent_id}:{conversation_id}"
+
+    @staticmethod
+    def subagent_results(session_key: str) -> str:
+        # Phase 1: append-only staging list of subagent results for the continuation to drain.
+        return f"subagent_results:{session_key}"
+
     # SSE stream (unchanged)
     @staticmethod
     def chat_events(chat_id: str) -> str:
