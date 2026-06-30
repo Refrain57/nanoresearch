@@ -351,12 +351,20 @@ async def run_events(
 
     run = await _get_run_or_404(run_id, uid, request)
     redis = request.app.state.redis
+    factory = request.app.state.session_factory
     stream_key = RedisKeys.run_events(run_id)
     _session_key = run.conversation_id and f"web:{run.conversation_id}"
+    _DB_CHECK_INTERVAL = 15.0  # only re-check the run's DB status after this much idle (rate-limit)
 
     async def _stream():
+        import time as _time
+
+        from nanoresearch.storage.repositories.run_repo import RunRepository
         cursor = last_id
         _normal_exit = False
+        # Backdate so the FIRST idle batch checks immediately (fast terminal detection), then
+        # at most once per interval (so a quiet-but-running run doesn't hammer the DB).
+        _last_db_check = _time.monotonic() - _DB_CHECK_INTERVAL
         try:
             while True:
                 events, cursor = await xread_next(redis, stream_key, cursor, timeout_ms=5_000)
@@ -365,6 +373,36 @@ async def run_events(
                     if ev.get("type") == "run_end":
                         _normal_exit = True
                         return
+                if events:
+                    _last_db_check = _time.monotonic()   # activity → reset idle timer
+                    continue
+                # Idle batch (no new events). Concern 1: only hit the DB once per interval.
+                if _time.monotonic() - _last_db_check < _DB_CHECK_INTERVAL:
+                    continue
+                _last_db_check = _time.monotonic()
+                try:
+                    fresh = await RunRepository(factory).get(uuid.UUID(run_id))
+                except Exception:
+                    fresh = None
+                if fresh is None or fresh.status not in ("completed", "failed"):
+                    continue   # still running / unknown → legit idle, keep waiting
+                # Terminal in the DB but no run_end seen on the stream (worker crashed, stream
+                # expired, etc.). Concern 3: a real run_end (e.g. from the watchdog) may have landed
+                # during this idle window — drain once non-blocking and PREFER it over synthesizing.
+                events, cursor = await xread_next(redis, stream_key, cursor, timeout_ms=0)
+                for ev in events:
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    if ev.get("type") == "run_end":
+                        _normal_exit = True
+                        return
+                # Still none → synthesize a run_end with the REAL terminal status (concern 2: a
+                # failed run must not be reported as completed).
+                synthetic = {"type": "run_end", "status": fresh.status}
+                if fresh.status == "failed" and fresh.error_message:
+                    synthetic["error"] = fresh.error_message
+                yield f"data: {json.dumps(synthetic, ensure_ascii=False)}\n\n"
+                _normal_exit = True
+                return
         finally:
             # Problem 3: only set cancel flag when client disconnected mid-stream,
             # NOT when the run completed normally (would poison the next request).
