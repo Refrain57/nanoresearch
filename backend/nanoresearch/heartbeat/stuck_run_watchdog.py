@@ -88,10 +88,10 @@ class StuckRunWatchdog:
             logger.info("watchdog reaped stale card {} → blocked", card.id)
             try:
                 from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
-                from nanoresearch.worker import _drive_board
+                from nanoresearch.worker import _offer_next_or_collect
                 conv = await ConversationRepository(self._factory).get_by_id(card.conversation_id)
                 if conv is not None and self._arq is not None:
-                    await _drive_board(self._redis, repo, self._arq, str(card.conversation_id), conv.uid)
+                    await _offer_next_or_collect(self._redis, repo, self._arq, str(card.conversation_id), conv.uid)
             except Exception:
                 logger.warning("watchdog post-reap board drive failed (non-fatal)")
 

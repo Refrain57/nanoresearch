@@ -396,14 +396,19 @@ async def _collect_cards_into_session(redis, sessions, repo, conv_id, session_ke
     await repo.mark_collected(conv_id)
 
 
-async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
-    """Phase 2 serial board driver: enforce global WIP=1. If no card is running and a ready card
-    exists, claim it for its target agent (fallback: the conversation's primary) and enqueue a
-    card-working run. If no ready card but the board is quiesced, fire the collector. Returns a
-    short status string for tests/telemetry."""
+async def _offer_next_or_collect(redis, repo, arq, conv_id, uid) -> str:
+    """Phase 2 collab board driver: enforce global WIP=1. If no card is running and a ready card
+    exists, OFFER it to the target agent's inbox (路B / self-claim) — the card stays ready with
+    owner=None; the agent picks it up in its own run. If no ready card but the board is quiesced,
+    fire the collector. Returns a short status string for tests/telemetry.
+
+    Return values: "wip_busy" | "offered:{card_id}" | "collect:{conv_id}" | "idle"
+    """
     import uuid as _uuid
 
-    from nanoresearch.bus import workboard
+    from nanoresearch.bus import mailbox, workboard
+    from nanoresearch.bus.redis_keys import RedisKeys
+
     if await repo.list_by_conversation(conv_id, statuses={"running"}):
         return "wip_busy"
     ready = await repo.list_by_conversation(conv_id, statuses={"ready"})
@@ -427,16 +432,22 @@ async def _drive_board(redis, repo, arq, conv_id, uid) -> str:
         from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
         conv = await ConversationRepository(repo._factory).get_by_id(_uuid.UUID(str(conv_id)))
         target = conv.agent_id if conv else None
-    token = await workboard.claim_card(redis, repo, card_id=card.id, agent_id=target, conv_id=conv_id)
-    if token is None:
-        return "claim_failed"
-    await workboard.begin_round(redis, conv_id)  # round in flight → dispatcher defers user msgs
-    from nanoresearch.server.routers.chat_router import _build_run_payload
-    payload = await _build_run_payload(
-        repo._factory, str(conv_id), uid, content=card.spec or card.title,
-        run_id=_uuid.uuid4().hex, agent_id=str(target) if target else None)
-    await arq.enqueue_job("run_agent_job", **payload, _card_id=str(card.id), _card_token=token)
-    return f"claimed:{card.id}"
+    target_str = str(target) if target else "none"
+    # Offer the card to the target agent's inbox — do NOT claim, do NOT enqueue card-working.
+    # The card stays status="ready" with owner_agent_id=None; the agent self-claims in its own run.
+    await mailbox.post_message(redis, target_str, conv_id, {
+        "kind": "board_offer",
+        "card_id": str(card.id),
+        "conversation_id": conv_id,
+        "uid": uid,
+    })
+    await mailbox.post_notify(
+        redis,
+        mailbox_key=RedisKeys.agent_inbox(target_str, conv_id),
+        cursor_key=RedisKeys.agent_inbox_cursor(target_str, conv_id),
+        lock_key=RedisKeys.agent_lock(target_str, conv_id),
+    )
+    return f"offered:{card.id}"
 
 
 async def run_agent_job(
@@ -669,7 +680,7 @@ async def run_agent_job(
                                        ok=ok, result=result_text, artifacts=[])
             await run_repo.update(run_id, status="completed" if ok else "failed", finished_at=_utcnow())
             try:
-                await _drive_board(redis, _wrepo, ctx["arq_pool"], conversation_id, uid)
+                await _offer_next_or_collect(redis, _wrepo, ctx["arq_pool"], conversation_id, uid)
             except Exception as e:
                 logger.warning("card-working board drive failed (non-fatal): %s", e)
             return

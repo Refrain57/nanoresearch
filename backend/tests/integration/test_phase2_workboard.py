@@ -325,8 +325,11 @@ class _FakeArqPool:
         self.jobs.append((fn, kw))
 
 
-async def test_drive_board_claims_ready_card_and_enqueues(redis_client):
+async def test_offer_posts_board_offer_and_leaves_card_ready(redis_client):
+    """Driver offers the card to the target's inbox; card stays ready with owner=None (self-claim)."""
+    import json
     import nanoresearch.worker as worker
+    from nanoresearch.bus.redis_keys import RedisKeys
     from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
     factory, conv, agent = await _seed_conv_with_agent()
     repo = WorkboardRepository(factory)
@@ -334,18 +337,27 @@ async def test_drive_board_claims_ready_card_and_enqueues(redis_client):
                                   status="ready", target_agent_id=agent.id)
     pool = _FakeArqPool()
 
-    result = await worker._drive_board(redis_client, repo, pool, str(conv.id), conv.uid)
+    result = await worker._offer_next_or_collect(redis_client, repo, pool, str(conv.id), conv.uid)
 
-    assert result == f"claimed:{card.id}"
-    assert (await repo.get(card.id)).status == "running"
-    fn, kw = pool.jobs[0]
-    assert fn == "run_agent_job"
-    assert kw["_card_id"] == str(card.id) and kw["_card_token"]
-    assert kw["content"] == "do x" and kw["agent_id"] == str(agent.id)
-    assert kw["session_key"] == f"web:{conv.id}"
+    assert result == f"offered:{card.id}"
+    # Card must remain ready with no owner — the agent hasn't claimed it yet
+    got = await repo.get(card.id)
+    assert got.status == "ready"
+    assert got.owner_agent_id is None
+    # A board_offer message must be in the target's inbox
+    inbox_key = RedisKeys.agent_inbox(str(agent.id), str(conv.id))
+    entries = await redis_client.xrange(inbox_key, "-", "+")
+    assert len(entries) == 1
+    _, fields = entries[0]
+    payload = json.loads(fields["data"])
+    assert payload["kind"] == "board_offer"
+    assert payload["card_id"] == str(card.id)
+    assert payload["conversation_id"] == str(conv.id)
+    # No card-working job enqueued — the offer is the only action
+    assert pool.jobs == []
 
 
-async def test_drive_board_wip_busy_does_nothing(redis_client):
+async def test_offer_wip_busy_when_running(redis_client):
     import nanoresearch.worker as worker
     from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
     factory, conv, agent = await _seed_conv_with_agent()
@@ -355,7 +367,7 @@ async def test_drive_board_wip_busy_does_nothing(redis_client):
                            target_agent_id=agent.id)
     pool = _FakeArqPool()
 
-    result = await worker._drive_board(redis_client, repo, pool, str(conv.id), conv.uid)
+    result = await worker._offer_next_or_collect(redis_client, repo, pool, str(conv.id), conv.uid)
 
     assert result == "wip_busy"
     assert pool.jobs == []
@@ -466,7 +478,7 @@ async def test_collect_cards_into_session_appends_and_marks(redis_client, monkey
     assert await repo.is_board_quiesced(conv.id) is False  # all collected now
 
 
-async def test_drive_board_quiesced_enqueues_collector(redis_client):
+async def test_offer_quiesced_enqueues_collector(redis_client):
     import nanoresearch.worker as worker
     from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
     factory, conv, agent = await _seed_conv_with_agent()
@@ -474,7 +486,7 @@ async def test_drive_board_quiesced_enqueues_collector(redis_client):
     await repo.create_card(conversation_id=conv.id, title="d", spec="x", status="done")
     pool = _FakeArqPool()
 
-    result = await worker._drive_board(redis_client, repo, pool, str(conv.id), conv.uid)
+    result = await worker._offer_next_or_collect(redis_client, repo, pool, str(conv.id), conv.uid)
 
     assert result == f"collect:{conv.id}"
     fn, kw = pool.jobs[0]
