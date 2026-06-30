@@ -248,38 +248,50 @@ class SubagentManager:
                     pass
             return
 
+        import json as _json
+
         from nanoresearch.bus.redis_client import get_redis
         from nanoresearch.bus.redis_keys import RedisKeys
         redis = get_redis()
 
-        # (2) append result into the main conversation — RAISE on failure → skip join
-        try:
-            from nanoresearch.session.manager import SessionManager
-            mgr = SessionManager(self.workspace, session_factory=self.session_factory,
-                                 default_uid=self.uid)
-            body = (f"[Subagent '{label}' {'completed' if status == 'ok' else 'failed'}]\n\n"
-                    f"Task: {task}\n\nResult:\n{result}")
-            await mgr.append_message(session_key, {"role": "user", "content": body}, uid=self.uid)
-        except Exception as e:
-            logger.warning(
-                "Subagent [{}] append_message failed — NOT advancing join (watchdog will reap): {}",
-                task_id, e)
-            return  # 必改 2
+        # (2) STAGE the result for the continuation — append-only RPUSH to subagent_results, NOT a
+        # direct session write (avoids racing R1's full-overwrite save). Retry the full result;
+        # on persistent failure RPUSH a minimal marker so THIS subagent can still advance the join
+        # (marker is its degraded result). Only if even the marker fails (Redis fully down) do we
+        # skip the join — member stays for the watchdog. (必改 2/4)
+        results_key = RedisKeys.subagent_results(session_key)
+        full = _json.dumps({"task_id": task_id, "label": label, "task": task,
+                            "status": status, "result": result}, ensure_ascii=False)
+        marker = _json.dumps({"task_id": task_id, "label": label, "task": task,
+                              "status": "error", "result": "[result unavailable]"}, ensure_ascii=False)
+        staged = False
+        for payload_str in (full, full, full, marker):   # 3 tries of the full result, then a marker
+            try:
+                await redis.rpush(results_key, payload_str)
+                await redis.expire(results_key, RedisKeys.SESSION_TTL)
+                staged = True
+                break
+            except Exception as e:
+                logger.warning("Subagent [{}] stage RPUSH failed (will retry/marker): {}", task_id, e)
+        if not staged:
+            logger.error("Subagent [{}] staging fully failed (Redis down?) — NOT advancing join", task_id)
+            return  # 必改 2: result not durable → don't judge the batch done
 
-        # (3) atomic join + lock acquire
+        # (3) atomic join → set continuation_lock (NOT agent_lock; never contends with the parent)
         import uuid as _uuid
-        lock_token = _uuid.uuid4().hex
-        lock_key = RedisKeys.agent_lock("none", self._conversation_id)
+        cont_token = _uuid.uuid4().hex
+        cont_lock_key = RedisKeys.continuation_lock("none", self._conversation_id)
         try:
             from nanoresearch.bus import mailbox
-            fired = await mailbox.join_and_acquire(redis, session_key, task_id, lock_key, lock_token)
+            fired = await mailbox.join_and_fire(redis, session_key, task_id, cont_lock_key, cont_token)
         except Exception as e:
-            logger.warning("Subagent [{}] join_and_acquire failed: {}", task_id, e)
+            logger.warning("Subagent [{}] join_and_fire failed: {}", task_id, e)
             return
         if not fired:
             return
 
-        # (4) wake the main agent — bypass inbox, direct arq enqueue, reuse original run_id
+        # (4) wake the main — bypass inbox, direct arq enqueue, reuse original run_id, hand the
+        # continuation_lock token to the continuation run.
         if self.arq_pool is None:
             logger.warning("Subagent [{}] no arq pool — cannot enqueue continuation", task_id)
             return
@@ -290,7 +302,7 @@ class SubagentManager:
                 content="所有子任务已完成，结果已并入对话。请基于这些子任务结果汇总并回复用户。",
                 run_id=origin.get("run_id") or "")
             await self.arq_pool.enqueue_job(
-                "run_agent_job", **payload, _lock_key=lock_key, _lock_token=lock_token)
+                "run_agent_job", **payload, _cont_lock_key=cont_lock_key, _cont_lock_token=cont_token)
             logger.info("Subagent [{}] batch complete — woke continuation run %s", task_id,
                         payload.get("run_id"))
         except Exception as e:

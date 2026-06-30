@@ -77,7 +77,7 @@ async def test_subagent_completion_appends_and_fires_join(redis_client, monkeypa
     mgr = _subagent_mgr(factory, str(conv.id), pool)
     origin = {"channel": "web", "chat_id": str(conv.id), "run_id": "orig-1"}
 
-    # t1 done → append + NOT fire (t2 still pending)
+    # t1 done → STAGE result + NOT fire (t2 still pending)
     await mgr._report_and_join("t1", "label1", "task1", "result-1", origin, "ok", sk)
     assert await redis_client.scard(RedisKeys.pending(sk)) == 1
     assert pool.jobs == []
@@ -88,15 +88,17 @@ async def test_subagent_completion_appends_and_fires_join(redis_client, monkeypa
     assert len(pool.jobs) == 1
     fn, kw = pool.jobs[0]
     assert fn == "run_agent_job"
-    assert kw["run_id"] == "orig-1"            # reused original run_id (SSE continuity)
-    assert kw["_lock_token"] and kw.get("_entry_id") is None
-    # both results appended to the session message list
-    raw = await redis_client.lrange(RedisKeys.session_msg("u1", "web", str(conv.id)), 0, -1)
+    assert kw["run_id"] == "orig-1"                       # reused original run_id (SSE continuity)
+    assert kw["_cont_lock_token"] and kw.get("_entry_id") is None  # continuation lock, not agent lock
+    # both results STAGED in subagent_results (not written to the session directly)
+    raw = await redis_client.lrange(RedisKeys.subagent_results(sk), 0, -1)
     assert len(raw) == 2
+    # and continuation_lock is set so the gate defers user messages until the continuation runs
+    assert await redis_client.get(RedisKeys.continuation_lock("none", str(conv.id))) == kw["_cont_lock_token"]
 
 
-async def test_subagent_append_failure_does_not_advance_join(redis_client, monkeypatch):
-    """必改 2: if append fails, the join is NOT advanced (member stays for the watchdog)."""
+async def test_subagent_staging_failure_does_not_advance_join(redis_client, monkeypatch):
+    """必改 2: if staging RPUSH (even the marker) fully fails, the join is NOT advanced."""
     import nanoresearch.bus.redis_client as rc
     monkeypatch.setattr(rc, "get_redis", lambda: redis_client)
     factory, conv = await _seed_conv()
@@ -104,10 +106,10 @@ async def test_subagent_append_failure_does_not_advance_join(redis_client, monke
     await redis_client.sadd(RedisKeys.pending(sk), "t1:1000")
     pool = _FakeArqPool()
     mgr = _subagent_mgr(factory, str(conv.id), pool)
-    # force append_message to fail
-    import nanoresearch.session.manager as m
-    monkeypatch.setattr(m.SessionManager, "append_message",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    # force every staging RPUSH (full + marker) to fail
+    async def _boom(*a, **k):
+        raise RuntimeError("redis down")
+    monkeypatch.setattr(redis_client, "rpush", _boom)
     origin = {"channel": "web", "chat_id": str(conv.id), "run_id": "orig-1"}
 
     await mgr._report_and_join("t1", "L", "task", "result", origin, "ok", sk)
