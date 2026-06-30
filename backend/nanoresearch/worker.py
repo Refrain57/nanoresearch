@@ -450,6 +450,71 @@ async def _offer_next_or_collect(redis, repo, arq, conv_id, uid) -> str:
     return f"offered:{card.id}"
 
 
+async def _judge_claim(loop, card, agent_id) -> bool:
+    """One lightweight LLM call: ask whether this main (agent_id) should claim the card.
+
+    Returns True (claim) or False (pass). Defaults to True on any provider failure so work
+    is never silently dropped due to a transient error. Kept as a module-level function so
+    tests can ``monkeypatch.setattr(worker, "_judge_claim", fake)``."""
+    try:
+        prompt = (
+            f"You are agent '{agent_id}'. A work card has been offered to you:\n"
+            f"Title: {card.title}\n"
+            f"Spec: {card.spec or '(no spec)'}\n\n"
+            "Should you claim this card and work on it, or pass it to another agent? "
+            "Reply with exactly one word: 'claim' if you should do it, 'pass' if you should not."
+        )
+        resp = await loop.provider.chat_with_retry(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5,
+            temperature=0.0,
+        )
+        text = (resp.content or "").strip().lower()
+        return text != "pass"   # anything other than explicit "pass" → claim (conservative)
+    except Exception:
+        logger.warning(
+            "_judge_claim LLM call failed (agent=%s, card=%s) — defaulting to claim",
+            agent_id, getattr(card, "id", "?"))
+        return True
+
+
+async def _decide_board_offer(
+    loop,
+    redis,
+    wrepo,
+    arq,
+    conv_id: str,
+    uid: str,
+    agent_id,
+    card,
+) -> tuple[str, str | None, str | None]:
+    """Route a board_offer: decide claim or pass, then act.
+
+    Returns ``(decision, card_id_str, token)`` where decision is one of:
+      "not_ready"    — card.status != "ready" (idempotent guard; caller should return)
+      "passed"       — judge declined; _reroute_card has been triggered
+      "claim_failed" — WIP busy / race lost; card left ready for a later retry
+      "claimed"      — card claimed; begin_round refreshed; proceed to card-working
+
+    Extracted as a separate function so the routing logic can be tested independently
+    (monkeypatch _judge_claim + stub loop) without needing a full ARQ ctx.
+    """
+    from nanoresearch.bus import workboard
+    if card.status != "ready":
+        return "not_ready", None, None
+    judge = await _judge_claim(loop, card, agent_id)
+    if not judge:
+        await _reroute_card(redis, wrepo, arq, conv_id, uid, card, passed_agent_id=str(agent_id))
+        return "passed", None, None
+    token = await workboard.claim_card(
+        redis, wrepo, card_id=card.id,
+        agent_id=uuid.UUID(str(agent_id)), conv_id=conv_id)
+    if token is None:
+        return "claim_failed", None, None
+    await workboard.begin_round(redis, conv_id)
+    return "claimed", str(card.id), token
+
+
 async def _reroute_card(redis, repo, arq, conv_id, uid, card, passed_agent_id: str) -> str:
     """Phase 2 Task 5: re-route a ready card after the target passes (declines it).
 
@@ -522,6 +587,9 @@ async def run_agent_job(
     _card_token: str | None = None,
     # Phase 2 collector (set by the board driver on quiescence; the primary merges the cards).
     _collect: bool = False,
+    # Phase 2 Task 4 (collab): self-claim — dispatcher enqueues with this when a board_offer
+    # is dispatched; the target main then judges claim/pass in its own run.
+    _board_offer_card_id: str | None = None,
 ) -> None:
     """ARQ job: execute an Agent run inside the worker; events stream via Redis."""
     from nanoresearch.bus.redis_client import get_redis
@@ -670,6 +738,36 @@ async def run_agent_job(
                 await _wb.end_round(redis, conversation_id)
                 await _dl.release(redis, _alk, _atok)
             return
+
+        # Phase 2 Task 4 (collab): self-claim — the target main judges whether to claim or pass
+        # the offered card entirely within its own run. On "claimed" we bind _card_id/_card_token
+        # and fall through into the card-working branch below (NO duplication of that body).
+        if _board_offer_card_id:
+            from nanoresearch.server.routers.chat_router import _build_run_payload
+            from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+            _wrepo = WorkboardRepository(factory)
+            _offer_card = await _wrepo.get(uuid.UUID(_board_offer_card_id))
+            if _offer_card is None:
+                return
+            # Enrich this run with the target main's persona/skills so the card-working run has
+            # the right identity (the dispatcher passed a minimal payload).
+            cfg = await _build_run_payload(
+                factory, conversation_id, uid,
+                content=(_offer_card.spec or _offer_card.title),
+                run_id=run_id, agent_id=agent_id)
+            _bo_decision, _bo_card_id, _bo_token = await _decide_board_offer(
+                loop, redis, _wrepo, ctx["arq_pool"], conversation_id, uid, agent_id, _offer_card)
+            if _bo_decision != "claimed":
+                return   # "not_ready" | "passed" | "claim_failed" — finally still runs (mailbox release)
+            # Bind card-working locals so the branch below executes for this card:
+            _card_id = _bo_card_id
+            _card_token = _bo_token
+            content = _offer_card.spec or _offer_card.title
+            custom_persona = cfg.get("custom_persona")
+            skill_names = cfg.get("skill_names")
+            agents_registry = cfg.get("agents_registry")
+            harness = cfg.get("harness")
+            # DO NOT return — fall through into the `if _card_id and _card_token:` branch below.
 
         # Phase 2: card-working run — execute the card spec session-read-only, write the product to
         # the CARD (never the conversation session), finish the card, and drive the board to the

@@ -780,3 +780,103 @@ async def test_reroute_fallback_primary_when_all_passed(redis_client):
     payload = json.loads(fields["data"])
     assert payload["kind"] == "board_offer"
     assert payload["card_id"] == str(card.id)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (collab): self-claim run branch — _decide_board_offer routing
+# ---------------------------------------------------------------------------
+
+async def _async_val(v):
+    """Helper: return a coroutine that yields v (for monkeypatching async functions)."""
+    return v
+
+
+async def test_self_claim_idempotent_when_not_ready(redis_client):
+    """card already done → _decide_board_offer returns 'not_ready', card untouched."""
+    import nanoresearch.worker as worker
+    from nanoresearch.agent.loop import AgentLoop
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="t", spec="x", status="done")
+
+    loop = AgentLoop.__new__(AgentLoop)
+    pool = _FakeArqPool()
+
+    decision, cid, tok = await worker._decide_board_offer(
+        loop, redis_client, repo, pool, str(conv.id), conv.uid, str(agent.id), card)
+
+    assert decision == "not_ready"
+    assert cid is None and tok is None
+    got = await repo.get(card.id)
+    assert got.status == "done"       # unchanged
+    assert got.owner_agent_id is None
+
+
+async def test_self_claim_judge_pass_reroutes(redis_client, monkeypatch):
+    """judge returns False → _reroute_card called with passed_agent_id, card not claimed."""
+    import nanoresearch.worker as worker
+    from nanoresearch.agent.loop import AgentLoop
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(
+        conversation_id=conv.id, title="t", spec="x",
+        status="ready", target_agent_id=agent.id,
+    )
+
+    monkeypatch.setattr(worker, "_judge_claim", lambda *a, **kw: _async_val(False))
+
+    rerouted = []
+
+    async def _fake_reroute(redis, wrepo, arq, conv_id, uid, card_, passed_agent_id):
+        rerouted.append(passed_agent_id)
+        return "rerouted:test"
+
+    monkeypatch.setattr(worker, "_reroute_card", _fake_reroute)
+
+    loop = AgentLoop.__new__(AgentLoop)
+    pool = _FakeArqPool()
+
+    decision, cid, tok = await worker._decide_board_offer(
+        loop, redis_client, repo, pool, str(conv.id), conv.uid, str(agent.id), card)
+
+    assert decision == "passed"
+    assert cid is None and tok is None
+    assert rerouted == [str(agent.id)], f"expected _reroute_card called once; got {rerouted}"
+    got = await repo.get(card.id)
+    assert got.status == "ready"
+    assert got.owner_agent_id is None
+
+
+async def test_self_claim_judge_claim_claims_card(redis_client, monkeypatch):
+    """judge returns True → claim_card succeeds, card transitions to running with owner=agent."""
+    import nanoresearch.worker as worker
+    from nanoresearch.agent.loop import AgentLoop
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(
+        conversation_id=conv.id, title="t", spec="do x",
+        status="ready", target_agent_id=agent.id,
+    )
+
+    monkeypatch.setattr(worker, "_judge_claim", lambda *a, **kw: _async_val(True))
+
+    loop = AgentLoop.__new__(AgentLoop)
+    pool = _FakeArqPool()
+
+    decision, cid, tok = await worker._decide_board_offer(
+        loop, redis_client, repo, pool, str(conv.id), conv.uid, str(agent.id), card)
+
+    assert decision == "claimed"
+    assert cid == str(card.id)
+    assert tok is not None
+    got = await repo.get(card.id)
+    assert got.status == "running"
+    assert str(got.owner_agent_id) == str(agent.id)
+    assert await redis_client.get(RedisKeys.workboard_claim(str(card.id))) == tok
