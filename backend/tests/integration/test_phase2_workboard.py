@@ -1091,3 +1091,29 @@ async def test_decompose_unknown_target_returns_error(redis_client, monkeypatch)
     repo = WorkboardRepository(factory)
     all_cards = await repo.list_by_conversation(conv.id)
     assert len(all_cards) == 0, f"no cards should be created on error; got {len(all_cards)}"
+
+
+# ---------------------------------------------------------------------------
+# Task 7 (collab): primary defers run_end while a board round is in flight
+# ---------------------------------------------------------------------------
+
+async def test_should_defer_run_end_on_board_round(redis_client):
+    """The primary planning run must leave run_end to the collector while a round is in flight
+    (board_round set) — in addition to the Phase 1 pending-subagents condition."""
+    import nanoresearch.worker as worker
+    from nanoresearch.bus.redis_keys import RedisKeys
+    sk = "web:deferc1"
+    conv_id = "deferc1"
+
+    # nothing in flight → do not defer
+    assert await worker._should_defer_run_end(redis_client, sk, conv_id) is False
+
+    # a board round in flight → defer (Phase 2)
+    await redis_client.set(RedisKeys.board_round(conv_id), "1")
+    assert await worker._should_defer_run_end(redis_client, sk, conv_id) is True
+    await redis_client.delete(RedisKeys.board_round(conv_id))
+    assert await worker._should_defer_run_end(redis_client, sk, conv_id) is False
+
+    # pending subagents in flight → defer (Phase 1 condition preserved)
+    await redis_client.sadd(RedisKeys.pending(sk), "t1:1")
+    assert await worker._should_defer_run_end(redis_client, sk, conv_id) is True

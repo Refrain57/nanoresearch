@@ -269,6 +269,22 @@ async def _has_pending_subagents(redis, session_key: str) -> bool:
         return False
 
 
+async def _should_defer_run_end(redis, session_key: str, conversation_id: str | None) -> bool:
+    """A run must leave run_end to a later run (collector/continuation) when work is still in
+    flight: Phase 1 — this run spawned subagents (pending non-empty); Phase 2 — a workboard
+    collaboration round is in flight (board_round set), so the primary planning run defers and the
+    collector emits run_end after merging the cards (reusing this run_id)."""
+    from nanoresearch.bus.redis_keys import RedisKeys
+    if await _has_pending_subagents(redis, session_key):
+        return True
+    if conversation_id:
+        try:
+            return bool(await redis.exists(RedisKeys.board_round(conversation_id)))
+        except Exception:
+            return False
+    return False
+
+
 async def _finalize_mailbox_run(redis, *, agent_id, conversation_id, lock_key, lock_token, entry_id):
     """Atomic finalize via one Lua (advance cursor → re-notify if backlog → release LAST,
     token-gated). The lock is freed only after the next notify is already in place, so there is
@@ -886,8 +902,8 @@ async def run_agent_job(
         # frontend keeps streaming subagent output, and the continuation run (reusing this
         # run_id, enqueued by the join when the batch completes) emits run_end after summarizing.
         # The Phase 0 `finally` still runs on this return (releases the inbox lock etc.).
-        if await _has_pending_subagents(redis, session_key):
-            logger.info("run_agent_job %s spawned subagents — deferring run_end to continuation", run_id)
+        if await _should_defer_run_end(redis, session_key, conversation_id):
+            logger.info("run_agent_job %s deferring run_end (pending subagents or board round in flight)", run_id)
             return
 
         finished = _utcnow()
