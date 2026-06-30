@@ -93,12 +93,45 @@ return 1
 """
 
 
+# Phase 1: release-only finalize for the continuation run (it bypasses the inbox, so there is
+# NO entry to advance the cursor past). Atomic: token-check → (if inbox backlog after the
+# current cursor) re-notify → release lock LAST. Reads/derives next-id from the cursor in Lua so
+# the whole thing is one atomic step (no exposure window before the queued user message runs).
+# KEYS[1]=lock KEYS[2]=inbox KEYS[3]=cursor KEYS[4]=notify
+# ARGV[1]=token ARGV[2]=mailbox_key ARGV[3]=cursor_key ARGV[4]=lock_key
+RELEASE_ONLY_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+local cursor = redis.call('GET', KEYS[3])
+if not cursor then cursor = '0-0' end
+local dash = string.find(cursor, '-')
+local ms = string.sub(cursor, 1, dash - 1)
+local seq = tonumber(string.sub(cursor, dash + 1))
+local nextid = ms .. '-' .. tostring(seq + 1)
+local nxt = redis.call('XRANGE', KEYS[2], nextid, '+', 'COUNT', 1)
+if #nxt > 0 then
+    redis.call('XADD', KEYS[4], '*', 'mailbox_key', ARGV[2], 'cursor_key', ARGV[3], 'lock_key', ARGV[4])
+end
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
+
 async def finalize_and_release(
     redis: Any, *, agent_id: str, conversation_id: str,
-    lock_key: str, token: str, entry_id: str, ttl: int = RedisKeys.AGENT_INBOX_TTL,
+    lock_key: str, token: str, entry_id: str | None, ttl: int = RedisKeys.AGENT_INBOX_TTL,
 ) -> bool:
     inbox = RedisKeys.agent_inbox(agent_id, conversation_id)
     cursor = RedisKeys.agent_inbox_cursor(agent_id, conversation_id)
+    if entry_id is None:
+        # Continuation run: no inbox entry was consumed — release lock + re-notify backlog only.
+        res = await redis.eval(
+            RELEASE_ONLY_LUA, 4,
+            lock_key, inbox, cursor, RedisKeys.DISPATCH_NOTIFY,             # KEYS
+            token, inbox, cursor, lock_key,                                # ARGV
+        )
+        return bool(res)
     res = await redis.eval(
         FINALIZE_LUA, 4,
         lock_key, inbox, cursor, RedisKeys.DISPATCH_NOTIFY,                  # KEYS
@@ -106,3 +139,61 @@ async def finalize_and_release(
         _next_stream_id(entry_id),                                          # ARGV[7]
     )
     return bool(res)
+
+
+# Phase 1 redesign: atomic join that, on emptying pending, SETs the **continuation_lock** (a key
+# the parent run NEVER holds) — so it never contends with the parent's agent_lock (fixes the
+# "R1 holds agent_lock → join SET NX fails → lost wakeup" hole). Overwrite SET (not NX): only the
+# pending-emptying subagent reaches it within a batch; across layers a lingering continuation_lock
+# is overwritten, and the previous continuation's token-gated DEL won't delete the new value.
+# KEYS[1]=pending_key KEYS[2]=continuation_lock_key  ARGV[1]=task_id ARGV[2]=cont_token ARGV[3]=cont_px_ms
+JOIN_FIRE_LUA = """
+local members = redis.call('SMEMBERS', KEYS[1])
+local prefix = ARGV[1] .. ':'
+for i = 1, #members do
+    local m = members[i]
+    if m == ARGV[1] or string.sub(m, 1, #prefix) == prefix then
+        redis.call('SREM', KEYS[1], m)
+        break
+    end
+end
+if redis.call('SCARD', KEYS[1]) == 0 then
+    redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+    return 1
+end
+return 0
+"""
+
+
+async def join_and_fire(
+    redis: Any, session_key: str, task_id: str,
+    cont_lock_key: str, cont_token: str, cont_px_ms: int = 120_000,
+) -> bool:
+    """Remove this subagent's pending member; iff that empties the batch, SET continuation_lock
+    and return True (fire the continuation with cont_token). Never touches agent_lock."""
+    res = await redis.eval(
+        JOIN_FIRE_LUA, 2,
+        RedisKeys.pending(session_key), cont_lock_key,   # KEYS
+        task_id, cont_token, str(cont_px_ms),            # ARGV
+    )
+    return bool(res)
+
+
+# Atomic read+clear of the staging list (the continuation drains it once, under agent_lock).
+DRAIN_LUA = """
+local items = redis.call('LRANGE', KEYS[1], 0, -1)
+redis.call('DEL', KEYS[1])
+return items
+"""
+
+
+async def drain_subagent_results(redis: Any, session_key: str) -> list[dict]:
+    """Atomically read and clear `subagent_results:{session_key}` → list of result dicts."""
+    raw = await redis.eval(DRAIN_LUA, 1, RedisKeys.subagent_results(session_key))
+    out: list[dict] = []
+    for r in (raw or []):
+        try:
+            out.append(json.loads(r))
+        except Exception:
+            pass
+    return out

@@ -40,13 +40,15 @@ class SubagentManager:
         rag_store: Any = None,
         settings: Any = None,
         uid: str | None = None,
+        session_factory: Any = None,
+        arq_pool: Any = None,
     ):
         from nanoresearch.config.schema import ExecToolConfig, WebSearchConfig
 
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
-        self.model = model or provider.get_default_model()
+        self.model = model or (provider.get_default_model() if provider else None)
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
@@ -55,9 +57,17 @@ class SubagentManager:
         self.rag_store = rag_store
         self.settings = settings
         self.uid = uid
-        self.runner = AgentRunner(provider)
+        # Phase 1: needed for async return to the main agent (append result + enqueue continuation).
+        self.session_factory = session_factory
+        self.arq_pool = arq_pool
+        self._conversation_id: str | None = None
+        self.runner = AgentRunner(provider) if provider else None
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+
+    def set_run_context(self, conversation_id: str | None) -> None:
+        """Phase 1: the main run's conversation id (for the continuation wakeup)."""
+        self._conversation_id = conversation_id
 
     async def spawn(
         self,
@@ -185,13 +195,13 @@ class SubagentManager:
                 fail_on_tool_error=True,
             ))
             if result.stop_reason == "tool_error":
-                await self._announce_result(
+                await self._report_and_join(
                     task_id, label, task, self._format_partial_progress(result),
                     origin, "error", session_key,
                 )
                 return
             if result.stop_reason == "error":
-                await self._announce_result(
+                await self._report_and_join(
                     task_id, label, task,
                     result.error or "Error: subagent execution failed.",
                     origin, "error", session_key,
@@ -200,29 +210,103 @@ class SubagentManager:
             final_result = result.final_content or "Task completed but no final response was generated."
 
             logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok", session_key)
+            await self._report_and_join(task_id, label, task, final_result, origin, "ok", session_key)
 
         except asyncio.CancelledError:
-            # Crash-safety: ensure pending count drops even on cancellation (Problem 8)
-            if session_key:
-                try:
-                    from nanoresearch.bus.redis_client import get_redis, pending_key
-                    await self._remove_pending_member(get_redis(), session_key, task_id)
-                except Exception:
-                    pass
+            # Phase 1: do NOT SREM here. A cancelled/crashed subagent leaves its pending member;
+            # the watchdog reaps stale members and advances the join. (Avoids a split SREM that
+            # would break the atomic "batch done + take lock" invariant.)
             raise
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            # Crash-safety SREM before _announce_result in case announce itself fails
+            await self._report_and_join(task_id, label, task, error_msg, origin, "error", session_key)
+
+    async def _report_and_join(self, task_id, label, task, result, origin, status, session_key):
+        """Phase 1: report a finished subagent and (if it completes the batch) wake the main.
+
+        1. announce to the frontend / re-trigger main (existing behaviour, no SREM now)
+        2. (web platform) append the result into the main conversation message list — RAISE on
+           failure → do NOT advance the join (必改 2: never judge "batch done" if a result is lost)
+        3. atomic join: remove this member and, iff it empties the batch, take the agent lock
+        4. if fired: wake the main via a DIRECT enqueue (bypass the inbox), reusing the original
+           run_id so the frontend SSE stream stays continuous
+        """
+        # (1) frontend stream / Model-1 re-trigger
+        await self._announce_result(task_id, label, task, result, origin, status, session_key)
+
+        # Non-platform path (CLI/channels): _announce_result already re-triggered the main loop;
+        # just drop the pending member and stop here.
+        if (origin.get("channel") != "web" or self.session_factory is None
+                or not self._conversation_id or not session_key):
             if session_key:
                 try:
-                    from nanoresearch.bus.redis_client import get_redis, pending_key
+                    from nanoresearch.bus.redis_client import get_redis
                     await self._remove_pending_member(get_redis(), session_key, task_id)
                 except Exception:
                     pass
-            await self._announce_result(task_id, label, task, error_msg, origin, "error", session_key)
+            return
+
+        import json as _json
+
+        from nanoresearch.bus.redis_client import get_redis
+        from nanoresearch.bus.redis_keys import RedisKeys
+        redis = get_redis()
+
+        # (2) STAGE the result for the continuation — append-only RPUSH to subagent_results, NOT a
+        # direct session write (avoids racing R1's full-overwrite save). Retry the full result;
+        # on persistent failure RPUSH a minimal marker so THIS subagent can still advance the join
+        # (marker is its degraded result). Only if even the marker fails (Redis fully down) do we
+        # skip the join — member stays for the watchdog. (必改 2/4)
+        results_key = RedisKeys.subagent_results(session_key)
+        full = _json.dumps({"task_id": task_id, "label": label, "task": task,
+                            "status": status, "result": result}, ensure_ascii=False)
+        marker = _json.dumps({"task_id": task_id, "label": label, "task": task,
+                              "status": "error", "result": "[result unavailable]"}, ensure_ascii=False)
+        staged = False
+        for payload_str in (full, full, full, marker):   # 3 tries of the full result, then a marker
+            try:
+                await redis.rpush(results_key, payload_str)
+                await redis.expire(results_key, RedisKeys.SESSION_TTL)
+                staged = True
+                break
+            except Exception as e:
+                logger.warning("Subagent [{}] stage RPUSH failed (will retry/marker): {}", task_id, e)
+        if not staged:
+            logger.error("Subagent [{}] staging fully failed (Redis down?) — NOT advancing join", task_id)
+            return  # 必改 2: result not durable → don't judge the batch done
+
+        # (3) atomic join → set continuation_lock (NOT agent_lock; never contends with the parent)
+        import uuid as _uuid
+        cont_token = _uuid.uuid4().hex
+        cont_lock_key = RedisKeys.continuation_lock("none", self._conversation_id)
+        try:
+            from nanoresearch.bus import mailbox
+            fired = await mailbox.join_and_fire(redis, session_key, task_id, cont_lock_key, cont_token)
+        except Exception as e:
+            logger.warning("Subagent [{}] join_and_fire failed: {}", task_id, e)
+            return
+        if not fired:
+            return
+
+        # (4) wake the main — bypass inbox, direct arq enqueue, reuse original run_id, hand the
+        # continuation_lock token to the continuation run.
+        if self.arq_pool is None:
+            logger.warning("Subagent [{}] no arq pool — cannot enqueue continuation", task_id)
+            return
+        try:
+            from nanoresearch.server.routers.chat_router import _build_run_payload
+            payload = await _build_run_payload(
+                self.session_factory, self._conversation_id, self.uid,
+                content="所有子任务已完成，结果已并入对话。请基于这些子任务结果汇总并回复用户。",
+                run_id=origin.get("run_id") or "")
+            await self.arq_pool.enqueue_job(
+                "run_agent_job", **payload, _cont_lock_key=cont_lock_key, _cont_lock_token=cont_token)
+            logger.info("Subagent [{}] batch complete — woke continuation run %s", task_id,
+                        payload.get("run_id"))
+        except Exception as e:
+            logger.warning("Subagent [{}] continuation enqueue failed: {}", task_id, e)
 
     async def _announce_result(
         self,
@@ -258,9 +342,8 @@ class SubagentManager:
                     "status": status,
                     "content": result,
                 })
-                # SREM after xadd so the SSE reader observes the event before pending drops to 0
-                if session_key:
-                    await self._remove_pending_member(redis, session_key, task_id)
+                # Phase 1: pending SREM is now owned by the atomic join (join_and_acquire),
+                # not here — so the join can atomically detect "batch done" and take the lock.
             except Exception as _e:
                 logger.error("Subagent [{}] failed to write result to Redis stream: {}", task_id, _e)
             logger.debug("Subagent [{}] wrote result to stream {}", task_id, origin.get("run_id") or origin["chat_id"])
@@ -281,13 +364,6 @@ Result:
             content=announce_content,
         )
         await self.bus.publish_inbound(msg)
-        # Problem 8: SREM for non-web path too
-        if session_key:
-            try:
-                from nanoresearch.bus.redis_client import get_redis, pending_key
-                await self._remove_pending_member(get_redis(), session_key, task_id)
-            except Exception:
-                pass
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"])
 
     @staticmethod
