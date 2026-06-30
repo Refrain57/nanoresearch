@@ -71,8 +71,19 @@ return 0
 | batch 期(continuation_lock 未置位)子崩/卡死 | pending 永不空 | watchdog 扫超期 pending → 触发 join_and_fire(置 continuation_lock + 拉续接) |
 | join 已置 continuation_lock,但续接 run 没起来(worker 挤压/崩) | 无人续租 | continuation_lock **PX 120s 到期**自动清(留足 enqueue→pickup 余量)→ 闸门放开;原 run_id 仍 running → watchdog `_scan_stuck_running` 标 failed + 补 run_end |
 | 续接 run 跑一半崩 | continuation_lock 续租停 → PX 到期清;原 run_id running | 同上:watchdog 补 run_end;暂存结果 TTL 自然过期 |
+| **续接抢 agent_lock 超时**(R1 卡住没释放) | 续接拿不到锁 | **续接自清**(它持 continuation_lock):token 门控 DEL continuation_lock + 标 run failed + 补 run_end + re-notify。**不留给 watchdog、不依赖 PX**(见下) |
 
-> `continuation_lock` PX=120s 而非 agent_lock 的 30s:要罩住「enqueue → worker 取走 → 续接开始续租」的延迟,避免续接还没起来锁就过期、用户消息抢进来。
+### 3.5 时间参数自洽(确认 3)
+| 参数 | 值 | 关系 |
+|---|---|---|
+| `agent_lock` PX / 续租 | 30s / 10s | Phase 0 不变 |
+| **续接抢 agent_lock 重试上限** | **30s** | 抢锁期间续接**活着、持续续租 continuation_lock**(每 `PX/3`≈40s),故 continuation_lock 在抢锁期不会过期 |
+| `continuation_lock` PX / 续租 | **120s / 40s** | PX(120) > 抢锁上限(30) + 余量;抢锁期靠续租维持,不靠 PX |
+| watchdog 扫描周期 | 120s | —— |
+
+- **抢锁超时(30s)路径**:续接**自己清** continuation_lock + 发 run_end(上表新增行)→ **无 PX-vs-watchdog 时间窗**,闸门不会出现「锁已过期 + 续接仍被处理」的漏窗。残留只剩「R1 自身卡住占着 agent_lock」,那是 Phase 0 既有行为(job_timeout 7200s 兜底),Phase 1 不放大。
+- **续接进程崩溃路径**(无法自清):continuation_lock 靠 PX(120s)自愈放开闸门。此窗内**没有活跃续接在写**(进程已死)→ 用户消息进来只是读到「R1 已存 + 部分暂存」的降级基线,**无并发写、无覆盖**;孤儿 run_id 由 watchdog `_scan_stuck_running` 在 run_stuck 后补 run_end。这是崩溃恢复的可接受降级,不是正确性洞。
+- 因此「抢锁超时」走自清(无窗),「进程崩溃」走 PX 自愈(窗内无活跃写者,良性)。两条路径都自洽。
 
 ---
 
@@ -81,16 +92,22 @@ return 0
 ### 4.1 谁写 —— 子(成功 / 失败都写),join 前
 `_report_and_join` 顺序:
 1. `_announce_result`(写 `run_events` 给前端,**不变**,AC5)。
-2. **RPUSH `subagent_results:{session_key}`** 一条结果 payload(成功=结果体,失败=错误 marker)。**有限重试 2 次**;仍失败 → RPUSH 一条极小 `[result unavailable]` marker(更易成功);连 marker 都失败(Redis 全挂)→ **不推进 join**,留 pending 给 watchdog(见 §6 必改 2/4)。
-3. RPUSH 成功 → `join_and_fire`(原子 SREM + 判空 + 置 continuation_lock)。
+2. **RPUSH `subagent_results:{session_key}`** 一条结果 payload(成功=结果体,失败=错误 marker)。**有限重试 2 次**;仍失败 → RPUSH 一条极小 `[result unavailable]` marker(payload 小、更易成功)。
+3. **只要 RPUSH(结果体或 marker)成功 → 该子自己调 `join_and_fire` 推进它的 pending 成员**(原子 SREM + 判空 + 置 continuation_lock)。**marker 即该子的降级结果,有真实推进作用 —— 不是 log、不是等 watchdog。** batch 不会被这个子卡住,续接读暂存时会看到 `[result unavailable]`。
+4. **唯一不推进的情况**:连极小 marker 都 RPUSH 失败(= Redis 全挂,灾难级)→ 不 SREM/不 join → 成员留 pending → 交 watchdog 长 stale(此时整个系统已不可用,长挂可接受)。
+
+> 确认 2:marker 的推进由「写 marker 的那个子自己 `join_and_fire`」完成,**不依赖 watchdog**。watchdog 只兜「连 marker 都写不进」的 Redis 全挂场景。
 
 > 子**不再直接写会话列表** → 躲开 R1-全量保存覆盖(洞 2)。子只写独立 append-only 列表。
 
 ### 4.2 谁读 / 谁清 —— 续接 run,落库前
-续接 run 在 `process_direct` **之前**:
-1. 原子 `LRANGE subagent_results 0 -1` + `DEL subagent_results`(一段 Lua,读清同一步)。
-2. 把读出的每条作为消息 **append 进会话列表**(续接持 agent_lock,唯一写者)。
-3. 再 `process_direct(content=汇总指令)` → 主拼提示词时 history 已含全部子结果。
+**硬要求(确认 1,最关键):续接的一切会话读写都在「抢到 agent_lock 之后」。** 单写者只保证"只有续接写",还要"续接写时基线最新",两者都满足才无覆盖。续接的执行序:
+
+1. 抢到 `agent_lock`(见 §5 有界重试)。**在此之前不读消息列表基线**——`_build_run_payload`(由 join 触发者在锁外调)只读 `conversation` 行取 agent 配置,**绝不读 messages**。
+2. 锁内:原子 `LRANGE subagent_results 0 -1` + `DEL subagent_results`(一段 Lua,读清同一步)。
+3. 锁内:把读出的每条 **append 进会话列表**(RPUSH 追加式,不读基线)。
+4. 锁内:`process_direct(content=汇总指令)` → 其 `get_or_create` 此刻才**读基线**(= R1/上层已 save 后的最新状态,因为续接持锁意味着上层已释放锁=已 save)→ 推理 → 全量 `DEL+RPUSH` 保存。
+5. 反例(禁止):若锁前(如 payload 阶段)就读了 messages 基线,而那时 R1 还没 save 完,续接用过期基线全量保存 → **续接覆盖 R1 的写**(与"子覆盖"同构)。所以基线读(`get_or_create`)**必须在锁内**(即 `process_direct` 在 acquire 之后调用)。
 
 ### 4.3 清 vs 写的并发(你点名的)
 - **本层不冲突**:join 触发的前提是 pending 空 = 本 batch 所有子都已完成(每个子是「先 RPUSH 后 SREM/join」,故最后一个 SREM 清空时所有 RPUSH 已落)→ 续接 drain 时**无子在写**。
@@ -142,7 +159,7 @@ return 0
 |---|---|
 | T1 `mailbox` | `join_and_acquire` → `join_and_fire`(SET `continuation_lock` 非 agent_lock);新增 `continuation_lock` key(`redis_keys.py`);暂存读清 Lua `drain_subagent_results`(LRANGE+DEL 原子) |
 | T4 dispatcher | 闸门 `SCARD(pending)>0 OR EXISTS(continuation_lock)` |
-| T5 worker | 续接 path:持 `continuation_lock`(token) + **抢 agent_lock(有界重试)** + drain 暂存→落库→`process_direct`;双锁续租;finalize = 释放 agent_lock + token 门控 DEL continuation_lock + re-notify |
+| T5 worker | 续接 path:持 `continuation_lock`(token) + **抢 agent_lock(有界重试 30s)→ 锁内 drain 暂存→落库→`process_direct`(基线读在锁内,§4.2)**;双锁续租;finalize = 释放 agent_lock + token 门控 DEL continuation_lock + re-notify;**抢锁超时 → 自清(DEL continuation_lock + 补 run_end,§3.5)** |
 | T6 subagent | `_report_and_join`:不再写会话;改 **RPUSH 暂存(重试+marker)** → `join_and_fire`(置 continuation_lock + 带 token 直接 enqueue 续接) |
 | T7 watchdog | 兜底 `join_and_fire`(置 continuation_lock 后 enqueue 续接,真 run_id);continuation_lock 僵死由 PX 自愈;`_scan_stuck_running` 不变 |
 | 必改 2/4 | 重心迁到暂存 RPUSH;重试 + 极小 marker |
@@ -164,9 +181,12 @@ return 0
 
 ---
 
-## 9. 仍需你拍板的两点
+## 9. 确认 1/2/3 落定 + 仍需你拍板一点
 
-1. **必改 4 默认走「重试 + 极小 marker」**(简单),还是要我把「`staging_failed` 短 stale 集合」也一起上(更强但多一套)?
-2. **续接抢 agent_lock 的有界重试上限**(默认建议 30s,拿不到则该 run 留 running 交 watchdog)——这个上限你认可吗?
+- **确认 1(基线读在锁内)**:已 codify 进 §4.2 —— 续接 `get_or_create` 在 acquire 之后,锁前不读 messages。
+- **确认 2(marker 有推进作用)**:已 codify 进 §4.1 —— 写 marker 的子自己 `join_and_fire` 推进,不靠 watchdog。
+- **确认 3(时间窗自洽)**:已 codify 进 §3.5 —— 抢锁超时走「续接自清」(无窗),进程崩溃走「PX 自愈」(窗内无活跃写者,良性);PX(120) > 抢锁上限(30) + 余量。
 
-这两点定了 + 上面 §1–§8 自洽你认了,我再进 TDD(先固化第 8 节红测试)。
+**仍需你拍板一点**:必改 4 默认走「重试 2 次 + 极小 marker」(§4.1,简单);要不要再叠加「`staging_failed` 短 stale 集合(120s)」做更强兜底(多一套,只在「连 marker 都失败」的 Redis 全挂场景才有额外价值)?**默认不叠加**,你要更强保障就说。
+
+定了这一点 + §1–§8 自洽你认了,即进 TDD(先固化 §8 红测试)。
