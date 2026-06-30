@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from nanoresearch.storage.models import WorkboardCard
+from nanoresearch.storage.models import WorkboardCard, WorkboardCardLink
 
 # Legal card state transitions. Status CAS rejects anything not listed here.
 _LEGAL_TRANSITIONS = {
@@ -82,3 +82,41 @@ class WorkboardRepository:
             )
             await db.commit()
             return res.rowcount == 1
+
+    # ---- Task 4: dependency links + promote ----
+
+    async def link(self, parent_card_id: uuid.UUID, child_card_id: uuid.UUID) -> None:
+        """Add a parent → child dependency (child waits in todo until all parents done)."""
+        async with self._factory() as db:
+            db.add(WorkboardCardLink(parent_card_id=parent_card_id, child_card_id=child_card_id))
+            await db.commit()
+
+    async def parents_all_done(self, child_card_id: uuid.UUID) -> bool:
+        """True if the child has no parents, or every parent card is done."""
+        async with self._factory() as db:
+            parent_ids = (await db.execute(
+                select(WorkboardCardLink.parent_card_id)
+                .where(WorkboardCardLink.child_card_id == child_card_id)
+            )).scalars().all()
+            if not parent_ids:
+                return True
+            not_done = (await db.execute(
+                select(func.count()).select_from(WorkboardCard)
+                .where(WorkboardCard.id.in_(parent_ids), WorkboardCard.status != "done")
+            )).scalar()
+            return not_done == 0
+
+    async def promote_ready_children(self, done_card_id: uuid.UUID) -> list[uuid.UUID]:
+        """For each todo child of *done_card_id* whose parents are all done, transition it to
+        ready. Returns the promoted child ids. Card-level analog of the Phase 1 join SCARD==0."""
+        async with self._factory() as db:
+            child_ids = (await db.execute(
+                select(WorkboardCardLink.child_card_id)
+                .where(WorkboardCardLink.parent_card_id == done_card_id)
+            )).scalars().all()
+        promoted: list[uuid.UUID] = []
+        for cid in child_ids:
+            if await self.parents_all_done(cid):
+                if await self.transition(cid, expect_status="todo", to_status="ready"):
+                    promoted.append(cid)
+        return promoted

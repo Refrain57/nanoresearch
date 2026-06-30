@@ -134,3 +134,48 @@ async def test_list_by_conversation_filtered():
     active = await repo.list_by_conversation(conv.id, statuses={"ready", "running"})
     assert {c.title for c in active} == {"a", "b"}
     assert len(await repo.list_by_conversation(conv.id)) == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 4: dependency links + promote (parents-all-done → ready)
+# ---------------------------------------------------------------------------
+
+async def test_no_parents_ready_eligible():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    card = await repo.create_card(conversation_id=conv.id, title="x", spec="x", status="todo")
+    assert await repo.parents_all_done(card.id) is True
+
+
+async def test_child_blocked_until_all_parents_done():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    p1 = await repo.create_card(conversation_id=conv.id, title="p1", spec="x", status="running")
+    p2 = await repo.create_card(conversation_id=conv.id, title="p2", spec="x", status="running")
+    child = await repo.create_card(conversation_id=conv.id, title="c", spec="x", status="todo")
+    await repo.link(p1.id, child.id)
+    await repo.link(p2.id, child.id)
+
+    await repo.transition(p1.id, expect_status="running", to_status="done")
+    assert await repo.promote_ready_children(p1.id) == []
+    assert (await repo.get(child.id)).status == "todo"
+
+    await repo.transition(p2.id, expect_status="running", to_status="done")
+    promoted = await repo.promote_ready_children(p2.id)
+    assert child.id in promoted
+    assert (await repo.get(child.id)).status == "ready"
+
+
+async def test_promote_idempotent():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    p = await repo.create_card(conversation_id=conv.id, title="p", spec="x", status="running")
+    child = await repo.create_card(conversation_id=conv.id, title="c", spec="x", status="todo")
+    await repo.link(p.id, child.id)
+    await repo.transition(p.id, expect_status="running", to_status="done")
+    assert child.id in await repo.promote_ready_children(p.id)
+    assert await repo.promote_ready_children(p.id) == []  # already ready (todo CAS fails)
+    assert (await repo.get(child.id)).status == "ready"
