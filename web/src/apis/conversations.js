@@ -12,4 +12,5 @@ export const getMessages = (id, params = {}) => {
 }
 export const deleteConversation  = (id) => apiDelete(`/api/conversations/${id}`)
 export const getConversationRuns = (id) => apiGet(`/api/conversations/${id}/runs`)
+export const getWorkboard = (id) => apiGet(`/api/conversations/${id}/workboard`)
 export const updateAgentOverride = (id, data) => apiPut(`/api/conversations/${id}/agent-override`, data)

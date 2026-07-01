@@ -41,6 +41,11 @@
         </div>
       </div>
 
+      <!-- 协作看板（多主协作时才有内容） -->
+      <div v-if="!loading" class="workboard-section">
+        <workboard-panel :conv-id="convId" ref="workboardRef" />
+      </div>
+
       <!-- 各 Agent 卡片 -->
       <div v-for="ag in agentSummaries" :key="ag.agentId" class="agent-block">
         <div class="agent-block-header">
@@ -156,6 +161,7 @@ import { ref, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { RobotOutlined, EditOutlined, CheckOutlined } from '@ant-design/icons-vue'
 import RunTimeline from '@/components/RunTimeline.vue'
+import WorkboardPanel from '@/components/WorkboardPanel.vue'
 import { getConversationRuns, getConversation, updateAgentOverride } from '@/apis/conversations'
 import { getAgent } from '@/apis/agents'
 import { useSettingsStore } from '@/stores/settings'
@@ -176,6 +182,7 @@ const overrideOpen = ref(false)
 const overrideSaving = ref(false)
 const overrideForm = ref({ model: null, max_iterations: null, skills: null })
 const agentSkills = ref([])
+const workboardRef = ref(null)
 
 async function load(convId) {
   if (!convId) return
@@ -217,7 +224,7 @@ async function load(convId) {
 
 watch(() => props.convId, (id) => load(id), { immediate: true })
 
-defineExpose({ refresh: () => load(props.convId) })
+defineExpose({ refresh: () => { load(props.convId); workboardRef.value?.refresh() } })
 
 function openOverride() {
   overrideForm.value = {
@@ -309,49 +316,49 @@ const formatTime = iso => iso ? new Date(iso).toLocaleString('zh-CN', { hour12: 
 .conv-detail-panel { padding: 4px 0; }
 
 .overview-row { display: flex; gap: 12px; margin-bottom: 20px; }
-.ov-card { flex: 1; background: #fafafa; border: 1px solid #f0f0f0; border-radius: 8px; padding: 14px; text-align: center; }
-.ov-num { font-size: 24px; font-weight: 700; color: #1677ff; }
-.ov-num.good { color: #52c41a; }
-.ov-num.warn { color: #faad14; }
-.ov-num.bad  { color: #f5222d; }
-.ov-label { font-size: 12px; color: #999; margin-top: 4px; }
+.ov-card { flex: 1; background: var(--nr-rail); border: 1px solid var(--nr-border); border-radius: 8px; padding: 14px; text-align: center; }
+.ov-num { font-size: 24px; font-weight: 700; color: var(--nr-clay); }
+.ov-num.good { color: var(--nr-sage); }
+.ov-num.warn { color: var(--nr-gold); }
+.ov-num.bad  { color: var(--nr-danger); }
+.ov-label { font-size: 12px; color: var(--nr-ink-3); margin-top: 4px; }
 
-.override-card { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
+.override-card { background: #fff; border: 1px solid var(--nr-border); border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
 .override-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.override-title { font-size: 14px; font-weight: 600; color: #333; }
+.override-title { font-size: 14px; font-weight: 600; color: var(--nr-ink); }
 .override-body { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.override-tag { font-size: 12px; background: #e6f4ff; color: #1677ff; padding: 2px 10px; border-radius: 4px; }
-.override-empty { font-size: 12px; color: #bbb; }
+.override-tag { font-size: 12px; background: var(--nr-clay-soft); color: var(--nr-clay); padding: 2px 10px; border-radius: 4px; }
+.override-empty { font-size: 12px; color: var(--nr-ink-3); }
 
-.agent-block { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 18px; margin-bottom: 14px; }
+.agent-block { background: #fff; border: 1px solid var(--nr-border); border-radius: 10px; padding: 18px; margin-bottom: 14px; }
 .agent-block-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
 .agent-block-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
-.agent-name-link { color: #1677ff; text-decoration: none; }
+.agent-name-link { color: var(--nr-clay); text-decoration: none; }
 .agent-name-link:hover { text-decoration: underline; }
-.agent-name-plain { color: #333; }
-.agent-block-meta { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #888; }
+.agent-name-plain { color: var(--nr-ink); }
+.agent-block-meta { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--nr-ink-2); }
 
 .tool-stats-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
-.tool-stats-table th { text-align: left; padding: 5px 10px; color: #888; font-weight: 600; border-bottom: 1px solid #f0f0f0; }
-.tool-stats-table td { padding: 7px 10px; border-bottom: 1px solid #fafafa; }
+.tool-stats-table th { text-align: left; padding: 5px 10px; color: var(--nr-ink-2); font-weight: 600; border-bottom: 1px solid var(--nr-border); }
+.tool-stats-table td { padding: 7px 10px; border-bottom: 1px solid var(--nr-rail); }
 .tool-stats-table tr:last-child td { border-bottom: none; }
-.tool-name { font-family: monospace; color: #1677ff; font-weight: 500; }
-.ok  { color: #52c41a; }
-.err { color: #f5222d; }
-.rate-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #555; }
-.rate-bar { height: 6px; border-radius: 3px; background: #52c41a; min-width: 2px; max-width: 80px; }
-.no-tools { font-size: 13px; color: #bbb; padding: 8px 0 12px; }
+.tool-name { font-family: monospace; color: var(--nr-clay); font-weight: 500; }
+.ok  { color: var(--nr-sage); }
+.err { color: var(--nr-danger); }
+.rate-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--nr-ink-2); }
+.rate-bar { height: 6px; border-radius: 3px; background: var(--nr-sage); min-width: 2px; max-width: 80px; }
+.no-tools { font-size: 13px; color: var(--nr-ink-3); padding: 8px 0 12px; }
 .run-collapse { margin-top: 4px; }
 
-.field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+.field-hint { font-size: 11px; color: var(--nr-ink-3); margin-top: 4px; }
 .skill-override-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
 .skill-override-item {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 10px; border: 1px solid #f0f0f0; border-radius: 6px;
+  padding: 6px 10px; border: 1px solid var(--nr-border); border-radius: 6px;
   cursor: pointer; font-size: 13px; transition: all 0.15s;
 }
-.skill-override-item:hover { border-color: #91caff; background: #f0f8ff; }
-.skill-override-item.active { border-color: #1677ff; background: #e6f4ff; }
+.skill-override-item:hover { border-color: var(--nr-clay-soft); background: var(--nr-clay-tint); }
+.skill-override-item.active { border-color: var(--nr-clay); background: var(--nr-clay-soft); }
 .skill-override-name { flex: 1; }
-.skill-check-icon { color: #1677ff; font-size: 12px; }
+.skill-check-icon { color: var(--nr-clay); font-size: 12px; }
 </style>

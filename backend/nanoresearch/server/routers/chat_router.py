@@ -210,6 +210,50 @@ async def get_conversation_runs(
     return [_run_to_dict(r) for r in runs]
 
 
+@router.get("/api/conversations/{conv_id}/workboard")
+async def get_conversation_workboard(
+    conv_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """Read-only workboard state: cards grouped by status with the responsible main agent and
+    dependency links. Empty unless the conversation ran multi-main collaboration (decompose_to_board)."""
+    conv = await _get_conv_or_404(conv_id, uid, request)
+    factory = request.app.state.session_factory
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    wrepo = WorkboardRepository(factory)
+    cards = await wrepo.list_by_conversation(conv.id)
+    parents = await wrepo.list_links(conv.id)
+    names: dict[str, str] = {}
+    if any(c.target_agent_id or c.owner_agent_id for c in cards):
+        names = {str(a.id): a.name for a in await AgentRepository(factory).list_by_user(uid)}
+
+    def _agent(aid):
+        return {"id": str(aid), "name": names.get(str(aid), str(aid)[:8])} if aid else None
+
+    out = [{
+        "id": str(c.id),
+        "title": c.title,
+        "status": c.status,
+        "spec": (c.spec or "")[:400],
+        "result": (c.result or "")[:800],
+        "target_agent": _agent(c.target_agent_id),
+        "owner_agent": _agent(c.owner_agent_id),
+        "depends_on": parents.get(str(c.id), []),
+        "pass_count": c.pass_count,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    } for c in cards]
+
+    round_active = False
+    try:
+        from nanoresearch.bus.redis_client import get_redis
+        from nanoresearch.bus.redis_keys import RedisKeys
+        round_active = bool(await get_redis().exists(RedisKeys.board_round(str(conv.id))))
+    except Exception:
+        pass
+    return {"cards": out, "round_active": round_active}
+
+
 # ---------------------------------------------------------------------------
 # Runs
 # ---------------------------------------------------------------------------

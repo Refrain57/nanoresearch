@@ -78,6 +78,22 @@ class WorkboardRepository:
                 stmt = stmt.where(WorkboardCard.status.in_(statuses))
             return list((await db.execute(stmt.order_by(WorkboardCard.created_at))).scalars().all())
 
+    async def list_links(self, conversation_id: uuid.UUID) -> dict[str, list[str]]:
+        """{child_card_id_str: [parent_card_id_str, ...]} for the conversation's cards (board view)."""
+        async with self._factory() as db:
+            card_ids = (await db.execute(
+                select(WorkboardCard.id).where(WorkboardCard.conversation_id == conversation_id)
+            )).scalars().all()
+            if not card_ids:
+                return {}
+            links = (await db.execute(
+                select(WorkboardCardLink).where(WorkboardCardLink.child_card_id.in_(card_ids))
+            )).scalars().all()
+        out: dict[str, list[str]] = {}
+        for link in links:
+            out.setdefault(str(link.child_card_id), []).append(str(link.parent_card_id))
+        return out
+
     async def transition(
         self, card_id: uuid.UUID, *, expect_status: str, to_status: str, **fields
     ) -> bool:

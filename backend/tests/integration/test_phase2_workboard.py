@@ -1150,3 +1150,25 @@ async def test_reroute_blocks_when_primary_also_passes(redis_client, monkeypatch
                                     await repo.get(card.id), passed_agent_id=str(primary.id))
     assert r3 == "blocked_no_taker"
     assert (await repo.get(card.id)).status == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# ② board view: WorkboardRepository.list_links (feeds the GET /workboard endpoint)
+# ---------------------------------------------------------------------------
+
+async def test_list_links_returns_child_to_parents():
+    from nanoresearch.storage.repositories.workboard_repo import WorkboardRepository
+    factory, conv, agent = await _seed_conv_with_agent()
+    repo = WorkboardRepository(factory)
+    p1 = await repo.create_card(conversation_id=conv.id, title="p1", spec="x", status="done")
+    p2 = await repo.create_card(conversation_id=conv.id, title="p2", spec="x", status="done")
+    child = await repo.create_card(conversation_id=conv.id, title="c", spec="x", status="todo")
+    await repo.link(p1.id, child.id)
+    await repo.link(p2.id, child.id)
+
+    links = await repo.list_links(conv.id)
+    assert set(links[str(child.id)]) == {str(p1.id), str(p2.id)}
+    assert str(p1.id) not in links  # roots have no parents
+    # empty conversation → {}
+    factory2, conv2, _ = await _seed_conv_with_agent(uid="u2")
+    assert await WorkboardRepository(factory2).list_links(conv2.id) == {}
