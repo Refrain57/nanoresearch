@@ -163,6 +163,10 @@ class AgentLoop:
         # Per-turn accumulator of deduped RAG citations; reset at each turn entry
         # (_process_message) and read back in _save_turn to embed into content.
         self._turn_citations: list[dict] = []
+        # Injected by worker.py before process_direct: maps source_path (temp file
+        # used at ingestion) → original filename from KbDocument.filename.
+        # If empty (CLI / no KB), citations are left unchanged.
+        self._citation_source_map: dict[str, str] = {}
 
         self.context = ContextBuilder(workspace, timezone=timezone, knowledge_search=knowledge_search, uid=uid)
         self.sessions = session_manager or SessionManager(workspace)
@@ -462,6 +466,16 @@ class AgentLoop:
                             loop_self._turn_citations = _merge_citations(
                                 loop_self._turn_citations, items
                             )
+                            # Remap source_path → original filename if a map was injected
+                            # by worker.py (built from KbDocument.file_path/filename).
+                            # One remap on _turn_citations covers both on_citations (live
+                            # SSE) and _save_turn (persisted _citations).
+                            if loop_self._citation_source_map:
+                                for _c in loop_self._turn_citations:
+                                    _raw = _c.get("source") or ""
+                                    _c["source"] = (
+                                        loop_self._citation_source_map.get(_raw) or _raw
+                                    )
                             if on_citations:
                                 await on_citations(list(loop_self._turn_citations))
 

@@ -523,6 +523,31 @@ async def run_agent_job(
             except Exception as kb_err:
                 logger.warning("Failed to build kb_map for agent %s: %s", agent_id, kb_err)
 
+        # Build citation_source_map: {file_path: filename} merged across all bound KBs.
+        # The chunk's source_path equals KbDocument.file_path (both are the ingest-time
+        # file path, typically a temp file). Remapping to KbDocument.filename gives the
+        # user-visible original document name. Injected onto loop before process_direct;
+        # loop.py reads it in after_iteration to remap citation["source"].
+        citation_source_map: dict[str, str] = {}
+        if kb_bindings:
+            try:
+                from nanoresearch.storage.repositories.knowledge_repo import KnowledgeRepository
+                _kb_repo = KnowledgeRepository(factory)
+                for _binding in kb_bindings:
+                    _kid_str = _binding.get("id") or ""
+                    if not _kid_str:
+                        continue
+                    try:
+                        _docs = await _kb_repo.list_documents(uuid.UUID(_kid_str))
+                        for _doc in _docs:
+                            if _doc.file_path and _doc.filename:
+                                citation_source_map[_doc.file_path] = _doc.filename
+                    except Exception as _doc_err:
+                        logger.warning("citation_source_map: failed for kb %s: %s", _kid_str, _doc_err)
+            except Exception as _csm_err:
+                logger.warning("citation_source_map build failed (non-fatal): %s", _csm_err)
+        loop._citation_source_map = citation_source_map
+
         # Phase 1 continuation: acquire agent_lock (bounded retry; self-clean on timeout) BEFORE any
         # session read/write, then drain staged subagent results into the session — all in-lock, so
         # process_direct's baseline read sees the single latest state (§4.2 / §5).
