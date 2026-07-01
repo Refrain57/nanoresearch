@@ -710,3 +710,76 @@ async def get_doc_entities(
     graph_repo = _graph_repo(request)
     entities = await graph_repo.get_entities_by_doc(uuid.UUID(doc_id))
     return {"doc_id": doc_id, "entities": entities}
+
+
+@router.get("/api/knowledge/{kb_id}/graph/entities")
+async def list_graph_entities(
+    kb_id: str,
+    request: Request,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    uid: str = Depends(get_current_user),
+):
+    await _get_kb_or_404(kb_id, uid, request)
+    entities = await _graph_repo(request).list_entities(
+        uuid.UUID(kb_id), search=search, limit=limit, offset=offset
+    )
+    return {"entities": entities}
+
+
+@router.get("/api/knowledge/{kb_id}/graph/entities/{name}")
+async def get_graph_entity(
+    kb_id: str,
+    name: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _graph_repo(request)
+    kb_uuid = uuid.UUID(kb_id)
+    summary = await repo.get_entity_summary(kb_uuid, name)
+    if summary is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="entity not found")
+    facts = await repo.get_entity_facts(kb_uuid, name)
+    self_name = summary["name"]
+    neighbors: list[str] = []
+    seen = {self_name}
+    for f in facts:
+        other = f["target"] if f["source"] == self_name else f["source"]
+        if other not in seen:
+            seen.add(other)
+            neighbors.append(other)
+    return {**summary, "facts": facts, "neighbors": neighbors}
+
+
+@router.get("/api/knowledge/{kb_id}/graph/triples/{triple_id}/chunks")
+async def get_triple_chunks(
+    kb_id: str,
+    triple_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    await _get_kb_or_404(kb_id, uid, request)
+    chunks = await _graph_repo(request).get_chunks_by_triple(uuid.UUID(triple_id))
+    # Resolve document_id -> original filename (chunk carries only the ingest path context).
+    from nanoresearch.storage.models import KbDocument
+    from sqlalchemy import select as _select
+    doc_ids = list({c.document_id for c in chunks})
+    name_map: dict = {}
+    if doc_ids:
+        async with request.app.state.session_factory() as db:
+            res = await db.execute(_select(KbDocument.id, KbDocument.filename).where(KbDocument.id.in_(doc_ids)))
+            name_map = {r[0]: r[1] for r in res.all()}
+    return {
+        "chunks": [
+            {
+                "content": (c.content or "")[:500],
+                "source": name_map.get(c.document_id, ""),
+                "page": (c.chunk_metadata or {}).get("page"),
+                "document_id": str(c.document_id),
+            }
+            for c in chunks
+        ]
+    }
