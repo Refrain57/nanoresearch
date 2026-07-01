@@ -365,6 +365,22 @@ async def _continuation_drain_and_append(redis, sessions, session_key, uid):
             logger.warning("continuation append staged result failed (non-fatal): {}", e)
 
 
+def _make_on_citations(redis, run_stream_key: str):
+    """Factory: return an on_citations callback that emits a citations SSE event.
+
+    Extracted as a module-level factory (mirroring on_tool_call's inline closure)
+    so it can be unit-tested with a fake Redis without needing a running worker.
+    xadd_event JSON-encodes the payload synchronously, so the items list is
+    serialized on the call — no deep-copy needed even if the accumulator mutates.
+    """
+    from nanoresearch.bus.stream import xadd_event
+
+    async def on_citations(items: list[dict]) -> None:
+        await xadd_event(redis, run_stream_key, {"type": "citations", "items": items})
+
+    return on_citations
+
+
 async def run_agent_job(
     ctx: dict,
     *,
@@ -487,6 +503,8 @@ async def run_agent_job(
                 "status": record.get("status", "success"),
             })
 
+        on_citations = _make_on_citations(redis, run_stream_key)
+
         # Build kb_bindings / kb_map for agentic RAG (same logic as old _run_agent)
         kb_bindings: list[dict] = []
         kb_map: dict[str, str] = {}
@@ -528,6 +546,7 @@ async def run_agent_job(
             on_stream=on_stream,
             on_progress=on_progress,
             on_tool_call=on_tool_call,
+            on_citations=on_citations,
             skill_names=skill_names,
             agent_id=agent_id,
             agent_override=agent_override,
