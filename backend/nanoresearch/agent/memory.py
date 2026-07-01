@@ -35,6 +35,7 @@ TOKEN_CONSOLIDATION_TARGET_RATIO = float(os.environ.get("TOKEN_CONSOLIDATION_TAR
 CONSOLIDATION_SUMMARY_CONFIDENCE = float(os.environ.get("CONSOLIDATION_SUMMARY_CONFIDENCE", "0.7"))
 
 from nanoresearch.utils.helpers import as_aware_utc, ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
+from nanoresearch.agent.memory_facts import compute_profile_diff, parse_memory_md, render_memory_md
 
 if TYPE_CHECKING:
     from nanoresearch.providers.base import LLMProvider
@@ -186,7 +187,8 @@ class MemoryStore:
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None):
+    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None,
+                 session_factory: Any = None):
         if agent_id:
             self.memory_dir = ensure_dir(workspace / "agents" / agent_id / "memory")
         else:
@@ -195,6 +197,7 @@ class MemoryStore:
         self._consecutive_failures = 0
         self._cached_hash: str | None = None
         self._knowledge_search = knowledge_search
+        self._session_factory = session_factory
 
     def get_content_hash(self) -> str:
         """Calculate stable SHA-256 hash of memory content.
@@ -231,6 +234,30 @@ class MemoryStore:
     def get_memory_context(self) -> str:
         """Return raw MEMORY.md content for XML wrapping in context builder."""
         return self.read_long_term()
+
+    async def _apply_profile_update(self, update_md: str, uid: str | None) -> None:
+        """Apply the LLM profile output as an incremental diff to the memory_facts store,
+        then render MEMORY.md as a one-way projection. Never wholesale-overwrites the store;
+        never removes source=manual facts. On any error or missing store context, falls back
+        to the legacy behaviour of writing update_md straight to MEMORY.md."""
+        if not self._session_factory or not uid:
+            self.write_long_term(update_md)
+            return
+        try:
+            from nanoresearch.storage.repositories.memory_facts_repo import MemoryFactsRepository
+            repo = MemoryFactsRepository(self._session_factory)
+            current = await repo.list_active(uid)
+            new_lines = parse_memory_md(update_md)
+            diff = compute_profile_diff(current, new_lines)
+            for section, text in diff.add:
+                await repo.insert_extracted(uid, section, text)
+            for fid in diff.remove_ids:
+                await repo.deactivate(fid)
+            active = await repo.list_active(uid)
+            self.write_long_term(render_memory_md(active))
+        except Exception:
+            logger.exception("profile store apply failed; falling back to legacy overwrite")
+            self.write_long_term(update_md)
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
@@ -362,8 +389,7 @@ Call save_memory with your updated memory following the exact format specified."
                 }], uid=uid)
 
             update = _ensure_text(update)
-            if update != current_memory:
-                self.write_long_term(update)
+            await self._apply_profile_update(update, uid)
 
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
@@ -441,7 +467,9 @@ class MemoryConsolidator:
         self._last_session_tokens: dict[str, int] = {}
 
     def _get_store(self, agent_id: str | None = None) -> MemoryStore:
-        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search, agent_id=agent_id)
+        factory = getattr(self.sessions, "_factory", None)
+        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search,
+                           agent_id=agent_id, session_factory=factory)
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
