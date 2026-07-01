@@ -32,6 +32,21 @@
           </a-collapse-panel>
         </a-collapse>
       </div>
+
+      <!-- 引用来源折叠面板（仅 assistant 消息） -->
+      <div v-if="msg.role === 'assistant' && msg.citations?.length" class="citations-panel">
+        <a-collapse size="small" :bordered="false">
+          <a-collapse-panel key="c" :header="`引用来源 (${msg.citations.length})`">
+            <div v-for="c in msg.citations" :key="c.chunk_id" class="cite-item">
+              <span class="cite-idx">[{{ c.index }}]</span>
+              <span class="cite-src">{{ c.source }}</span>
+              <span v-if="c.page != null" class="cite-page">p.{{ c.page }}</span>
+              <span class="cite-score">{{ (c.score * 100).toFixed(0) }}%</span>
+              <div class="cite-snippet">{{ c.snippet }}</div>
+            </div>
+          </a-collapse-panel>
+        </a-collapse>
+      </div>
       </template>
     </div>
 
@@ -111,6 +126,15 @@ watch(() => [props.messages.length, props.streamingText], async () => {
 .message.assistant { justify-content: flex-start; }
 .tool-calls-panel { margin-left: 40px; max-width: 68%; }
 .tc-input, .tc-output { font-size: 12px; white-space: pre-wrap; word-break: break-all; color: var(--nr-ink-2); margin-bottom: 4px; }
+
+.citations-panel { margin-left: 40px; max-width: 68%; }
+.cite-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--nr-border); }
+.cite-item:last-child { border-bottom: none; }
+.cite-idx { font-size: 11px; font-weight: 700; color: var(--nr-clay); min-width: 22px; }
+.cite-src { font-size: 12px; color: var(--nr-ink); font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cite-page { font-size: 11px; color: var(--nr-ink-2); }
+.cite-score { font-size: 11px; color: var(--nr-ink-3); }
+.cite-snippet { font-size: 11px; color: var(--nr-ink-2); white-space: pre-wrap; word-break: break-all; margin-top: 2px; width: 100%; }
 
 .avatar {
   width: 32px; height: 32px; border-radius: 50%;

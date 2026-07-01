@@ -259,6 +259,7 @@ const selectedAgentId = ref(null)
 const agentModelOverrides = reactive({})
 const detailPanelRef = ref(null)
 const pendingToolCalls = ref([])
+const pendingCitations = ref(null)
 // convId → runId: tracks runs that were interrupted mid-stream by a conversation switch
 const pendingRuns = reactive({})
 const ragMode = ref('agentic')
@@ -462,6 +463,7 @@ async function handleSend() {
 // Shared SSE connection logic — used by handleSend and reconnect-on-return
 async function connectStream(runId, convId) {
   pendingToolCalls.value = []
+  pendingCitations.value = null
   let messageCompleted = false
   await runStream.start(runId, {
     onDelta: (chunk) => {
@@ -476,11 +478,16 @@ async function connectStream(runId, convId) {
       if (chatStore.currentConvId !== convId) return
       pendingToolCalls.value.push(tc)
     },
+    onCitations: (ev) => {
+      if (chatStore.currentConvId !== convId) return
+      pendingCitations.value = ev.items
+    },
     onMessageComplete: () => {
       if (chatStore.currentConvId !== convId) return
       toolHint.value = ''
-      chatStore.finalizeStream(pendingToolCalls.value)
+      chatStore.finalizeStream(pendingToolCalls.value, pendingCitations.value)
       pendingToolCalls.value = []
+      pendingCitations.value = null
       messageCompleted = true
     },
     onSubagentResult: (event) => {
@@ -497,6 +504,7 @@ async function connectStream(runId, convId) {
       if (chatStore.currentConvId !== convId) return
       toolHint.value = ''
       pendingToolCalls.value = []
+      pendingCitations.value = null
       // Reload from DB — backend saves all messages before pushing run_end,
       // so DB is canonical at this point. This avoids any streaming-state artifacts
       // (wrong avatars, wrong ordering from multi-turn replays).
