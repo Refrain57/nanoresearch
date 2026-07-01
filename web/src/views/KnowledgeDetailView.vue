@@ -384,6 +384,57 @@
             </div>
           </div>
         </a-tab-pane>
+
+        <!-- Tab 5: Knowledge Graph / Wiki -->
+        <a-tab-pane key="graph" tab="知识图谱/Wiki">
+          <div v-if="!wikiEntities.length && !wikiLoading" class="wiki-empty">
+            <a-empty description="暂无知识图谱数据，请先在「文档」页重建知识图谱" />
+          </div>
+          <div v-else class="wiki-wrap">
+            <div class="wiki-list">
+              <a-input-search v-model:value="wikiSearch" placeholder="搜索实体…"
+                allow-clear @search="loadWikiEntities" style="margin-bottom:8px" />
+              <a-spin :spinning="wikiLoading">
+                <div v-for="e in wikiEntities" :key="e.name"
+                  class="wiki-ent" :class="{ active: entityDetail?.name === e.name }"
+                  @click="selectEntity(e.name)">
+                  <span class="wiki-ent-name">{{ e.name }}</span>
+                  <span class="wiki-ent-count">{{ e.mentions }}</span>
+                </div>
+              </a-spin>
+            </div>
+            <div class="wiki-detail">
+              <a-spin :spinning="detailLoading">
+                <template v-if="entityDetail">
+                  <h2 class="wiki-title">{{ entityDetail.name }}
+                    <a-tag>{{ entityDetail.label }}</a-tag>
+                    <span class="wiki-sub">被 {{ entityDetail.mention_count }} 处提及</span>
+                  </h2>
+
+                  <h3>事实</h3>
+                  <a-empty v-if="!entityDetail.facts.length" description="无事实" />
+                  <div v-for="f in entityDetail.facts" :key="f.triple_id" class="wiki-fact">
+                    <div class="wiki-fact-row" @click="toggleTripleEvidence(f.triple_id)">
+                      <span>{{ f.source }} <em>—{{ f.label }}→</em> {{ f.target }}</span>
+                      <a-tag color="blue">{{ f.doc_count }} 篇文档</a-tag>
+                    </div>
+                    <div v-if="expandedTriple === f.triple_id" class="wiki-evidence">
+                      <div v-for="(c, i) in tripleChunks" :key="i" class="wiki-chunk">
+                        <div class="wiki-chunk-src">{{ c.source }}<span v-if="c.page != null"> · p{{ c.page }}</span></div>
+                        <div class="wiki-chunk-text">{{ c.content }}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <h3 style="margin-top:16px">邻居实体</h3>
+                  <a-tag v-for="n in entityDetail.neighbors" :key="n"
+                    class="wiki-neighbor" @click="selectEntity(n)">{{ n }}</a-tag>
+                </template>
+                <a-empty v-else description="选择左侧实体查看详情" />
+              </a-spin>
+            </div>
+          </div>
+        </a-tab-pane>
       </a-tabs>
 
       <!-- Query result detail modal -->
@@ -678,7 +729,7 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useSettingsStore } from '@/stores/settings'
 import { apiPost } from '@/apis/base'
-import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats } from '@/apis/knowledge'
+import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats, listGraphEntities, getGraphEntity, getTripleChunks } from '@/apis/knowledge'
 import {
   listDatasets, uploadDataset, deleteDataset, generateDataset,
   listEvalRuns, createEvalRun, createRagasRun, createAgentRun, getEvalRun, deleteEvalRun
@@ -1030,11 +1081,47 @@ onUnmounted(() => {
   stopEvalPoll()
 })
 
+// ── Wiki / Knowledge Graph entity browser ──
+const wikiEntities   = ref([])        // [{name,label,mentions}]
+const wikiSearch     = ref('')
+const wikiLoading    = ref(false)
+const entityDetail   = ref(null)      // {name,label,mention_count,facts,neighbors}
+const detailLoading  = ref(false)
+const expandedTriple = ref(null)      // triple_id whose evidence is open
+const tripleChunks   = ref([])        // evidence chunks for expandedTriple
+
+async function loadWikiEntities() {
+  wikiLoading.value = true
+  try {
+    const r = await listGraphEntities(kbId, { search: wikiSearch.value, limit: 100 })
+    wikiEntities.value = r.entities || []
+  } finally { wikiLoading.value = false }
+}
+
+async function selectEntity(name) {
+  detailLoading.value = true
+  expandedTriple.value = null
+  tripleChunks.value = []
+  try {
+    entityDetail.value = await getGraphEntity(kbId, name)
+  } finally { detailLoading.value = false }
+}
+
+async function toggleTripleEvidence(tripleId) {
+  if (expandedTriple.value === tripleId) { expandedTriple.value = null; return }
+  expandedTriple.value = tripleId
+  const r = await getTripleChunks(kbId, tripleId)
+  tripleChunks.value = r.chunks || []
+}
+
 // Load eval data when switching to eval tab
 watch(activeTab, async (tab) => {
   if (tab === 'eval' && !datasets.value.length && !evalRuns.value.length) {
     await loadEvalData()
     startEvalPoll()
+  }
+  if (tab === 'graph' && !wikiEntities.value.length) {
+    await loadWikiEntities()
   }
 })
 
@@ -1659,4 +1746,24 @@ function formatSize(bytes) {
 .fulltext-body :deep(ul), .fulltext-body :deep(ol) { padding-left: 24px; margin: 4px 0; }
 .fulltext-body :deep(blockquote) { border-left: 3px solid var(--nr-border-strong); margin: 6px 0; padding: 4px 12px; color: var(--nr-ink-2); }
 .fulltext-body :deep(img) { max-width: 100%; border-radius: 4px; margin: 8px 0; }
+
+/* Wiki entity browser */
+.wiki-wrap { display: flex; gap: 16px; }
+.wiki-list { width: 260px; flex-shrink: 0; max-height: 70vh; overflow-y: auto; border-right: 1px solid #eee; padding-right: 8px; }
+.wiki-ent { display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.wiki-ent:hover { background: #f5f5f5; }
+.wiki-ent.active { background: #e6f0ff; }
+.wiki-ent-count { color: #999; font-size: 12px; }
+.wiki-detail { flex: 1; min-width: 0; }
+.wiki-title { display: flex; align-items: center; gap: 8px; }
+.wiki-sub { color: #999; font-size: 13px; font-weight: normal; }
+.wiki-fact { border: 1px solid #eee; border-radius: 6px; margin-bottom: 6px; }
+.wiki-fact-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; cursor: pointer; }
+.wiki-fact-row em { color: #C15F3C; font-style: normal; }
+.wiki-evidence { border-top: 1px dashed #eee; padding: 8px 10px; background: #fafafa; }
+.wiki-chunk { margin-bottom: 8px; }
+.wiki-chunk-src { font-size: 12px; color: #888; }
+.wiki-chunk-text { font-size: 13px; white-space: pre-wrap; }
+.wiki-neighbor { cursor: pointer; margin-bottom: 6px; }
+.wiki-empty { padding: 40px 0; }
 </style>
