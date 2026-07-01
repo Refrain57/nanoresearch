@@ -1,5 +1,5 @@
 <template>
-  <div class="citation-text-root">
+  <div class="citation-text-root" ref="rootEl">
     <div class="md-body" v-html="rendered" @click="onCiteClick" />
     <div v-if="activeCite" class="cite-popover"
          :style="{ left: citePos.x + 'px', top: citePos.y + 'px' }">
@@ -55,6 +55,7 @@ function renderMd(text, citations) {
 
 const rendered = computed(() => renderMd(props.text, props.citations))
 
+const rootEl     = ref(null)
 const activeCite = ref(null)
 const citePos    = ref({ x: 0, y: 0 })
 
@@ -71,7 +72,8 @@ function onCiteClick(e) {
 
 function closeCite() { activeCite.value = null }
 function onDocClick(e) {
-  if (e.target.closest('.cite-ref') || e.target.closest('.cite-popover')) return
+  if (rootEl.value && rootEl.value.contains(e.target) && e.target.closest('.cite-ref')) return
+  if (e.target.closest('.cite-popover')) return
   closeCite()
 }
 function onKey(e) { if (e.key === 'Escape') closeCite() }
