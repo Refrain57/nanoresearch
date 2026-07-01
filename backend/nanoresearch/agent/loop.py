@@ -57,6 +57,13 @@ if TYPE_CHECKING:
 _CITATION_TOOLS = {"kb_search", "retrieve_by_entity"}
 
 
+def _is_citation_tool(name: str) -> bool:
+    """Match citation-bearing tools by base name, tolerant of the MCP
+    ``mcp_{server}_`` prefix. The RAG tool is registered at runtime as
+    ``mcp_rag_kb_search`` (not ``kb_search``), so an exact-set check misses it."""
+    return any(name == t or name.endswith("_" + t) for t in _CITATION_TOOLS)
+
+
 def _extract_citations(result: Any) -> list[dict]:
     """Pull citation items from a tool result (JSON str or dict).
 
@@ -449,7 +456,7 @@ class AgentLoop:
                         })
                     # Parallel path: capture RAG citations regardless of on_tool_call,
                     # so persistence (content._citations) works even without a callback.
-                    if tc.name in _CITATION_TOOLS:
+                    if _is_citation_tool(tc.name):
                         items = _extract_citations(result)
                         if items:
                             loop_self._turn_citations = _merge_citations(

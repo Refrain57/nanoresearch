@@ -49,13 +49,13 @@ def loop_with_scripted_rag(tmp_path):
         if calls["n"] == 1:
             return LLMResponse(
                 content="",
-                tool_calls=[ToolCallRequest(id="t1", name="kb_search",
+                tool_calls=[ToolCallRequest(id="t1", name="mcp_rag_kb_search",
                                             arguments={"query": "alpha"})],
             )
         if calls["n"] == 2:
             return LLMResponse(
                 content="",
-                tool_calls=[ToolCallRequest(id="t2", name="kb_search",
+                tool_calls=[ToolCallRequest(id="t2", name="mcp_rag_kb_search",
                                             arguments={"query": "beta"})],
             )
         return LLMResponse(content="Final answer [1][2].", tool_calls=[])
