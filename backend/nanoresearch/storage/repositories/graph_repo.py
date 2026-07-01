@@ -314,7 +314,7 @@ class GraphRepository:
                 for r in result.all()
             ]
 
-    async def get_chunks_by_triple(self, triple_id: uuid.UUID) -> list:
+    async def get_chunks_by_triple(self, triple_id: uuid.UUID) -> list[KbChunk]:
         """Evidence chunks for a fact (triple), via triple mentions."""
         from nanoresearch.storage.models import KbChunk
         async with self._factory() as db:

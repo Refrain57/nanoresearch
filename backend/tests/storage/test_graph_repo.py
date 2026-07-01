@@ -71,6 +71,7 @@ async def _seed(factory):
             KgEntityMention(entity_id=e_nerf, chunk_id=c3, kb_id=kb_id),
             KgTripleMention(triple_id=tid, chunk_id=c1, kb_id=kb_id),  # doc d1
             KgTripleMention(triple_id=tid, chunk_id=c2, kb_id=kb_id),  # doc d2
+            KgTripleMention(triple_id=tid, chunk_id=c3, kb_id=kb_id),  # c3 is doc d1 → 3 mentions but still 2 distinct docs
         ])
         await db.commit()
     return {"kb_id": kb_id, "tid": tid}
@@ -124,6 +125,6 @@ def test_get_chunks_by_triple():
         s = await _seed(f)
         repo = GraphRepository(f)
         chunks = await repo.get_chunks_by_triple(s["tid"])
-        assert len(chunks) == 2
-        assert {c.content for c in chunks} == {"3dgs vs nerf", "3dgs faster"}
+        assert len(chunks) == 3
+        assert {c.content for c in chunks} == {"3dgs vs nerf", "3dgs faster", "nerf detail"}
     run(_())
