@@ -51,6 +51,49 @@ if TYPE_CHECKING:
     from nanoresearch.cron.service import CronService
 
 
+# Tools whose results may carry RAG citations. ``retrieve_by_entity`` returns a
+# plain-text string (not JSON), so _extract_citations returns [] for it — that is
+# expected/fine for v1; it stays in the set to future-proof a structured result.
+_CITATION_TOOLS = {"kb_search", "retrieve_by_entity"}
+
+
+def _extract_citations(result: Any) -> list[dict]:
+    """Pull citation items from a tool result (JSON str or dict).
+
+    Prefers an explicit ``citations`` list, else builds them from ``chunks``.
+    Returns [] for anything that isn't decodable JSON / lacks either key.
+    """
+    data = result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return []
+    if not isinstance(data, dict):
+        return []
+    cites = data.get("citations")
+    if cites:
+        return cites
+    chunks = data.get("chunks")
+    if chunks:
+        from nanoresearch.rag.mcp_server.tools.agentic.shared import build_citations_from_chunks
+        return build_citations_from_chunks(chunks)
+    return []
+
+
+def _merge_citations(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Merge citations by chunk_id (first-seen wins), re-indexing 1..N."""
+    by_id: dict[str, dict] = {c["chunk_id"]: c for c in existing if c.get("chunk_id")}
+    for c in new:
+        cid = c.get("chunk_id")
+        if cid:
+            by_id.setdefault(cid, c)
+    merged = list(by_id.values())
+    for i, c in enumerate(merged, 1):
+        c["index"] = i
+    return merged
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -110,6 +153,9 @@ class AgentLoop:
         self.rag_settings = rag_settings
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
+        # Per-turn accumulator of deduped RAG citations; reset at each turn entry
+        # (_process_message) and read back in _save_turn to embed into content.
+        self._turn_citations: list[dict] = []
 
         self.context = ContextBuilder(workspace, timezone=timezone, knowledge_search=knowledge_search, uid=uid)
         self.sessions = session_manager or SessionManager(workspace)
@@ -320,6 +366,7 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
+        on_citations: Callable[[list[dict]], Awaitable[None]] | None = None,
         *,
         channel: str = "cli",
         chat_id: str = "direct",
@@ -386,8 +433,10 @@ class AgentLoop:
                     logger.info("Tool call: {}({})", tc.name, args_str[:200])
 
             async def after_iteration(self, context: AgentHookContext) -> None:
-                if on_tool_call and context.tool_calls:
-                    for tc, result in zip(context.tool_calls, context.tool_results or []):
+                if not context.tool_calls:
+                    return
+                for tc, result in zip(context.tool_calls, context.tool_results or []):
+                    if on_tool_call:
                         result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
                         if tc.name.startswith("retrieve_"):
                             logger.debug("retrieve tool result sample: {}", result_str[:500])
@@ -398,6 +447,16 @@ class AgentLoop:
                             "output": result_str[:2000],
                             "status": "error" if is_error else "success",
                         })
+                    # Parallel path: capture RAG citations regardless of on_tool_call,
+                    # so persistence (content._citations) works even without a callback.
+                    if tc.name in _CITATION_TOOLS:
+                        items = _extract_citations(result)
+                        if items:
+                            loop_self._turn_citations = _merge_citations(
+                                loop_self._turn_citations, items
+                            )
+                            if on_citations:
+                                await on_citations(list(loop_self._turn_citations))
 
             def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
                 return loop_self._strip_think(content)
@@ -701,6 +760,7 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
+        on_citations: Callable[[list[dict]], Awaitable[None]] | None = None,
         skill_names: list[str] | None = None,
         agent_id: str | None = None,
         agent_override: dict | None = None,
@@ -713,6 +773,9 @@ class AgentLoop:
         conversation_id: str | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
+        # New turn: clear the per-turn citation accumulator so RAG citations from a
+        # previous turn never bleed into this turn's assistant message.
+        self._turn_citations = []
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -833,6 +896,7 @@ class AgentLoop:
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             on_tool_call=on_tool_call,
+            on_citations=on_citations,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
             max_iterations_override=(agent_override or {}).get("max_iterations"),
@@ -925,6 +989,17 @@ class AgentLoop:
                     if not filtered:
                         continue
                     entry["content"] = filtered
+            # Embed accumulated RAG citations onto the final answer message (the
+            # assistant message that carries text and no tool_calls), mirroring how
+            # tool_calls ride along on their assistant message. Task 1 strips a
+            # top-level _citations before the LLM, so this persists safely.
+            if (
+                role == "assistant"
+                and self._turn_citations
+                and content
+                and not entry.get("tool_calls")
+            ):
+                entry["_citations"] = self._turn_citations
             entry.setdefault("timestamp", utcnow_aware().isoformat())
             session.messages.append(entry)
         session.updated_at = utcnow_aware()
@@ -939,6 +1014,7 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         on_tool_call: Callable[[dict], Awaitable[None]] | None = None,
+        on_citations: Callable[[list[dict]], Awaitable[None]] | None = None,
         skill_names: list[str] | None = None,
         agent_id: str | None = None,
         agent_override: dict | None = None,
@@ -957,6 +1033,7 @@ class AgentLoop:
             msg, session_key=session_key, on_progress=on_progress,
             on_stream=on_stream, on_stream_end=on_stream_end,
             on_tool_call=on_tool_call,
+            on_citations=on_citations,
             skill_names=skill_names, agent_id=agent_id,
             agent_override=agent_override,
             custom_persona=custom_persona,
