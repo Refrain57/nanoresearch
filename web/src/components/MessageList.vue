@@ -11,7 +11,7 @@
 
         <div v-if="msg.role !== 'assistant' || msgText(msg)" class="bubble">
           <span v-if="msg.role === 'user'">{{ msgText(msg) }}</span>
-          <div v-else class="md-body" v-html="renderMd(msgText(msg))" />
+          <div v-else class="md-body" v-html="renderMd(msgText(msg), msg.citations)" />
         </div>
 
         <div v-if="msg.role === 'user'" class="avatar user-avatar">
@@ -33,20 +33,6 @@
         </a-collapse>
       </div>
 
-      <!-- 引用来源折叠面板（仅 assistant 消息） -->
-      <div v-if="msg.role === 'assistant' && msg.citations?.length" class="citations-panel">
-        <a-collapse size="small" :bordered="false">
-          <a-collapse-panel key="c" :header="`引用来源 (${msg.citations.length})`">
-            <div v-for="c in msg.citations" :key="c.chunk_id" class="cite-item">
-              <span class="cite-idx">[{{ c.index }}]</span>
-              <span class="cite-src">{{ c.source }}</span>
-              <span v-if="c.page != null" class="cite-page">p.{{ c.page }}</span>
-              <span class="cite-score">{{ (c.score * 100).toFixed(0) }}%</span>
-              <div class="cite-snippet">{{ c.snippet }}</div>
-            </div>
-          </a-collapse-panel>
-        </a-collapse>
-      </div>
       </template>
     </div>
 
@@ -54,7 +40,7 @@
     <div v-if="streamingText || props.streaming" class="message assistant">
       <div class="avatar agent-avatar" :style="agentAvatarStyle">{{ agentInitial }}</div>
       <div class="bubble streaming">
-        <div v-if="streamingText" class="md-body" v-html="renderMd(streamingText)" />
+        <div v-if="streamingText" class="md-body" v-html="renderMd(streamingText, [])" />
         <span class="cursor">▌</span>
       </div>
     </div>
@@ -72,9 +58,28 @@ import { marked } from 'marked'
 
 marked.setOptions({ breaks: true, gfm: true })
 
-function renderMd(text) {
+// Turn [^n] markers into clickable <sup> — only for n present in validIndices,
+// and only outside <pre>/<code> regions (avoids matching arr[1] etc. in code).
+function linkifyCitations(html, validIndices) {
+  if (!validIndices || validIndices.size === 0) return html
+  // Split so odd-index segments are the <pre>…</pre> / <code>…</code> blocks (left untouched).
+  const parts = html.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi)
+  return parts.map((seg, i) => {
+    if (i % 2 === 1) return seg
+    return seg.replace(/\[\^(\d+)\]/g, (m, d) => {
+      const n = Number(d)
+      return validIndices.has(n)
+        ? `<sup class="cite-ref" data-cite="${n}">[${n}]</sup>`
+        : m
+    })
+  }).join('')
+}
+
+function renderMd(text, citations) {
   if (!text) return ''
-  return marked.parse(text)
+  const html = marked.parse(text)
+  const valid = new Set((citations || []).map(c => c.index))
+  return linkifyCitations(html, valid)
 }
 
 const props = defineProps({
@@ -127,15 +132,6 @@ watch(() => [props.messages.length, props.streamingText], async () => {
 .tool-calls-panel { margin-left: 40px; max-width: 68%; }
 .tc-input, .tc-output { font-size: 12px; white-space: pre-wrap; word-break: break-all; color: var(--nr-ink-2); margin-bottom: 4px; }
 
-.citations-panel { margin-left: 40px; max-width: 68%; }
-.cite-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--nr-border); }
-.cite-item:last-child { border-bottom: none; }
-.cite-idx { font-size: 11px; font-weight: 700; color: var(--nr-clay); min-width: 22px; }
-.cite-src { font-size: 12px; color: var(--nr-ink); font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cite-page { font-size: 11px; color: var(--nr-ink-2); }
-.cite-score { font-size: 11px; color: var(--nr-ink-3); }
-.cite-snippet { font-size: 11px; color: var(--nr-ink-2); white-space: pre-wrap; word-break: break-all; margin-top: 2px; width: 100%; }
-
 .avatar {
   width: 32px; height: 32px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -165,6 +161,15 @@ watch(() => [props.messages.length, props.streamingText], async () => {
 }
 
 .md-body { line-height: 1.7; }
+.md-body :deep(.cite-ref) {
+  color: var(--nr-clay);
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.72em;
+  padding: 0 1px;
+  user-select: none;
+}
+.md-body :deep(.cite-ref:hover) { text-decoration: underline; }
 .md-body :deep(p) { margin: 0 0 8px; }
 .md-body :deep(p:last-child) { margin-bottom: 0; }
 .md-body :deep(h1),:deep(h2),:deep(h3),:deep(h4) { margin: 12px 0 6px; font-weight: 700; line-height: 1.3; }
