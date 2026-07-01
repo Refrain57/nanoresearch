@@ -17,7 +17,7 @@ import sys
 import traceback
 from typing import Any, Dict, Optional
 
-from nanoresearch.rag.mcp_server.tools.agentic.shared import build_json_response
+from nanoresearch.rag.mcp_server.tools.agentic.shared import build_json_response, build_citations_from_chunks
 
 
 # Import from submodule to avoid circular import
@@ -245,7 +245,7 @@ class RAGSearchTool:
             return build_json_response({
                 "success": True,
                 "chunks": fused_chunks,
-                "citations": None,
+                "citations": build_citations_from_chunks(fused_chunks),
                 "summary": f"Simple retrieval completed with {len(fused_chunks)} chunks",
                 "iterations": 1,
             })
@@ -293,7 +293,9 @@ class RAGSearchTool:
             )
 
             _log(f"Loop completed: success={result.success}, chunks={len(result.chunks)}")
-            return build_json_response(result.to_dict())
+            result_dict = result.to_dict()
+            result_dict["citations"] = build_citations_from_chunks(result.chunks)
+            return build_json_response(result_dict)
 
         except Exception as e:
             _log(f"Complex retrieval failed: {e}")
