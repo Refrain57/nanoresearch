@@ -396,3 +396,38 @@ class GraphRepository:
                     "source": r[3] or "",
                 })
             return out
+
+    async def get_article(self, kb_id: uuid.UUID, entity_name: str):
+        from nanoresearch.storage.models import KgEntityArticle
+        norm = _normalize(entity_name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntityArticle).where(
+                    KgEntityArticle.kb_id == kb_id, KgEntityArticle.entity_name == norm
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def upsert_article(self, kb_id: uuid.UUID, entity_name: str, markdown: str,
+                             citations: list, evidence_hash: str, model: str | None):
+        from nanoresearch.storage.models import KgEntityArticle
+        norm = _normalize(entity_name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntityArticle).where(
+                    KgEntityArticle.kb_id == kb_id, KgEntityArticle.entity_name == norm
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = KgEntityArticle(kb_id=kb_id, entity_name=norm)
+                db.add(row)
+            row.markdown = markdown
+            row.citations = citations
+            row.evidence_hash = evidence_hash
+            row.model = model
+            from datetime import datetime, timezone
+            row.generated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(row)
+            return row

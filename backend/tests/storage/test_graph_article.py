@@ -26,7 +26,7 @@ def clean_graph():
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE TABLE kg_triple_mentions, kg_entity_mentions, "
+                "TRUNCATE TABLE kg_entity_articles, kg_triple_mentions, kg_entity_mentions, "
                 "kg_triples, kg_entities, kb_chunks, kb_documents, knowledge_bases, users "
                 "RESTART IDENTITY CASCADE"
             )
@@ -75,4 +75,21 @@ def test_get_entity_evidence_returns_content_and_filename():
         assert contents == {"3dgs uses explicit points", "3dgs renders fast"}
         assert all(e["source"] == "paperA.pdf" for e in ev)   # original filename, not path
         assert all("chunk_id" in e for e in ev)
+    run(_())
+
+
+def test_article_upsert_and_get():
+    async def _():
+        f = make_factory()
+        s = await _seed(f)
+        repo = GraphRepository(f)
+        assert await repo.get_article(s["kb_id"], "3DGS") is None
+        await repo.upsert_article(s["kb_id"], "3dgs", "正文[^1]", [{"index": 1, "source": "paperA.pdf", "snippet": "x"}], "hash1", "gpt-x")
+        got = await repo.get_article(s["kb_id"], "3dgs")
+        assert got is not None and got.markdown == "正文[^1]"
+        assert got.evidence_hash == "hash1" and got.citations[0]["index"] == 1
+        # upsert again → overwrite, single row
+        await repo.upsert_article(s["kb_id"], "3dgs", "新正文", [], "hash2", "gpt-x")
+        got2 = await repo.get_article(s["kb_id"], "3dgs")
+        assert got2.markdown == "新正文" and got2.evidence_hash == "hash2"
     run(_())
