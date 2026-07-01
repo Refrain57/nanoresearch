@@ -372,3 +372,27 @@ class GraphRepository:
                 text("DELETE FROM kg_entities WHERE kb_id = :kb_id"), {"kb_id": kb_id}
             )
             await db.commit()
+
+    async def get_entity_evidence(self, kb_id: uuid.UUID, name: str, limit: int = 20) -> list[dict]:
+        """Evidence chunks for an entity: content + original filename, for article generation."""
+        from nanoresearch.storage.models import KbChunk, KbDocument
+        norm = _normalize(name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KbChunk.id, KbChunk.content, KbChunk.chunk_metadata, KbDocument.filename)
+                .join(KgEntityMention, KgEntityMention.chunk_id == KbChunk.id)
+                .join(KgEntity, KgEntity.id == KgEntityMention.entity_id)
+                .join(KbDocument, KbDocument.id == KbChunk.document_id)
+                .where(KgEntity.kb_id == kb_id, KgEntity.name == norm)
+                .distinct()
+                .limit(limit)
+            )
+            out = []
+            for r in result.all():
+                out.append({
+                    "chunk_id": str(r[0]),
+                    "content": r[1] or "",
+                    "page": (r[2] or {}).get("page"),
+                    "source": r[3] or "",
+                })
+            return out
