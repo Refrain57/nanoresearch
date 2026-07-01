@@ -2,7 +2,7 @@
   <app-layout>
     <div class="knowledge-page">
       <div class="page-header">
-        <h2>知识库</h2>
+        <h2 class="nr-serif">知识库</h2>
         <a-tooltip :title="settingsStore.coverage.hasEmbedding ? '' : '缺 embedding provider，请到 Settings 添加'">
           <span :style="settingsStore.coverage.hasEmbedding ? {} : { display: 'inline-block', cursor: 'not-allowed' }">
             <a-button type="primary" :disabled="!settingsStore.coverage.hasEmbedding" @click="openCreate">
@@ -69,7 +69,7 @@
             <a-select-option value="fixed">固定大小</a-select-option>
             <a-select-option value="structured">结构感知（标题/章节）</a-select-option>
           </a-select>
-          <div style="font-size: 12px; color: #999; margin-top: 4px">
+          <div style="font-size: 12px; color: var(--nr-ink-3); margin-top: 4px">
             自动检测：根据文档结构自动选择；语义分块：按语义相似度聚类切分；固定大小：按 token 数均匀切分；结构感知：按标题层级保留文档结构
           </div>
         </a-form-item>
@@ -81,7 +81,7 @@
             allow-clear
             style="width: 100%"
           />
-          <div style="font-size: 12px; color: #999; margin-top: 4px">
+          <div style="font-size: 12px; color: var(--nr-ink-3); margin-top: 4px">
             选择或输入 Embedding 模型名称，留空则使用全局默认配置
           </div>
         </a-form-item>
@@ -183,7 +183,7 @@ async function handleDelete(kb) {
 
 .kb-card {
   background: #fff;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--nr-border);
   border-radius: 12px;
   padding: 20px;
   cursor: pointer;
@@ -193,17 +193,17 @@ async function handleDelete(kb) {
   gap: 10px;
   min-height: 140px;
 }
-.kb-card:hover { border-color: #1677ff; box-shadow: 0 4px 16px rgba(22, 119, 255, 0.1); }
+.kb-card:hover { border-color: var(--nr-clay); box-shadow: 0 4px 16px rgba(22, 119, 255, 0.1); }
 
 .kb-card-header { display: flex; align-items: center; gap: 10px; }
-.kb-icon { font-size: 20px; color: #1677ff; }
-.kb-name { font-size: 16px; font-weight: 700; color: #111; }
+.kb-icon { font-size: 20px; color: var(--nr-clay); }
+.kb-name { font-size: 16px; font-weight: 700; color: var(--nr-ink); }
 
-.kb-desc { font-size: 13px; color: #666; line-height: 1.5; flex: 1;
+.kb-desc { font-size: 13px; color: var(--nr-ink-2); line-height: 1.5; flex: 1;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 .kb-stats { display: flex; gap: 16px; }
-.stat { font-size: 12px; color: #888; display: flex; align-items: center; gap: 4px; }
+.stat { font-size: 12px; color: var(--nr-ink-2); display: flex; align-items: center; gap: 4px; }
 
 .kb-footer { display: flex; align-items: center; justify-content: space-between; }
 </style>

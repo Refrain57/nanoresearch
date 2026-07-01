@@ -4,7 +4,7 @@
 
       <!-- 页头 + 统计卡片 -->
       <div class="page-header">
-        <h2>Agent 评测</h2>
+        <h2 class="nr-serif">Agent 评测</h2>
         <div class="stats-row">
           <div class="stat-card">
             <div class="stat-num">{{ stats.total_snapshots ?? '—' }}</div>
@@ -580,7 +580,7 @@
                         <code v-if="diagData.target_id">{{ diagData.target_id }}</code>
                       </div>
                       <div v-if="diagData.suggestion" class="diag-suggestion">
-                        <info-circle-outlined style="color:#faad14;margin-right:4px" />
+                        <info-circle-outlined style="color:var(--nr-gold);margin-right:4px" />
                         {{ diagData.suggestion }}
                       </div>
                     </div>
@@ -767,7 +767,7 @@
           <!-- 回归分析 -->
           <template v-if="erDetail.has_regression || erDetail.regression_diffs">
             <a-divider />
-            <div class="section-title" style="color:#ff4d4f">
+            <div class="section-title" style="color:var(--nr-danger)">
               {{ erDetail.has_regression ? '⚠ 回归检测：发现退化' : '回归分析' }}
             </div>
             <a-table
@@ -803,7 +803,7 @@
 
           <!-- 与另一批次对比 -->
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
-            <span style="font-size:12px;color:#888">对比另一批次：</span>
+            <span style="font-size:12px;color:var(--nr-ink-2)">对比另一批次：</span>
             <a-select v-model:value="compareRunId" allow-clear placeholder="选择批次" style="width:260px" size="small">
               <a-select-option v-for="r in completedRuns.filter(r => r.id !== erDetail.id)" :key="r.id" :value="r.id">
                 {{ r.name }}
@@ -1053,7 +1053,7 @@
             <a-tag v-if="p.gate_status" :color="gateColor(p.gate_status)" size="small">
               {{ gateLabel(p.gate_status) }}
             </a-tag>
-            <span class="candidate-rationale" style="flex:1;margin-left:8px;font-size:12px;color:#666">{{ p.rationale }}</span>
+            <span class="candidate-rationale" style="flex:1;margin-left:8px;font-size:12px;color:var(--nr-ink-2)">{{ p.rationale }}</span>
           </div>
 
           <!-- Dual-set scores always visible -->
@@ -1205,7 +1205,7 @@
           </div>
           <div class="diff-panel new">
             <div class="diff-label">候选版本</div>
-            <pre class="code-block" style="max-height:180px;border-color:#52c41a">{{ applyTarget.prompt }}</pre>
+            <pre class="code-block" style="max-height:180px;border-color:var(--nr-sage)">{{ applyTarget.prompt }}</pre>
           </div>
         </div>
 
@@ -1975,9 +1975,9 @@ function scoreClass(v) {
 }
 
 function progressColor(v) {
-  if (v >= 0.7) return '#52c41a'
-  if (v >= 0.4) return '#faad14'
-  return '#ff4d4f'
+  if (v >= 0.7) return 'var(--nr-sage)'
+  if (v >= 0.4) return 'var(--nr-gold)'
+  return 'var(--nr-danger)'
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -2238,34 +2238,34 @@ onMounted(() => {
 .stats-row { display: flex; gap: 16px; }
 .stat-card {
   padding: 10px 20px;
-  background: #f9f9f9;
-  border: 1px solid #f0f0f0;
+  background: var(--nr-rail);
+  border: 1px solid var(--nr-border);
   border-radius: 8px;
   text-align: center;
   min-width: 80px;
 }
-.stat-card.warn { border-color: #faad14; background: #fffbe6; }
-.stat-card.danger { border-color: #ff4d4f; background: #fff2f0; }
-.stat-num { font-size: 22px; font-weight: 700; color: #333; line-height: 1.2; }
-.stat-label { font-size: 11px; color: #888; margin-top: 2px; }
+.stat-card.warn { border-color: var(--nr-gold); background: rgba(154,123,46,.10); }
+.stat-card.danger { border-color: var(--nr-danger); background: rgba(176,68,52,.08); }
+.stat-num { font-size: 22px; font-weight: 700; color: var(--nr-ink); line-height: 1.2; }
+.stat-label { font-size: 11px; color: var(--nr-ink-2); margin-top: 2px; }
 
 .filter-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .main-tabs { margin-top: -4px; }
 
 .snap-table :deep(tr) { cursor: pointer; }
-.snap-table :deep(tr:hover td) { background: #f5f5f5 !important; }
+.snap-table :deep(tr:hover td) { background: var(--nr-rail) !important; }
 
-.token-hint { font-size: 11px; color: #888; }
+.token-hint { font-size: 11px; color: var(--nr-ink-2); }
 .mono { font-family: monospace; font-size: 12px; }
-.muted { color: #bbb; font-size: 12px; }
+.muted { color: var(--nr-ink-3); font-size: 12px; }
 
 /* Drawer styles */
 .detail-desc { margin-bottom: 16px; }
 :deep(.ant-modal-body) { max-height: 75vh; overflow-y: auto; padding: 16px 20px; }
-.section-title { font-size: 12px; font-weight: 600; color: #555; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .5px; }
+.section-title { font-size: 12px; font-weight: 600; color: var(--nr-ink-2); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .5px; }
 .input-box {
-  background: #f9f9f9;
-  border: 1px solid #f0f0f0;
+  background: var(--nr-rail);
+  border: 1px solid var(--nr-border);
   border-radius: 6px;
   padding: 10px 12px;
   font-size: 13px;
@@ -2273,8 +2273,8 @@ onMounted(() => {
   word-break: break-all;
 }
 .response-box {
-  background: #f6ffed;
-  border: 1px solid #d9f7be;
+  background: rgba(94,115,85,.10);
+  border: 1px solid rgba(94,115,85,.16);
   border-radius: 6px;
   padding: 10px 12px;
   font-size: 13px;
@@ -2284,10 +2284,10 @@ onMounted(() => {
   overflow-y: auto;
 }
 .tool-chain :deep(.ant-collapse-header) { font-family: monospace; font-size: 12px; }
-.tool-section-label { font-size: 11px; color: #888; margin-bottom: 4px; }
+.tool-section-label { font-size: 11px; color: var(--nr-ink-2); margin-bottom: 4px; }
 .code-block {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: #2A2622;
+  color: #E8E2D6;
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 11px;
@@ -2298,18 +2298,18 @@ onMounted(() => {
   overflow-y: auto;
   margin: 0;
 }
-.code-block.result { background: #1a2b1a; color: #b5d6b5; }
-.error-hint { color: #ff4d4f; font-size: 12px; margin-top: 4px; }
-.tool-meta { font-size: 11px; color: #aaa; margin-top: 6px; }
+.code-block.result { background: #232A1E; color: rgba(94,115,85,.35); }
+.error-hint { color: var(--nr-danger); font-size: 12px; margin-top: 4px; }
+.tool-meta { font-size: 11px; color: var(--nr-ink-3); margin-top: 6px; }
 
 .llm-calls { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
-.llm-call-row { display: flex; gap: 16px; font-size: 12px; padding: 4px 8px; background: #fafafa; border-radius: 4px; }
-.llm-call-row .mono { color: #888; }
+.llm-call-row { display: flex; gap: 16px; font-size: 12px; padding: 4px 8px; background: var(--nr-rail); border-radius: 4px; }
+.llm-call-row .mono { color: var(--nr-ink-2); }
 
 /* Score colors */
-.score-high { color: #52c41a; font-weight: 600; }
-.score-mid  { color: #faad14; }
-.score-low  { color: #ff4d4f; }
+.score-high { color: var(--nr-sage); font-weight: 600; }
+.score-mid  { color: var(--nr-gold); }
+.score-low  { color: var(--nr-danger); }
 
 /* Trends / eval runs */
 .trends-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -2319,34 +2319,34 @@ onMounted(() => {
   min-width: 160px;
   max-width: 220px;
   padding: 10px 14px;
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
+  background: var(--nr-rail);
+  border: 1px solid var(--nr-border);
   border-radius: 8px;
 }
-.dim-name { font-size: 12px; color: #555; margin-bottom: 6px; }
+.dim-name { font-size: 12px; color: var(--nr-ink-2); margin-bottom: 6px; }
 .dim-score { font-size: 18px; font-weight: 700; margin-top: 4px; text-align: right; }
-.err-sample { font-size: 11px; color: #ff4d4f; background: #fff2f0; padding: 2px 6px; border-radius: 3px; margin-bottom: 2px; max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.err-sample { font-size: 11px; color: var(--nr-danger); background: rgba(176,68,52,.08); padding: 2px 6px; border-radius: 3px; margin-bottom: 2px; max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .parse-error-hint { margin-top: 16px; }
 .parse-error-hint pre { margin: 8px 0 0; }
 
-.field-hint { font-size: 11px; color: #aaa; }
+.field-hint { font-size: 11px; color: var(--nr-ink-3); }
 
 /* Phase 6: Diagnosis tab */
 .diag-section { margin-bottom: 16px; }
 .diag-layer-card {
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--nr-border-strong);
   border-radius: 8px;
   padding: 12px;
 }
 .diag-layer-card.fixable {
-  border-color: #52c41a;
+  border-color: var(--nr-sage);
   border-style: solid;
-  background: #f6ffed;
+  background: rgba(94,115,85,.10);
 }
 .diag-layer-card.diagnosis-only {
-  border-color: #d9d9d9;
+  border-color: var(--nr-border-strong);
   border-style: dashed;
-  background: #fafafa;
+  background: var(--nr-rail);
 }
 .diag-layer-header {
   display: flex;
@@ -2357,30 +2357,30 @@ onMounted(() => {
 .diag-layer-name {
   font-size: 15px;
   font-weight: 700;
-  color: #333;
+  color: var(--nr-ink);
 }
 .diag-layer-target { font-size: 12px; margin-bottom: 4px; }
 .diag-layer-target code {
-  background: #f0f0f0;
+  background: var(--nr-border);
   padding: 1px 6px;
   border-radius: 3px;
   font-size: 11px;
 }
 .diag-suggestion {
   font-size: 12px;
-  color: #8c8c8c;
+  color: var(--nr-ink-2);
   display: flex;
   align-items: flex-start;
   padding-top: 6px;
-  border-top: 1px dashed #e8e8e8;
+  border-top: 1px dashed var(--nr-border);
   margin-top: 6px;
 }
 .diag-evidence { margin-top: 6px; }
 .diag-actions { margin-top: 4px; }
 .diag-no-action {
   padding: 12px;
-  background: #fafafa;
-  border: 1px dashed #d9d9d9;
+  background: var(--nr-rail);
+  border: 1px dashed var(--nr-border-strong);
   border-radius: 6px;
   text-align: center;
 }
@@ -2392,14 +2392,14 @@ onMounted(() => {
   font-weight: 600;
 }
 .diag-layer-badge.fixable {
-  color: #52c41a;
-  border: 1px solid #52c41a;
-  background: #f6ffed;
+  color: var(--nr-sage);
+  border: 1px solid var(--nr-sage);
+  background: rgba(94,115,85,.10);
 }
 .diag-layer-badge.diagnosis-only {
-  color: #8c8c8c;
-  border: 1px solid #d9d9d9;
-  background: #fafafa;
+  color: var(--nr-ink-2);
+  border: 1px solid var(--nr-border-strong);
+  background: var(--nr-rail);
 }
 
 /* Phase 6: Candidate comparison */
@@ -2414,20 +2414,20 @@ onMounted(() => {
   border-radius: 6px;
   text-align: center;
 }
-.score-box.fix { background: #e6f7ff; border: 1px solid #91d5ff; }
-.score-box.health { background: #f6ffed; border: 1px solid #b7eb8f; }
-.score-label { font-size: 10px; color: #888; margin-bottom: 2px; }
+.score-box.fix { background: var(--nr-clay-soft); border: 1px solid var(--nr-clay-soft); }
+.score-box.health { background: rgba(94,115,85,.10); border: 1px solid rgba(94,115,85,.40); }
+.score-label { font-size: 10px; color: var(--nr-ink-2); margin-bottom: 2px; }
 .score-val { font-size: 18px; font-weight: 700; font-family: monospace; }
 
 .candidate-card {
-  border: 1px solid #e8e8e8;
+  border: 1px solid var(--nr-border);
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 10px;
 }
 .candidate-card.rejected {
-  border-color: #ffd8d6;
-  background: #fff7f6;
+  border-color: rgba(176,68,52,.18);
+  background: rgba(176,68,52,.06);
 }
 .candidate-header {
   display: flex;
@@ -2437,7 +2437,7 @@ onMounted(() => {
 .candidate-rank {
   font-size: 14px;
   font-weight: 700;
-  color: #333;
+  color: var(--nr-ink);
   margin-right: 8px;
 }
 
@@ -2451,9 +2451,9 @@ onMounted(() => {
   padding: 8px;
   border-radius: 6px;
 }
-.score-col.fix { background: #e6f7ff; }
-.score-col.health { background: #f6ffed; }
-.score-col-label { font-size: 10px; color: #888; margin-bottom: 4px; }
+.score-col.fix { background: var(--nr-clay-soft); }
+.score-col.health { background: rgba(94,115,85,.10); }
+.score-col-label { font-size: 10px; color: var(--nr-ink-2); margin-bottom: 4px; }
 .score-col-val { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
 .score-dim {
   display: flex;
@@ -2461,7 +2461,7 @@ onMounted(() => {
   font-size: 11px;
   padding: 1px 0;
 }
-.dim-tag { color: #888; }
+.dim-tag { color: var(--nr-ink-2); }
 
 .gate-deltas {
   display: flex;
@@ -2470,12 +2470,12 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .delta-item { font-size: 11px; padding: 1px 6px; border-radius: 4px; }
-.delta-good { background: #f6ffed; color: #52c41a; }
-.delta-bad { background: #fff2f0; color: #ff4d4f; }
+.delta-good { background: rgba(94,115,85,.10); color: var(--nr-sage); }
+.delta-bad { background: rgba(176,68,52,.08); color: var(--nr-danger); }
 .reject-reason {
   font-size: 10px;
-  color: #ff4d4f;
-  background: #fff2f0;
+  color: var(--nr-danger);
+  background: rgba(176,68,52,.08);
   padding: 2px 6px;
   border-radius: 4px;
   white-space: nowrap;
@@ -2493,11 +2493,11 @@ onMounted(() => {
 .diff-label {
   font-size: 11px;
   font-weight: 600;
-  color: #888;
+  color: var(--nr-ink-2);
   margin-bottom: 4px;
 }
-.diff-panel.old .code-block { border: 1px solid #ffccc7; }
-.diff-panel.new .code-block { border: 1px solid #b7eb8f; }
+.diff-panel.old .code-block { border: 1px solid rgba(176,68,52,.20); }
+.diff-panel.new .code-block { border: 1px solid rgba(94,115,85,.40); }
 
 /* Phase 6: Version history */
 .ver-list { max-height: 200px; overflow-y: auto; }
@@ -2506,17 +2506,17 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--nr-border);
   font-size: 12px;
 }
-.ver-row.active { background: #f6ffed; }
-.ver-id { color: #888; }
+.ver-row.active { background: rgba(94,115,85,.10); }
+.ver-id { color: var(--nr-ink-2); }
 .ver-preview {
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #555;
+  color: var(--nr-ink-2);
 }
-.ver-meta { color: #aaa; font-size: 10px; white-space: nowrap; }
+.ver-meta { color: var(--nr-ink-3); font-size: 10px; white-space: nowrap; }
 </style>

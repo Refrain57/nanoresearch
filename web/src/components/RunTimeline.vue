@@ -174,40 +174,40 @@ function formatSize(bytes) {
 .run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
 .run-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .run-meta-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.model { font-size: 13px; color: #555; }
-.duration { font-size: 13px; color: #888; display: flex; align-items: center; gap: 4px; }
-.run-time { font-size: 12px; color: #aaa; }
-.agent-link { font-size: 13px; color: #1677ff; display: flex; align-items: center; gap: 4px; text-decoration: none; }
+.model { font-size: 13px; color: var(--nr-ink-2); }
+.duration { font-size: 13px; color: var(--nr-ink-2); display: flex; align-items: center; gap: 4px; }
+.run-time { font-size: 12px; color: var(--nr-ink-3); }
+.agent-link { font-size: 13px; color: var(--nr-clay); display: flex; align-items: center; gap: 4px; text-decoration: none; }
 .agent-link:hover { text-decoration: underline; }
-.agent-link-plain { font-size: 13px; color: #888; display: flex; align-items: center; gap: 4px; }
+.agent-link-plain { font-size: 13px; color: var(--nr-ink-2); display: flex; align-items: center; gap: 4px; }
 .success-rate { font-size: 12px; font-weight: 600; }
-.success-rate.good { color: #52c41a; }
-.success-rate.warn { color: #faad14; }
-.success-rate.bad  { color: #f5222d; }
+.success-rate.good { color: var(--nr-sage); }
+.success-rate.warn { color: var(--nr-gold); }
+.success-rate.bad  { color: var(--nr-danger); }
 
-.token-card { background: #fafafa; border-radius: 8px; margin-bottom: 16px; }
+.token-card { background: var(--nr-rail); border-radius: 8px; margin-bottom: 16px; }
 .token-bar-wrap { display: flex; flex-direction: column; gap: 8px; }
-.token-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: #f0f0f0; }
+.token-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--nr-border); }
 .seg { min-width: 2px; }
-.seg.input  { background: #1677ff; }
-.seg.output { background: #52c41a; }
-.seg.cache  { background: #faad14; }
-.token-legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #555; flex-wrap: wrap; }
+.seg.input  { background: var(--nr-clay); }
+.seg.output { background: var(--nr-sage); }
+.seg.cache  { background: var(--nr-gold); }
+.token-legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--nr-ink-2); flex-wrap: wrap; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 3px; }
-.dot.input  { background: #1677ff; }
-.dot.output { background: #52c41a; }
-.dot.cache  { background: #faad14; }
+.dot.input  { background: var(--nr-clay); }
+.dot.output { background: var(--nr-sage); }
+.dot.cache  { background: var(--nr-gold); }
 
-.section-title { font-size: 14px; font-weight: 600; color: #333; margin: 20px 0 8px; }
+.section-title { font-size: 14px; font-weight: 600; color: var(--nr-ink); margin: 20px 0 8px; }
 
-.tc-duration { font-size: 12px; color: #aaa; margin-left: 8px; }
+.tc-duration { font-size: 12px; color: var(--nr-ink-3); margin-left: 8px; }
 .tc-body { padding: 4px 0; }
 .tc-section { margin-bottom: 12px; }
-.tc-label { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-.tc-pre { background: #f5f5f5; border-radius: 6px; padding: 10px 12px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; margin: 0; max-height: 300px; overflow-y: auto; }
+.tc-label { font-size: 12px; font-weight: 600; color: var(--nr-ink-2); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.tc-pre { background: var(--nr-rail); border-radius: 6px; padding: 10px 12px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; margin: 0; max-height: 300px; overflow-y: auto; }
 
 .artifact-list { display: flex; flex-direction: column; gap: 8px; }
-.artifact-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fafafa; border-radius: 6px; }
+.artifact-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--nr-rail); border-radius: 6px; }
 .art-name { font-size: 13px; font-weight: 500; flex: 1; }
-.art-meta { font-size: 12px; color: #aaa; }
+.art-meta { font-size: 12px; color: var(--nr-ink-3); }
 </style>

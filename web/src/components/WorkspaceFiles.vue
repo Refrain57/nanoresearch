@@ -115,8 +115,8 @@ onMounted(() => fetchDir())
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #fafafa;
-  border-left: 1px solid #f0f0f0;
+  background: var(--nr-rail);
+  border-left: 1px solid var(--nr-border);
 }
 
 .wf-header {
@@ -124,13 +124,13 @@ onMounted(() => fetchDir())
   align-items: center;
   gap: 6px;
   padding: 12px 14px 10px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--nr-border);
   background: #fff;
   flex-shrink: 0;
 }
-.wf-header-icon { color: #faad14; font-size: 15px; }
-.wf-header-title { font-size: 13px; font-weight: 600; color: #222; }
-.wf-breadcrumb { font-size: 12px; color: #999; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-header-icon { color: var(--nr-gold); font-size: 15px; }
+.wf-header-title { font-size: 13px; font-weight: 600; color: var(--nr-ink); }
+.wf-breadcrumb { font-size: 12px; color: var(--nr-ink-3); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-back { flex-shrink: 0; }
 .wf-refresh { margin-left: auto; }
 
@@ -146,18 +146,18 @@ onMounted(() => fetchDir())
   font-size: 13px;
   cursor: pointer;
   text-decoration: none;
-  color: #333;
+  color: var(--nr-ink);
   transition: background 0.12s;
   min-width: 0;
 }
-.wf-row:hover { background: #f0f0f0; }
-.wf-file:hover { background: #e6f4ff; color: #1677ff; }
+.wf-row:hover { background: var(--nr-border); }
+.wf-file:hover { background: var(--nr-clay-soft); color: var(--nr-clay); }
 
-.wf-icon { font-size: 13px; flex-shrink: 0; color: #aaa; }
-.wf-icon-dir { color: #faad14; }
+.wf-icon { font-size: 13px; flex-shrink: 0; color: var(--nr-ink-3); }
+.wf-icon-dir { color: var(--nr-gold); }
 .wf-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
-.wf-size { font-size: 11px; color: #bbb; flex-shrink: 0; }
-.wf-arrow { font-size: 10px; color: #ccc; flex-shrink: 0; }
+.wf-size { font-size: 11px; color: var(--nr-ink-3); flex-shrink: 0; }
+.wf-arrow { font-size: 10px; color: var(--nr-ink-3); flex-shrink: 0; }
 .wf-dl { font-size: 12px; flex-shrink: 0; opacity: 0; transition: opacity 0.12s; }
 .wf-file:hover .wf-dl { opacity: 0.6; }
 </style>

@@ -1,0 +1,77 @@
+/* ============================================================
+   Nano Research —— Anthropic 暖米白 + clay 设计系统
+   全局 CSS 变量 + 基础排版 + 滚动条
+   （AntD 组件级换皮见 App.vue 的 ConfigProvider token）
+   ============================================================ */
+:root {
+  /* 背景层 */
+  --nr-canvas:       #F4F3EE;   /* Pampas 米白 —— 主画布 */
+  --nr-rail:         #EFEDE4;   /* 导航/列表栏 —— 略深暖纸 */
+  --nr-card:         #FBFAF7;   /* 暖白卡片 */
+  --nr-white:        #FFFFFF;
+
+  /* 主强调 clay */
+  --nr-clay:         #C15F3C;   /* Crail 书布橙 */
+  --nr-clay-hover:   #A94E2F;
+  --nr-clay-soft:    rgba(193, 95, 60, 0.10);   /* 激活/hover 底 */
+  --nr-clay-tint:    rgba(193, 95, 60, 0.06);
+
+  /* 文字 */
+  --nr-ink:          #20201D;   /* 正文 */
+  --nr-ink-2:        #6B665C;   /* 次要 */
+  --nr-ink-3:        #A39E92;   /* 弱化/占位 */
+
+  /* 边框 */
+  --nr-border:       #E6E3DA;   /* 发丝暖边框 */
+  --nr-border-strong:#D8D3C7;
+
+  /* 状态/标签色（克制 muted，非 AntD 彩虹） */
+  --nr-sage:         #5E7355;   /* 成功/流式 */
+  --nr-slate:        #5A6B78;   /* 信息/联网 */
+  --nr-gold:         #9A7B2E;   /* 知识库/警示 */
+  --nr-danger:       #B04434;   /* 危险（暖红，非冷红） */
+
+  /* 阴影 */
+  --nr-shadow-sm: 0 1px 2px rgba(60,50,40,.04), 0 1px 3px rgba(60,50,40,.05);
+  --nr-shadow-md: 0 2px 6px rgba(60,50,40,.06), 0 6px 16px rgba(60,50,40,.06);
+
+  /* 字体 */
+  --nr-serif: "Newsreader", "Tiempos", Georgia, "Songti SC", serif;
+  --nr-sans:  "Hanken Grotesk", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html, body, #app {
+  background: var(--nr-canvas);
+  color: var(--nr-ink);
+}
+body {
+  font-family: var(--nr-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* wordmark / 衬线标题工具类 */
+.nr-serif { font-family: var(--nr-serif); font-weight: 500; letter-spacing: -.01em; }
+
+/* 暖色滚动条 */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--nr-border-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: #C5BFB0; background-clip: content-box; }
+
+/* ============================================================
+   AntD preset tag 颜色收进暖色系（一处生效，全站 a-tag color="…"）
+   ============================================================ */
+.ant-tag-green                    { color: var(--nr-sage);   background: rgba(94,115,85,.10);   border-color: rgba(94,115,85,.28); }
+.ant-tag-blue, .ant-tag-geekblue  { color: var(--nr-slate);  background: rgba(90,107,120,.10);  border-color: rgba(90,107,120,.28); }
+.ant-tag-cyan                     { color: #3F7A78;          background: rgba(63,122,120,.10);  border-color: rgba(63,122,120,.28); }
+.ant-tag-red, .ant-tag-volcano, .ant-tag-magenta
+                                  { color: var(--nr-danger); background: rgba(176,68,52,.10);   border-color: rgba(176,68,52,.28); }
+.ant-tag-purple                   { color: #7C6A8E;          background: rgba(124,106,142,.10); border-color: rgba(124,106,142,.28); }
+.ant-tag-orange, .ant-tag-gold, .ant-tag-lime
+                                  { color: var(--nr-gold);   background: rgba(154,123,46,.10);  border-color: rgba(154,123,46,.28); }

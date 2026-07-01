@@ -35,7 +35,7 @@
       :confirm-loading="newConvLoading"
       width="480"
     >
-      <p style="margin: 12px 0 8px; color: #666; font-size: 13px;">选择要使用的 Agent：</p>
+      <p style="margin: 12px 0 8px; color: var(--nr-ink-2); font-size: 13px;">选择要使用的 Agent：</p>
       <div class="agent-pick-list">
         <div
           v-for="agent in agentStore.agents"
@@ -66,7 +66,7 @@
           :class="['agent-pick-item', { selected: selectedAgentId === null }]"
           @click="selectedAgentId = null"
         >
-          <div class="agent-pick-avatar" style="background:#bbb">?</div>
+          <div class="agent-pick-avatar" style="background:var(--nr-ink-3)">?</div>
           <div class="agent-pick-info">
             <span class="agent-pick-name">不绑定 Agent</span>
             <span class="agent-pick-desc">使用系统默认配置</span>
@@ -164,7 +164,7 @@
           </div>
         </template>
         <div v-else class="empty-state">
-          <robot-outlined style="font-size: 48px; color: #ccc" />
+          <robot-outlined style="font-size: 48px; color: var(--nr-ink-3)" />
           <p>选择或新建一个对话开始</p>
         </div>
       </div>
@@ -215,7 +215,7 @@
           />
           <div class="field-hint">留空则使用 Agent 默认模型</div>
         </a-form-item>
-        <div v-if="modelPickerValue && getModelProvider(modelPickerValue)" style="font-size:12px;color:#888">
+        <div v-if="modelPickerValue && getModelProvider(modelPickerValue)" style="font-size:12px;color:var(--nr-ink-2)">
           当前选择将通过 <strong>{{ getModelProvider(modelPickerValue) }}</strong> 供应商 API 调用
         </div>
       </a-form>
@@ -309,7 +309,7 @@ const kbOptions = computed(() =>
 )
 
 const agentInitial = computed(() => (currentAgent.value?.name || 'A')[0].toUpperCase())
-const AVATAR_COLORS = ['#1677ff','#52c41a','#faad14','#f5222d','#722ed1','#13c2c2','#eb2f96']
+const AVATAR_COLORS = ['#C15F3C','#5E7355','#9A7B2E','#B04434','#7C6A8E','#3F7A78','#A8566E']
 function avatarStyle(name) {
   let hash = 0
   for (const ch of (name || '')) hash = (hash * 31 + ch.charCodeAt(0)) & 0xffffffff
@@ -510,25 +510,25 @@ async function connectStream(runId, convId) {
 
 <style scoped>
 .chat-layout { display: flex; height: 100vh; overflow: hidden; }
-.sidebar { width: 260px; border-right: 1px solid #f0f0f0; display: flex; flex-direction: column; background: #fafafa; }
-.sidebar-header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid #f0f0f0; }
+.sidebar { width: 260px; border-right: 1px solid var(--nr-border); display: flex; flex-direction: column; background: var(--nr-rail); }
+.sidebar-header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--nr-border); }
 .sidebar-title { font-weight: 600; font-size: 15px; }
 .conv-list { flex: 1; overflow-y: auto; }
-.conv-item { padding: 12px 16px; cursor: pointer; position: relative; border-bottom: 1px solid #f0f0f0; }
-.conv-item:hover, .conv-item.active { background: #e6f4ff; }
+.conv-item { padding: 12px 16px; cursor: pointer; position: relative; border-bottom: 1px solid var(--nr-border); }
+.conv-item:hover, .conv-item.active { background: var(--nr-clay-soft); }
 .conv-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.conv-preview { font-size: 12px; color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
-.conv-delete { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: #ccc; display: none; }
-.conv-item:hover .conv-delete { display: block; color: #ff4d4f; }
-.empty-hint { text-align: center; color: #ccc; padding: 24px; font-size: 13px; }
+.conv-preview { font-size: 12px; color: var(--nr-ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.conv-delete { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--nr-ink-3); display: none; }
+.conv-item:hover .conv-delete { display: block; color: var(--nr-danger); }
+.empty-hint { text-align: center; color: var(--nr-ink-3); padding: 24px; font-size: 13px; }
 
 .chat-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
 /* Agent 信息栏 */
 .agent-bar {
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 16px; border-bottom: 1px solid #f0f0f0;
-  background: #fafafa; flex-shrink: 0;
+  padding: 8px 16px; border-bottom: 1px solid var(--nr-border);
+  background: var(--nr-rail); flex-shrink: 0;
 }
 .agent-bar-avatar {
   width: 28px; height: 28px; border-radius: 50%;
@@ -536,26 +536,26 @@ async function connectStream(runId, convId) {
   font-size: 12px; font-weight: 700; color: #fff; flex-shrink: 0;
 }
 .agent-bar-info { display: flex; flex-direction: column; line-height: 1.3; }
-.agent-bar-name { font-size: 13px; font-weight: 600; color: #333; }
-.agent-bar-model { font-size: 11px; color: #999; display: flex; align-items: center; gap: 4px; }
+.agent-bar-name { font-size: 13px; font-weight: 600; color: var(--nr-ink); }
+.agent-bar-model { font-size: 11px; color: var(--nr-ink-3); display: flex; align-items: center; gap: 4px; }
 .agent-bar-caps { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
-.agent-bar-link { font-size: 12px; color: #1677ff; display: flex; align-items: center; gap: 3px; white-space: nowrap; }
-.agent-bar-link:hover { color: #0958d9; }
-.agent-bar-edit { color: #999; padding: 0 4px; }
-.agent-bar-edit:hover { color: #1677ff; }
-.override-badge { margin-left: 4px; font-size: 10px; color: #faad14; font-weight: 500; }
-.model-provider-tag { margin-left: 4px; font-size: 10px; color: #1677ff; background: #e6f4ff; padding: 0 4px; border-radius: 3px; }
-.model-name-link { cursor: pointer; color: #1677ff; text-decoration: none; border-bottom: 1px dashed #91caff; }
-.model-name-link:hover { color: #0958d9; border-bottom-color: #1677ff; }
-.field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+.agent-bar-link { font-size: 12px; color: var(--nr-clay); display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+.agent-bar-link:hover { color: var(--nr-clay-hover); }
+.agent-bar-edit { color: var(--nr-ink-3); padding: 0 4px; }
+.agent-bar-edit:hover { color: var(--nr-clay); }
+.override-badge { margin-left: 4px; font-size: 10px; color: var(--nr-gold); font-weight: 500; }
+.model-provider-tag { margin-left: 4px; font-size: 10px; color: var(--nr-clay); background: var(--nr-clay-soft); padding: 0 4px; border-radius: 3px; }
+.model-name-link { cursor: pointer; color: var(--nr-clay); text-decoration: none; border-bottom: 1px dashed var(--nr-clay-soft); }
+.model-name-link:hover { color: var(--nr-clay-hover); border-bottom-color: var(--nr-clay); }
+.field-hint { font-size: 11px; color: var(--nr-ink-3); margin-top: 4px; }
 
-.run-hint { padding: 4px 16px; border-top: 1px solid #f0f0f0; background: #fafafa; }
-.run-link { font-size: 12px; color: #1677ff; display: flex; align-items: center; gap: 4px; width: fit-content; }
-.run-link:hover { color: #0958d9; }
-.input-area { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-top: 1px solid #f0f0f0; }
+.run-hint { padding: 4px 16px; border-top: 1px solid var(--nr-border); background: var(--nr-rail); }
+.run-link { font-size: 12px; color: var(--nr-clay); display: flex; align-items: center; gap: 4px; width: fit-content; }
+.run-link:hover { color: var(--nr-clay-hover); }
+.input-area { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-top: 1px solid var(--nr-border); }
 .input-row { display: flex; gap: 8px; }
 .chat-input { flex: 1; }
-.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #ccc; gap: 12px; }
+.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--nr-ink-3); gap: 12px; }
 
 .workspace-panel {
   width: 240px;
@@ -563,7 +563,7 @@ async function connectStream(runId, convId) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-left: 1px solid #f0f0f0;
+  border-left: 1px solid var(--nr-border);
 }
 
 .detail-panel {
@@ -572,7 +572,7 @@ async function connectStream(runId, convId) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-left: 1px solid #f0f0f0;
+  border-left: 1px solid var(--nr-border);
   background: #fff;
 }
 .detail-panel-header {
@@ -580,10 +580,10 @@ async function connectStream(runId, convId) {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--nr-border);
   flex-shrink: 0;
 }
-.detail-panel-title { font-size: 14px; font-weight: 600; color: #333; }
+.detail-panel-title { font-size: 14px; font-weight: 600; color: var(--nr-ink); }
 .detail-panel-body { flex: 1; overflow-y: auto; padding: 16px; }
 
 .workspace-slide-enter-active,
@@ -594,17 +594,17 @@ async function connectStream(runId, convId) {
 .agent-pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
 .agent-pick-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
-  border: 1px solid #f0f0f0; border-radius: 8px; cursor: pointer; transition: all 0.15s;
+  border: 1px solid var(--nr-border); border-radius: 8px; cursor: pointer; transition: all 0.15s;
 }
-.agent-pick-item:hover { border-color: #91caff; background: #f0f8ff; }
-.agent-pick-item.selected { border-color: #1677ff; background: #e6f4ff; }
+.agent-pick-item:hover { border-color: var(--nr-clay-soft); background: var(--nr-clay-tint); }
+.agent-pick-item.selected { border-color: var(--nr-clay); background: var(--nr-clay-soft); }
 .agent-pick-avatar {
   width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 700; color: #fff;
 }
 .agent-pick-info { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
-.agent-pick-name { font-size: 13px; font-weight: 600; color: #333; }
-.agent-pick-desc { font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agent-pick-check { color: #1677ff; font-size: 16px; flex-shrink: 0; }
+.agent-pick-name { font-size: 13px; font-weight: 600; color: var(--nr-ink); }
+.agent-pick-desc { font-size: 12px; color: var(--nr-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-pick-check { color: var(--nr-clay); font-size: 16px; flex-shrink: 0; }
 </style>

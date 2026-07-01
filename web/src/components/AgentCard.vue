@@ -59,7 +59,7 @@ const caps = computed(() => props.agent.capabilities || {})
 <style scoped>
 .agent-card {
   background: #fff;
-  border: 1px solid #e8e8e8;
+  border: 1px solid var(--nr-border);
   border-radius: 12px;
   padding: 20px;
   transition: box-shadow 0.2s;
@@ -67,13 +67,13 @@ const caps = computed(() => props.agent.capabilities || {})
 .agent-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.1); }
 .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
 .agent-name { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
-.agent-desc { color: #888; font-size: 13px; margin: 0; }
+.agent-desc { color: var(--nr-ink-2); font-size: 13px; margin: 0; }
 .capabilities { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
 .skill-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
 .skill-name { font-size: 13px; }
-.stats { display: flex; gap: 24px; padding: 12px 0; border-top: 1px solid #f0f0f0; margin-top: 8px; }
+.stats { display: flex; gap: 24px; padding: 12px 0; border-top: 1px solid var(--nr-border); margin-top: 8px; }
 .stat { display: flex; flex-direction: column; align-items: center; }
-.stat-num { font-size: 18px; font-weight: 600; color: #1677ff; }
-.stat-label { font-size: 11px; color: #999; }
+.stat-num { font-size: 18px; font-weight: 600; color: var(--nr-clay); }
+.stat-label { font-size: 11px; color: var(--nr-ink-3); }
 .card-actions { display: flex; gap: 8px; margin-top: 12px; }
 </style>
