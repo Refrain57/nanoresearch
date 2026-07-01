@@ -9,6 +9,7 @@ merge/dedup + contiguous re-index behaviour is exercised.
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -88,8 +89,17 @@ def loop_with_scripted_rag(tmp_path):
     return loop
 
 
+@pytest.fixture
+def session_key() -> str:
+    """Unique session key per test so residual Redis session state from a prior
+    run cannot collide. Fixed keys tripped repeated-question detection
+    (loop.py:839) + startup consolidation on leftover messages, diverting the
+    agent flow and making the test non-deterministic."""
+    return f"cli:{uuid.uuid4().hex}"
+
+
 @pytest.mark.asyncio
-async def test_after_iteration_forwards_deduped_citations(loop_with_scripted_rag):
+async def test_after_iteration_forwards_deduped_citations(loop_with_scripted_rag, session_key):
     """Two kb_search hits on the same chunk_id -> on_citations receives a merged,
     deduped list with contiguous 1..N indices."""
     loop = loop_with_scripted_rag
@@ -98,7 +108,7 @@ async def test_after_iteration_forwards_deduped_citations(loop_with_scripted_rag
     async def on_citations(items):
         batches.append(items)
 
-    await loop.process_direct("q", session_key="cli:cit1", on_citations=on_citations)
+    await loop.process_direct("q", session_key=session_key, on_citations=on_citations)
 
     assert batches, "on_citations should have been called at least once"
     final = batches[-1]
@@ -109,16 +119,16 @@ async def test_after_iteration_forwards_deduped_citations(loop_with_scripted_rag
 
 
 @pytest.mark.asyncio
-async def test_save_turn_embeds_citations_in_content(loop_with_scripted_rag):
+async def test_save_turn_embeds_citations_in_content(loop_with_scripted_rag, session_key):
     """The accumulated citations are persisted on the assistant message dict."""
     loop = loop_with_scripted_rag
 
     async def _noop(items):
         return None
 
-    await loop.process_direct("q", session_key="cli:cit2", on_citations=_noop)
+    await loop.process_direct("q", session_key=session_key, on_citations=_noop)
 
-    session = await loop.sessions.get_or_create("cli:cit2")
+    session = await loop.sessions.get_or_create(session_key)
     assistants = [m for m in session.messages if m.get("role") == "assistant"]
     assert assistants, "expected at least one assistant message persisted"
     final = assistants[-1]
@@ -128,24 +138,24 @@ async def test_save_turn_embeds_citations_in_content(loop_with_scripted_rag):
 
 
 @pytest.mark.asyncio
-async def test_citations_captured_without_on_citations_callback(loop_with_scripted_rag):
+async def test_citations_captured_without_on_citations_callback(loop_with_scripted_rag, session_key):
     """Citation capture/embedding is independent of the on_citations callback."""
     loop = loop_with_scripted_rag
 
-    await loop.process_direct("q", session_key="cli:cit3")  # no on_citations
+    await loop.process_direct("q", session_key=session_key)  # no on_citations
 
-    session = await loop.sessions.get_or_create("cli:cit3")
+    session = await loop.sessions.get_or_create(session_key)
     final = [m for m in session.messages if m.get("role") == "assistant"][-1]
     assert [c["chunk_id"] for c in final.get("_citations", [])] == ["c1", "c2"]
 
 
 @pytest.mark.asyncio
-async def test_turn_citations_reset_between_turns(loop_with_scripted_rag):
+async def test_turn_citations_reset_between_turns(loop_with_scripted_rag, session_key):
     """A turn with no RAG tool must not inherit the previous turn's citations."""
     loop = loop_with_scripted_rag
 
     # Turn 1: produces citations (consumes both scripted kb_search results).
-    await loop.process_direct("q1", session_key="cli:cit4")
+    await loop.process_direct("q1", session_key=session_key)
 
     # Turn 2: LLM answers directly with no tool calls -> no citations.
     async def chat_plain(**kwargs):
@@ -153,9 +163,9 @@ async def test_turn_citations_reset_between_turns(loop_with_scripted_rag):
 
     loop.provider.chat_with_retry = chat_plain
 
-    await loop.process_direct("q2", session_key="cli:cit4")
+    await loop.process_direct("q2", session_key=session_key)
 
-    session = await loop.sessions.get_or_create("cli:cit4")
+    session = await loop.sessions.get_or_create(session_key)
     assistants = [m for m in session.messages if m.get("role") == "assistant"]
     last = assistants[-1]
     assert last.get("content") == "direct answer"
