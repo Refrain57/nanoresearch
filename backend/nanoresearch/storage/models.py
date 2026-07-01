@@ -454,3 +454,25 @@ class TunableObjectVersion(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()"),
     )
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class MemoryFact(Base):
+    """User-global 画像 fact with provenance (P1 of memory-layering).
+
+    Source of truth for the profile; MEMORY.md is a one-way rendered projection.
+    `source=manual` rows are protected from automatic diff removal.
+    """
+    __tablename__ = "memory_facts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    section: Mapped[str] = mapped_column(String, nullable=False)      # facts|user_profile|focus_areas
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String, default="extracted")  # extracted|manual
+    derived_from: Mapped[list] = mapped_column(JSONB, default=list)   # event ids (P2)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    edited_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
