@@ -45,6 +45,13 @@ export const getDocEntities  = (kbId, docId) => apiGet(`/api/knowledge/${kbId}/d
 export const getGraphStats   = (kbId)        => apiGet(`/api/knowledge/${kbId}/graph/stats`)
 export const buildKbGraph    = (kbId)        => apiPost(`/api/knowledge/${kbId}/graph/build`, {})
 
+export const listGraphEntities = (kbId, params = {}) => {
+  const qs = new URLSearchParams(params).toString()
+  return apiGet(`/api/knowledge/${kbId}/graph/entities${qs ? '?' + qs : ''}`)
+}
+export const getGraphEntity  = (kbId, name)     => apiGet(`/api/knowledge/${kbId}/graph/entities/${encodeURIComponent(name)}`)
+export const getTripleChunks = (kbId, tripleId) => apiGet(`/api/knowledge/${kbId}/graph/triples/${tripleId}/chunks`)
+
 // Test retrieval
 export const testQuery = (kbId, query, topK = 5, mode = 'hybrid') =>
   apiPost(`/api/knowledge/${kbId}/query/test`, {

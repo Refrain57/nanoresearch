@@ -7,9 +7,10 @@ import re
 import uuid
 from collections import defaultdict
 
-from sqlalchemy import func, select, text
+from sqlalchemy import distinct, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from nanoresearch.storage.models import KgEntity, KgEntityMention, KgTriple, KgTripleMention
 
@@ -237,6 +238,94 @@ class GraphRepository:
             "triple_count": triple_count,
             "top_entities": top_entities,
         }
+
+    async def list_entities(
+        self, kb_id: uuid.UUID, search: str | None = None, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        """Paginated/searchable entity list with mention counts (desc)."""
+        conds = [KgEntity.kb_id == kb_id]
+        if search:
+            conds.append(KgEntity.name.ilike(f"%{_normalize(search)}%"))
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntity.name, KgEntity.label, func.count(KgEntityMention.id).label("mentions"))
+                .join(KgEntityMention, KgEntityMention.entity_id == KgEntity.id)
+                .where(*conds)
+                .group_by(KgEntity.name, KgEntity.label)
+                .order_by(text("mentions DESC"))
+                .limit(limit)
+                .offset(offset)
+            )
+            return [{"name": r[0], "label": r[1], "mentions": r[2]} for r in result.all()]
+
+    async def get_entity_summary(self, kb_id: uuid.UUID, name: str) -> dict | None:
+        """Header info for one entity (by normalized name), or None if absent."""
+        norm = _normalize(name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntity.name, KgEntity.label, func.count(KgEntityMention.id).label("mentions"))
+                .join(KgEntityMention, KgEntityMention.entity_id == KgEntity.id, isouter=True)
+                .where(KgEntity.kb_id == kb_id, KgEntity.name == norm)
+                .group_by(KgEntity.name, KgEntity.label)
+            )
+            row = result.first()
+            if not row:
+                return None
+            return {"name": row[0], "label": row[1], "mention_count": row[2]}
+
+    async def get_entity_facts(self, kb_id: uuid.UUID, name: str) -> list[dict]:
+        """Triples where the entity is source OR target, with distinct-document corroboration."""
+        from nanoresearch.storage.models import KbChunk
+        norm = _normalize(name)
+        SrcE = aliased(KgEntity)
+        TgtE = aliased(KgEntity)
+        async with self._factory() as db:
+            ids_res = await db.execute(
+                select(KgEntity.id).where(KgEntity.kb_id == kb_id, KgEntity.name == norm)
+            )
+            entity_ids = [r[0] for r in ids_res.all()]
+            if not entity_ids:
+                return []
+            doc_count_sq = (
+                select(
+                    KgTripleMention.triple_id.label("tid"),
+                    func.count(distinct(KbChunk.document_id)).label("doc_count"),
+                )
+                .join(KbChunk, KbChunk.id == KgTripleMention.chunk_id)
+                .where(KgTripleMention.kb_id == kb_id)
+                .group_by(KgTripleMention.triple_id)
+                .subquery()
+            )
+            result = await db.execute(
+                select(
+                    KgTriple.id, SrcE.name, KgTriple.label, TgtE.name,
+                    func.coalesce(doc_count_sq.c.doc_count, 0).label("doc_count"),
+                )
+                .join(SrcE, SrcE.id == KgTriple.source_id)
+                .join(TgtE, TgtE.id == KgTriple.target_id)
+                .outerjoin(doc_count_sq, doc_count_sq.c.tid == KgTriple.id)
+                .where(
+                    KgTriple.kb_id == kb_id,
+                    or_(KgTriple.source_id.in_(entity_ids), KgTriple.target_id.in_(entity_ids)),
+                )
+                .order_by(text("doc_count DESC"))
+            )
+            return [
+                {"triple_id": str(r[0]), "source": r[1], "label": r[2], "target": r[3], "doc_count": r[4]}
+                for r in result.all()
+            ]
+
+    async def get_chunks_by_triple(self, kb_id: uuid.UUID, triple_id: uuid.UUID) -> list[KbChunk]:
+        """Evidence chunks for a fact (triple), via triple mentions."""
+        from nanoresearch.storage.models import KbChunk
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KbChunk)
+                .join(KgTripleMention, KgTripleMention.chunk_id == KbChunk.id)
+                .where(KgTripleMention.triple_id == triple_id, KgTripleMention.kb_id == kb_id)
+                .distinct()
+            )
+            return list(result.scalars().all())
 
     async def get_entities_by_doc(self, doc_id: uuid.UUID) -> list[dict]:
         """Return entities (with mention counts) for chunks belonging to a document."""
