@@ -523,27 +523,24 @@ async def run_agent_job(
             except Exception as kb_err:
                 logger.warning("Failed to build kb_map for agent %s: %s", agent_id, kb_err)
 
-        # Build citation_source_map: {file_path: filename} merged across all bound KBs.
-        # The chunk's source_path equals KbDocument.file_path (both are the ingest-time
-        # file path, typically a temp file). Remapping to KbDocument.filename gives the
-        # user-visible original document name. Injected onto loop before process_direct;
-        # loop.py reads it in after_iteration to remap citation["source"].
+        # Build citation_source_map: {file_path: filename} across ALL of this uid's KBs
+        # (not just agent-bound), so whichever KB kb_search actually queries is covered —
+        # the agent may query a KB via kb_id that isn't in its bound list. The chunk's
+        # source_path equals KbDocument.file_path (both are the ingest-time path, typically
+        # a temp file); remapping to KbDocument.filename gives the original document name.
+        # Injected onto loop; loop.py remaps citation["source"] in after_iteration.
         citation_source_map: dict[str, str] = {}
-        if kb_bindings:
+        if uid:
             try:
                 from nanoresearch.storage.repositories.knowledge_repo import KnowledgeRepository
                 _kb_repo = KnowledgeRepository(factory)
-                for _binding in kb_bindings:
-                    _kid_str = _binding.get("id") or ""
-                    if not _kid_str:
-                        continue
+                for _kb in await _kb_repo.list_by_uid(uid):
                     try:
-                        _docs = await _kb_repo.list_documents(uuid.UUID(_kid_str))
-                        for _doc in _docs:
+                        for _doc in await _kb_repo.list_documents(_kb.id):
                             if _doc.file_path and _doc.filename:
                                 citation_source_map[_doc.file_path] = _doc.filename
                     except Exception as _doc_err:
-                        logger.warning("citation_source_map: failed for kb %s: %s", _kid_str, _doc_err)
+                        logger.warning("citation_source_map: failed for kb %s: %s", _kb.id, _doc_err)
             except Exception as _csm_err:
                 logger.warning("citation_source_map build failed (non-fatal): %s", _csm_err)
         loop._citation_source_map = citation_source_map
