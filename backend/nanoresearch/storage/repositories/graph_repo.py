@@ -372,3 +372,63 @@ class GraphRepository:
                 text("DELETE FROM kg_entities WHERE kb_id = :kb_id"), {"kb_id": kb_id}
             )
             await db.commit()
+
+    async def get_entity_evidence(self, kb_id: uuid.UUID, name: str, limit: int = 20) -> list[dict]:
+        """Evidence chunks for an entity: content + original filename, for article generation."""
+        from nanoresearch.storage.models import KbChunk, KbDocument
+        norm = _normalize(name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KbChunk.id, KbChunk.content, KbChunk.chunk_metadata, KbDocument.filename)
+                .join(KgEntityMention, KgEntityMention.chunk_id == KbChunk.id)
+                .join(KgEntity, KgEntity.id == KgEntityMention.entity_id)
+                .join(KbDocument, KbDocument.id == KbChunk.document_id)
+                .where(KgEntity.kb_id == kb_id, KgEntity.name == norm)
+                .distinct()
+                .order_by(KbChunk.id)
+                .limit(limit)
+            )
+            out = []
+            for r in result.all():
+                out.append({
+                    "chunk_id": str(r[0]),
+                    "content": r[1] or "",
+                    "page": (r[2] or {}).get("page"),
+                    "source": r[3] or "",
+                })
+            return out
+
+    async def get_article(self, kb_id: uuid.UUID, entity_name: str):
+        from nanoresearch.storage.models import KgEntityArticle
+        norm = _normalize(entity_name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntityArticle).where(
+                    KgEntityArticle.kb_id == kb_id, KgEntityArticle.entity_name == norm
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def upsert_article(self, kb_id: uuid.UUID, entity_name: str, markdown: str,
+                             citations: list, evidence_hash: str, model: str | None):
+        from nanoresearch.storage.models import KgEntityArticle
+        norm = _normalize(entity_name)
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntityArticle).where(
+                    KgEntityArticle.kb_id == kb_id, KgEntityArticle.entity_name == norm
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = KgEntityArticle(kb_id=kb_id, entity_name=norm)
+                db.add(row)
+            row.markdown = markdown
+            row.citations = citations
+            row.evidence_hash = evidence_hash
+            row.model = model
+            from datetime import datetime, timezone
+            row.generated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(row)
+            return row

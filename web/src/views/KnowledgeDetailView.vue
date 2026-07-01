@@ -417,6 +417,21 @@
                     <span class="wiki-sub">被 {{ entityDetail.mention_count }} 处提及</span>
                   </h2>
 
+                  <div class="wiki-article">
+                    <a-spin :spinning="articleLoading">
+                      <template v-if="article">
+                        <CitationText :text="article.markdown" :citations="article.citations" />
+                        <div class="wiki-article-meta">
+                          <a-tag v-if="article.stale" color="orange">来源已更新</a-tag>
+                          <a-button size="small" type="link" @click="genArticle">
+                            {{ article.stale ? '重新生成' : '重新生成词条' }}
+                          </a-button>
+                        </div>
+                      </template>
+                      <a-button v-else type="dashed" block @click="genArticle">生成词条</a-button>
+                    </a-spin>
+                  </div>
+
                   <h3>事实</h3>
                   <a-empty v-if="!entityDetail.facts.length" description="无事实" />
                   <div v-for="f in entityDetail.facts" :key="f.triple_id" class="wiki-fact">
@@ -743,10 +758,11 @@ import {
 } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import EntityNeighborGraph from '@/components/EntityNeighborGraph.vue'
+import CitationText from '@/components/CitationText.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useSettingsStore } from '@/stores/settings'
 import { apiPost } from '@/apis/base'
-import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats, listGraphEntities, getGraphEntity, getTripleChunks } from '@/apis/knowledge'
+import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats, listGraphEntities, getGraphEntity, getTripleChunks, getEntityArticle, generateEntityArticle } from '@/apis/knowledge'
 import {
   listDatasets, uploadDataset, deleteDataset, generateDataset,
   listEvalRuns, createEvalRun, createRagasRun, createAgentRun, getEvalRun, deleteEvalRun
@@ -1107,6 +1123,24 @@ const detailLoading  = ref(false)
 const expandedTriple = ref(null)      // triple_id whose evidence is open
 const tripleChunks   = ref([])        // evidence chunks for expandedTriple
 
+// ── LLM entity article ──
+const article        = ref(null)      // {markdown, citations, model, generated_at, stale}
+const articleLoading = ref(false)
+
+async function loadArticle(name) {
+  article.value = null
+  try { const r = await getEntityArticle(kbId, name); article.value = r.article } catch (e) {}
+}
+async function genArticle() {
+  if (!entityDetail.value) return
+  articleLoading.value = true
+  try {
+    const r = await generateEntityArticle(kbId, entityDetail.value.name)
+    article.value = r.article
+  } catch (e) { message.error('生成词条失败') }
+  finally { articleLoading.value = false }
+}
+
 async function loadWikiEntities() {
   wikiLoading.value = true
   try {
@@ -1123,6 +1157,7 @@ async function selectEntity(name) {
   tripleChunks.value = []
   try {
     entityDetail.value = await getGraphEntity(kbId, name)
+    await loadArticle(name)
   } catch (e) {
     message.error('加载实体详情失败')
   } finally { detailLoading.value = false }
@@ -1792,4 +1827,6 @@ function formatSize(bytes) {
 .wiki-chunk-text { font-size: 13px; white-space: pre-wrap; }
 .wiki-neighbor { cursor: pointer; margin-bottom: 6px; }
 .wiki-empty { padding: 40px 0; }
+.wiki-article { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #f0f0f0; }
+.wiki-article-meta { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
 </style>

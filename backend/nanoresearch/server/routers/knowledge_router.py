@@ -782,3 +782,44 @@ async def get_triple_chunks(
             for c in chunks
         ]
     }
+
+
+def _article_dict(row, stale: bool) -> dict:
+    return {
+        "markdown": row.markdown,
+        "citations": row.citations or [],
+        "model": row.model,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "stale": stale,
+    }
+
+
+@router.get("/api/knowledge/{kb_id}/graph/entities/{name}/article")
+async def get_entity_article(kb_id: str, name: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _graph_repo(request)
+    kb_uuid = uuid.UUID(kb_id)
+    row = await repo.get_article(kb_uuid, name)
+    if row is None:
+        return {"article": None}
+    from nanoresearch.rag.wiki.article_generator import evidence_signature
+    evidence = await repo.get_entity_evidence(kb_uuid, name)
+    stale = evidence_signature(evidence) != row.evidence_hash
+    return {"article": _article_dict(row, stale)}
+
+
+@router.post("/api/knowledge/{kb_id}/graph/entities/{name}/article")
+async def generate_entity_article(kb_id: str, name: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    repo = _graph_repo(request)
+    kb_uuid = uuid.UUID(kb_id)
+    if await repo.get_entity_summary(kb_uuid, name) is None:
+        raise HTTPException(status_code=404, detail="entity not found")
+    from nanoresearch.rag.wiki.article_generator import generate_article, evidence_signature
+    evidence = await repo.get_entity_evidence(kb_uuid, name)
+    facts = await repo.get_entity_facts(kb_uuid, name)
+    settings = await _resolve_rag_settings(uid, request)
+    markdown, citations = await generate_article(settings, name, facts, evidence)
+    model = getattr(getattr(settings, "llm", None), "model", None)
+    row = await repo.upsert_article(kb_uuid, name, markdown, citations, evidence_signature(evidence), model)
+    return {"article": _article_dict(row, stale=False)}
