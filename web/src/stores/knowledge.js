@@ -53,7 +53,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     return documents.value
   }
 
-  async function uploadDoc(kbId, file, pdfParser = 'marker') {
+  async function uploadDoc(kbId, file, pdfParser = 'mineru') {
     const doc = await uploadDocument(kbId, file, pdfParser)
     documents.value.unshift(doc)
     return doc

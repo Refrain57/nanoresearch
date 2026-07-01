@@ -459,8 +459,8 @@
           </a-form-item>
           <a-form-item label="PDF 解析器" v-if="isPdf(pendingFile)">
             <a-select v-model:value="uploadPdfParser" style="width: 100%">
-              <a-select-option value="marker">Marker（高质量 OCR，推荐）</a-select-option>
-              <a-select-option value="mineru">MinerU（学术文档 OCR）</a-select-option>
+              <a-select-option value="mineru">MinerU（学术文档 OCR，推荐）</a-select-option>
+              <a-select-option value="marker">Marker（高质量 OCR）</a-select-option>
               <a-select-option value="markitdown">MarkItDown（快速，无 OCR）</a-select-option>
             </a-select>
           </a-form-item>

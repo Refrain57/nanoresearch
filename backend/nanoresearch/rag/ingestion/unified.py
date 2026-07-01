@@ -137,10 +137,15 @@ async def ingest_document(
     _PRE_CREATED = {"uploaded", "parsing"}
 
     if existing is None:
+        try:
+            _file_size = os.path.getsize(file_path)
+        except OSError:
+            _file_size = None
         doc = await repo.create_document(
             kb_uuid,
             original_filename,
             file_path,
+            file_size=_file_size,
             content_hash=content_hash,
             pdf_parser=pdf_parser,
         )

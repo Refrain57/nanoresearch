@@ -271,7 +271,7 @@ const modelPickerValue = ref('')
 const currentConv = computed(() => chatStore.conversations.find(c => c.id === chatStore.currentConvId))
 const overrideModel = computed(() => currentConv.value?.agent_override?.model || null)
 
-const effectiveModel = computed(() => overrideModel.value || currentAgent.value?.model || '')
+const effectiveModel = computed(() => overrideModel.value || currentAgent.value?.model || settingsStore.baseModel || '')
 function getModelProvider(model) {
   for (const p of settingsStore.providers) {
     if (p.models?.includes(model)) return p.name

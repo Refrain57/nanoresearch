@@ -104,6 +104,7 @@ async def create_conversation(
         "id": str(conv.id),
         "title": conv.title,
         "session_key": conv.session_key,
+        "agent_id": str(conv.agent_id) if conv.agent_id else None,
         "agent_override": (conv.conv_metadata or {}).get("agent_override") or {},
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
         "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
