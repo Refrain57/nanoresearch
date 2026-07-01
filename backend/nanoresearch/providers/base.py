@@ -103,7 +103,12 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Sanitize message content: fix empty blocks, strip internal _meta fields."""
+        """Sanitize message content: fix empty blocks, strip internal _meta / _citations fields."""
+        # Strip top-level internal fields (_citations) that must never reach the LLM.
+        messages = [
+            {k: v for k, v in m.items() if k != "_citations"} if isinstance(m, dict) else m
+            for m in messages
+        ]
         result: list[dict[str, Any]] = []
         for msg in messages:
             content = msg.get("content")
