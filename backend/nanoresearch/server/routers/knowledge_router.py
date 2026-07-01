@@ -740,7 +740,6 @@ async def get_graph_entity(
     kb_uuid = uuid.UUID(kb_id)
     summary = await repo.get_entity_summary(kb_uuid, name)
     if summary is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="entity not found")
     facts = await repo.get_entity_facts(kb_uuid, name)
     self_name = summary["name"]
