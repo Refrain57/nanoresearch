@@ -2298,7 +2298,7 @@ onMounted(() => {
   overflow-y: auto;
   margin: 0;
 }
-.code-block.result { background: #232A1E; color: rgba(94,115,85,.35); }
+.code-block.result { background: #232A1E; color: #D4E0C8; }
 .error-hint { color: var(--nr-danger); font-size: 12px; margin-top: 4px; }
 .tool-meta { font-size: 11px; color: var(--nr-ink-3); margin-top: 6px; }
 

@@ -101,8 +101,18 @@ class AgentDispatcher:
                                 RedisKeys.DISPATCH_NOTIFY, RedisKeys.DISPATCH_GROUP, entry_id)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("dispatcher loop error; retrying")
+            except Exception as e:
+                if "NOGROUP" in str(e):
+                    # Consumer group was deleted/flushed out from under us (e.g. the
+                    # notify stream got XTRIM'd or FLUSHDB'd). Recreate it and retry
+                    # instead of spinning on NOGROUP forever.
+                    logger.warning("dispatcher consumer group missing (NOGROUP); recreating")
+                    try:
+                        await mailbox.ensure_group(self._redis)
+                    except Exception:
+                        logger.exception("dispatcher ensure_group failed")
+                else:
+                    logger.exception("dispatcher loop error; retrying")
                 await asyncio.sleep(1)
 
     async def _handle_notify(self, fields: dict) -> str:

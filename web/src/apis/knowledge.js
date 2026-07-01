@@ -11,7 +11,7 @@ export const deleteKnowledge  = (id)         => apiDelete(`/api/knowledge/${id}`
 export const listDocuments    = (kbId)       => apiGet(`/api/knowledge/${kbId}/documents`)
 export const deleteDocument   = (kbId, docId) => apiDelete(`/api/knowledge/${kbId}/documents/${docId}`)
 
-export const uploadDocument = (kbId, file, pdfParser = 'marker') => {
+export const uploadDocument = (kbId, file, pdfParser = 'mineru') => {
   const form = new FormData()
   form.append('file', file)
   form.append('pdf_parser', pdfParser)

@@ -866,10 +866,15 @@ Returns:
                 logger.info("[ingest] Copied to permanent path: %s", perm_path)
 
             # ── Create PG record ──
+            try:
+                file_size = perm_path.stat().st_size
+            except OSError:
+                file_size = None
             doc = await repo.create_document(
                 kb_uuid,
                 filename=path.name,
                 file_path=str(perm_path),
+                file_size=file_size,
                 content_hash=content_hash,
                 pdf_parser=pdf_parser,
             )
