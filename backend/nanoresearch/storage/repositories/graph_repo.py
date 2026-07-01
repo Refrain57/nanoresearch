@@ -385,6 +385,7 @@ class GraphRepository:
                 .join(KbDocument, KbDocument.id == KbChunk.document_id)
                 .where(KgEntity.kb_id == kb_id, KgEntity.name == norm)
                 .distinct()
+                .order_by(KbChunk.id)
                 .limit(limit)
             )
             out = []
