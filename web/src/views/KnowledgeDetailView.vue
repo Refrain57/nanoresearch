@@ -429,6 +429,15 @@
                   <h3 style="margin-top:16px">邻居实体</h3>
                   <a-tag v-for="n in entityDetail.neighbors" :key="n"
                     class="wiki-neighbor" @click="selectEntity(n)">{{ n }}</a-tag>
+
+                  <a-collapse ghost style="margin-top:8px">
+                    <a-collapse-panel key="graph" header="知识图谱">
+                      <EntityNeighborGraph
+                        :center="entityDetail.name"
+                        :neighbors="entityDetail.neighbors"
+                        @select="selectEntity" />
+                    </a-collapse-panel>
+                  </a-collapse>
                 </template>
                 <a-empty v-else description="选择左侧实体查看详情" />
               </a-spin>
@@ -726,6 +735,7 @@ import {
   CaretRightOutlined, DeleteOutlined, ReloadOutlined, EditOutlined, CloseOutlined, ThunderboltOutlined
 } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
+import EntityNeighborGraph from '@/components/EntityNeighborGraph.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useSettingsStore } from '@/stores/settings'
 import { apiPost } from '@/apis/base'
