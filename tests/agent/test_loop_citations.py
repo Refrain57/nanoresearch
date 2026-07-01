@@ -1,0 +1,297 @@
+"""Task 3: loop.py captures RAG citations, forwards via on_citations,
+and embeds the accumulated deduped list in the assistant message as _citations.
+
+Uses a scripted provider (two kb_search tool-call turns then a plain-text turn)
+and a scripted tool layer whose kb_search results repeat chunk_id ``c1`` so the
+merge/dedup + contiguous re-index behaviour is exercised.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from nanoresearch.agent.loop import AgentLoop
+from nanoresearch.bus.queue import MessageBus
+from nanoresearch.providers.base import GenerationSettings, LLMResponse, ToolCallRequest
+
+
+def _citation(index: int, chunk_id: str, source: str, score: float,
+              snippet: str, page: int | None, doc_id: str) -> dict:
+    return {
+        "index": index,
+        "chunk_id": chunk_id,
+        "source": source,
+        "score": score,
+        "snippet": snippet,
+        "page": page,
+        "doc_id": doc_id,
+    }
+
+
+@pytest.fixture
+def loop_with_scripted_rag(tmp_path):
+    """Build an AgentLoop whose LLM calls kb_search twice then answers, and
+    whose kb_search tool returns JSON with overlapping citations (c1 twice, c2)."""
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings(max_tokens=0)
+    # Keep prompt token estimate tiny so no consolidation fires mid-turn.
+    provider.estimate_prompt_tokens.return_value = (50, "test-counter")
+
+    calls = {"n": 0}
+
+    async def chat_with_retry(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="t1", name="mcp_rag_kb_search",
+                                            arguments={"query": "alpha"})],
+            )
+        if calls["n"] == 2:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="t2", name="mcp_rag_kb_search",
+                                            arguments={"query": "beta"})],
+            )
+        return LLMResponse(content="Final answer [1][2].", tool_calls=[])
+
+    provider.chat_with_retry = chat_with_retry
+    provider.chat_stream_with_retry = AsyncMock()
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+    )
+    loop.tools.get_definitions = MagicMock(return_value=[])
+
+    # First kb_search returns c1; second returns c1 (dup) + c2.
+    res1 = json.dumps({
+        "success": True,
+        "chunks": [],
+        "citations": [_citation(1, "c1", "doc_a.pdf", 0.91, "snip-1", 3, "da")],
+    })
+    res2 = json.dumps({
+        "success": True,
+        "chunks": [],
+        "citations": [
+            _citation(1, "c1", "doc_a.pdf", 0.91, "snip-1", 3, "da"),
+            _citation(2, "c2", "doc_b.pdf", 0.77, "snip-2", 5, "db"),
+        ],
+    })
+    loop.tools.execute = AsyncMock(side_effect=[res1, res2])
+    return loop
+
+
+@pytest.fixture
+def session_key() -> str:
+    """Unique session key per test so residual Redis session state from a prior
+    run cannot collide. Fixed keys tripped repeated-question detection
+    (loop.py:839) + startup consolidation on leftover messages, diverting the
+    agent flow and making the test non-deterministic."""
+    return f"cli:{uuid.uuid4().hex}"
+
+
+@pytest.mark.asyncio
+async def test_after_iteration_forwards_deduped_citations(loop_with_scripted_rag, session_key):
+    """Two kb_search hits on the same chunk_id -> on_citations receives a merged,
+    deduped list with contiguous 1..N indices."""
+    loop = loop_with_scripted_rag
+    batches: list[list[dict]] = []
+
+    async def on_citations(items):
+        batches.append(items)
+
+    await loop.process_direct("q", session_key=session_key, on_citations=on_citations)
+
+    assert batches, "on_citations should have been called at least once"
+    final = batches[-1]
+    cids = [c["chunk_id"] for c in final]
+    assert cids == ["c1", "c2"]                        # deduped + merged
+    assert len(cids) == len(set(cids))                 # no duplicates
+    assert [c["index"] for c in final] == list(range(1, len(final) + 1))  # contiguous
+
+
+@pytest.mark.asyncio
+async def test_save_turn_embeds_citations_in_content(loop_with_scripted_rag, session_key):
+    """The accumulated citations are persisted on the assistant message dict."""
+    loop = loop_with_scripted_rag
+
+    async def _noop(items):
+        return None
+
+    await loop.process_direct("q", session_key=session_key, on_citations=_noop)
+
+    session = await loop.sessions.get_or_create(session_key)
+    assistants = [m for m in session.messages if m.get("role") == "assistant"]
+    assert assistants, "expected at least one assistant message persisted"
+    final = assistants[-1]
+    assert final.get("_citations"), "final assistant message should carry _citations"
+    assert [c["chunk_id"] for c in final["_citations"]] == ["c1", "c2"]
+    assert final["_citations"][0]["index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_citations_captured_without_on_citations_callback(loop_with_scripted_rag, session_key):
+    """Citation capture/embedding is independent of the on_citations callback."""
+    loop = loop_with_scripted_rag
+
+    await loop.process_direct("q", session_key=session_key)  # no on_citations
+
+    session = await loop.sessions.get_or_create(session_key)
+    final = [m for m in session.messages if m.get("role") == "assistant"][-1]
+    assert [c["chunk_id"] for c in final.get("_citations", [])] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_citation_source_map_remaps_temp_path_to_filename(tmp_path, session_key):
+    """_citation_source_map injected on the loop rewrites source from temp path to filename.
+
+    RED->GREEN test: given loop._citation_source_map = {"/tmp/tmpX.pdf": "3DGS.pdf"}
+    and a kb_search result whose citation source is "/tmp/tmpX.pdf", the on_citations
+    payload and the persisted _turn_citations must have source == "3DGS.pdf".
+    """
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings(max_tokens=0)
+    provider.estimate_prompt_tokens.return_value = (50, "test-counter")
+
+    calls = {"n": 0}
+
+    async def chat_with_retry(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="t1", name="mcp_rag_kb_search",
+                                            arguments={"query": "3dgs"})],
+            )
+        return LLMResponse(content="Here is the answer [1].", tool_calls=[])
+
+    provider.chat_with_retry = chat_with_retry
+    provider.chat_stream_with_retry = AsyncMock()
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+    )
+    loop.tools.get_definitions = MagicMock(return_value=[])
+
+    temp_source = "/tmp/tmpX.pdf"
+    res1 = json.dumps({
+        "success": True,
+        "chunks": [],
+        "citations": [_citation(1, "c1", temp_source, 0.95, "snip", 1, "d1")],
+    })
+    loop.tools.execute = AsyncMock(side_effect=[res1])
+
+    # Inject the source map — simulates what worker.py will do.
+    loop._citation_source_map = {temp_source: "3DGS.pdf"}
+
+    batches: list[list[dict]] = []
+
+    async def on_citations(items):
+        batches.append(items)
+
+    await loop.process_direct("q", session_key=session_key, on_citations=on_citations)
+
+    # on_citations must deliver remapped source
+    assert batches, "on_citations should have been called"
+    final_batch = batches[-1]
+    assert len(final_batch) == 1
+    assert final_batch[0]["source"] == "3DGS.pdf", (
+        f"Expected '3DGS.pdf', got '{final_batch[0]['source']}'"
+    )
+    # chunk_id must be unchanged
+    assert final_batch[0]["chunk_id"] == "c1"
+
+    # Persisted _citations must also be remapped
+    session = await loop.sessions.get_or_create(session_key)
+    assistants = [m for m in session.messages if m.get("role") == "assistant"]
+    assert assistants, "expected assistant message"
+    persisted_cites = assistants[-1].get("_citations", [])
+    assert persisted_cites, "expected _citations on assistant message"
+    assert persisted_cites[0]["source"] == "3DGS.pdf"
+
+
+@pytest.mark.asyncio
+async def test_citation_source_map_unmapped_source_unchanged(tmp_path, session_key):
+    """If a citation source has no entry in _citation_source_map, it is left unchanged."""
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings(max_tokens=0)
+    provider.estimate_prompt_tokens.return_value = (50, "test-counter")
+
+    calls = {"n": 0}
+
+    async def chat_with_retry(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="t1", name="mcp_rag_kb_search",
+                                            arguments={"query": "q"})],
+            )
+        return LLMResponse(content="Answer [1].", tool_calls=[])
+
+    provider.chat_with_retry = chat_with_retry
+    provider.chat_stream_with_retry = AsyncMock()
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        model="test-model",
+    )
+    loop.tools.get_definitions = MagicMock(return_value=[])
+
+    res1 = json.dumps({
+        "success": True,
+        "chunks": [],
+        "citations": [_citation(1, "c1", "already_named.pdf", 0.8, "snip", 2, "d1")],
+    })
+    loop.tools.execute = AsyncMock(side_effect=[res1])
+
+    # Map has no entry for "already_named.pdf" — source must be unchanged.
+    loop._citation_source_map = {"/tmp/some_other.pdf": "other.pdf"}
+
+    batches: list[list[dict]] = []
+
+    async def on_citations(items):
+        batches.append(items)
+
+    await loop.process_direct("q", session_key=session_key, on_citations=on_citations)
+
+    assert batches
+    assert batches[-1][0]["source"] == "already_named.pdf"
+
+
+@pytest.mark.asyncio
+async def test_turn_citations_reset_between_turns(loop_with_scripted_rag, session_key):
+    """A turn with no RAG tool must not inherit the previous turn's citations."""
+    loop = loop_with_scripted_rag
+
+    # Turn 1: produces citations (consumes both scripted kb_search results).
+    await loop.process_direct("q1", session_key=session_key)
+
+    # Turn 2: LLM answers directly with no tool calls -> no citations.
+    async def chat_plain(**kwargs):
+        return LLMResponse(content="direct answer", tool_calls=[])
+
+    loop.provider.chat_with_retry = chat_plain
+
+    await loop.process_direct("q2", session_key=session_key)
+
+    session = await loop.sessions.get_or_create(session_key)
+    assistants = [m for m in session.messages if m.get("role") == "assistant"]
+    last = assistants[-1]
+    assert last.get("content") == "direct answer"
+    assert "_citations" not in last, "second turn must not inherit prior citations"

@@ -35,11 +35,13 @@ export const useChatStore = defineStore('chat', () => {
           ? stored
           : (stored?.text ?? stored?.content ?? '')
         const tool_calls = m.tool_calls ?? stored?.tool_calls
+        const citations = typeof stored === 'string' ? null : (stored?._citations ?? null)
         return {
           ...m,
           content: { text },
           tool_calls,
           toolCalls: _normalizeToolCalls(tool_calls),
+          citations: citations?.length ? citations : undefined,
         }
       })
 
@@ -48,12 +50,17 @@ export const useChatStore = defineStore('chat', () => {
       // the streaming path combines them into one — this makes loaded history match.
       const merged = []
       let pendingTc = null
+      let pendingCitations = null
       for (const m of mapped) {
         if (m.role === 'assistant' && !m.content.text && m.toolCalls?.length) {
           pendingTc = m.toolCalls // hold, skip this message
+          pendingCitations = m.citations ?? null
         } else if (m.role === 'assistant' && m.content.text) {
-          merged.push(pendingTc ? { ...m, toolCalls: pendingTc } : m)
+          merged.push(pendingTc
+            ? { ...m, toolCalls: pendingTc, citations: m.citations ?? pendingCitations ?? undefined }
+            : m)
           pendingTc = null
+          pendingCitations = null
         } else {
           merged.push(m)
           // non-assistant messages (tool results etc.) don't reset pendingTc
@@ -93,13 +100,14 @@ export const useChatStore = defineStore('chat', () => {
     streamingText.value += chunk
   }
 
-  function finalizeStream(toolCalls = []) {
+  function finalizeStream(toolCalls = [], citations = null) {
     if (streamingText.value) {
       messages.value.push({
         id: `stream-${Date.now()}`,
         role: 'assistant',
         content: { text: streamingText.value },
         toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+        citations: citations?.length ? [...citations] : undefined,
         seq: messages.value.length
       })
     }

@@ -60,7 +60,7 @@ async function handleLogin() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f0f2f5;
+  background: var(--nr-canvas);
 }
 .login-card {
   background: #fff;
@@ -73,10 +73,10 @@ async function handleLogin() {
   font-size: 28px;
   font-weight: 700;
   margin: 0 0 4px;
-  color: #1a1a2e;
+  color: var(--nr-ink);
 }
 .login-subtitle {
-  color: #888;
+  color: var(--nr-ink-2);
   margin: 0 0 32px;
 }
 </style>

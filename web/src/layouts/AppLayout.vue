@@ -1,9 +1,9 @@
 <template>
   <a-layout style="min-height: 100vh">
-    <a-layout-sider v-model:collapsed="collapsed" collapsible width="220" theme="dark">
+    <a-layout-sider v-model:collapsed="collapsed" collapsible width="220" theme="light">
       <div class="logo">{{ collapsed ? 'NR' : 'Nano Research' }}</div>
 
-      <a-menu theme="dark" mode="inline" :selected-keys="[activeKey]" @click="navigate">
+      <a-menu theme="light" mode="inline" :selected-keys="[activeKey]" @click="navigate">
         <a-menu-item key="/chat">
           <comment-outlined />
           <span>对话</span>
@@ -188,7 +188,7 @@
                 <a-button type="primary" size="small" :loading="file.saving" @click="saveBootstrapFile(file)">
                   保存
                 </a-button>
-                <span v-if="file.saved" style="font-size: 12px; color: #52c41a">已保存</span>
+                <span v-if="file.saved" style="font-size: 12px; color: var(--nr-sage)">已保存</span>
               </div>
             </a-tab-pane>
           </a-tabs>
@@ -554,10 +554,12 @@ function logout() { userStore.logout(); router.push('/login') }
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  font-size: 16px;
-  font-weight: 700;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
+  color: var(--nr-ink);
+  font-family: var(--nr-serif);
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -.01em;
+  border-bottom: 1px solid var(--nr-border);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -566,17 +568,17 @@ function logout() { userStore.logout(); router.push('/login') }
   bottom: 48px;
   width: 100%;
   padding: 8px;
-  border-top: 1px solid rgba(255,255,255,0.1);
+  border-top: 1px solid var(--nr-border);
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 .footer-btn {
-  color: rgba(255,255,255,0.65);
+  color: var(--nr-ink-2);
   width: 100%;
   text-align: left;
 }
-.footer-btn:hover { color: #fff; }
+.footer-btn:hover { color: var(--nr-ink); }
 
 .section-header {
   display: flex;
@@ -584,8 +586,8 @@ function logout() { userStore.logout(); router.push('/login') }
   justify-content: space-between;
   margin-bottom: 6px;
 }
-.section-title { font-size: 13px; font-weight: 600; color: #333; }
-.empty-providers { font-size: 12px; color: #bbb; padding: 8px 0 12px; }
+.section-title { font-size: 13px; font-weight: 600; color: var(--nr-ink); }
+.empty-providers { font-size: 12px; color: var(--nr-ink-3); padding: 8px 0 12px; }
 
 .provider-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
 .provider-card {
@@ -593,18 +595,18 @@ function logout() { userStore.logout(); router.push('/login') }
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--nr-border);
   border-radius: 8px;
-  background: #fafafa;
+  background: var(--nr-rail);
 }
 .provider-card-body { flex: 1; min-width: 0; }
-.provider-name { font-size: 13px; font-weight: 600; color: #222; }
+.provider-name { font-size: 13px; font-weight: 600; color: var(--nr-ink); }
 .provider-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
-.provider-base { font-size: 11px; color: #888; }
-.provider-models { font-size: 11px; color: #aaa; margin-top: 3px; line-height: 1.6; }
+.provider-base { font-size: 11px; color: var(--nr-ink-2); }
+.provider-models { font-size: 11px; color: var(--nr-ink-3); margin-top: 3px; line-height: 1.6; }
 .provider-card-actions { display: flex; gap: 2px; flex-shrink: 0; }
 
-.field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+.field-hint { font-size: 11px; color: var(--nr-ink-3); margin-top: 4px; }
 
 .role-assignment-list {
   display: flex;
@@ -616,7 +618,7 @@ function logout() { userStore.logout(); router.push('/login') }
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
-  background: #fafafa;
+  background: var(--nr-rail);
   border-radius: 6px;
 }
 .role-label {
@@ -632,7 +634,7 @@ function logout() { userStore.logout(); router.push('/login') }
 }
 .role-hint {
   font-size: 11px;
-  color: #888;
+  color: var(--nr-ink-2);
 }
 .role-controls {
   display: flex;

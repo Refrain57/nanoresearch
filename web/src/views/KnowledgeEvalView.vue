@@ -155,7 +155,7 @@
                           <span v-for="k in metricKeys" :key="k" style="width: 80px; text-align: center">{{ k }}</span>
                         </div>
                         <div v-for="item in filteredRunItems" :key="item.id" class="items-row">
-                          <span style="width: 60px; font-size: 11px; color: #888">{{ item.question_type === 'multi_context' ? '多跳' : item.question_type === 'single_hop' ? '单跳' : '-' }}</span>
+                          <span style="width: 60px; font-size: 11px; color: var(--nr-ink-2)">{{ item.question_type === 'multi_context' ? '多跳' : item.question_type === 'single_hop' ? '单跳' : '-' }}</span>
                           <span style="flex: 2" class="item-text">{{ item.query }}</span>
                           <span style="flex: 2" class="item-text">{{ item.gold_answer || '-' }}</span>
                           <span v-if="expandedRunType === 'ragas' || expandedRunType === 'agent'" style="flex: 2" class="item-text">{{ item.generated_answer || '-' }}</span>
@@ -293,7 +293,7 @@
             </thead>
             <tbody>
               <tr v-for="pair in alignedItems" :key="pair.query">
-                <td style="font-size: 11px; color: #888">{{ pair.question_type === 'multi_context' ? '多跳' : pair.question_type === 'single_hop' ? '单跳' : '-' }}</td>
+                <td style="font-size: 11px; color: var(--nr-ink-2)">{{ pair.question_type === 'multi_context' ? '多跳' : pair.question_type === 'single_hop' ? '单跳' : '-' }}</td>
                 <td class="ct-query">{{ pair.query }}</td>
                 <td v-for="k in compareMetricKeys" :key="'r1v-'+k" :class="metricColor(pair.item1?.metrics?.[k])">
                   {{ pair.item1?.metrics?.[k] !== undefined ? (pair.item1.metrics[k] * 100).toFixed(0) + '%' : '-' }}
@@ -610,82 +610,82 @@ function fmtDate(iso) {
 .panel-header h3 { font-size: 15px; font-weight: 700; margin: 0; }
 
 /* Datasets */
-.datasets-panel { background: #fff; border: 1px solid #f0f0f0; border-radius: 10px; padding: 16px; }
+.datasets-panel { background: #fff; border: 1px solid var(--nr-border); border-radius: 10px; padding: 16px; }
 
 .dataset-list { display: flex; flex-direction: column; gap: 8px; }
 .dataset-item {
-  border: 1px solid #f0f0f0; border-radius: 8px; padding: 10px 12px;
+  border: 1px solid var(--nr-border); border-radius: 8px; padding: 10px 12px;
   cursor: pointer; transition: all 0.15s;
 }
-.dataset-item:hover { border-color: #91caff; background: #f0f8ff; }
-.dataset-item.active { border-color: #1677ff; background: #e6f4ff; }
+.dataset-item:hover { border-color: var(--nr-clay-soft); background: var(--nr-clay-tint); }
+.dataset-item.active { border-color: var(--nr-clay); background: var(--nr-clay-soft); }
 .ds-name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
-.ds-meta { font-size: 11px; color: #999; margin-bottom: 8px; }
+.ds-meta { font-size: 11px; color: var(--nr-ink-3); margin-bottom: 8px; }
 .ds-actions { display: flex; align-items: center; gap: 6px; }
 
-.jsonl-hint { font-size: 11px; color: #bbb; margin-top: 12px; line-height: 1.6; }
-.jsonl-hint code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+.jsonl-hint { font-size: 11px; color: var(--nr-ink-3); margin-top: 12px; line-height: 1.6; }
+.jsonl-hint code { background: var(--nr-rail); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
 
 /* Runs */
-.runs-panel { background: #fff; border: 1px solid #f0f0f0; border-radius: 10px; padding: 16px; }
+.runs-panel { background: #fff; border: 1px solid var(--nr-border); border-radius: 10px; padding: 16px; }
 
 .runs-list { display: flex; flex-direction: column; gap: 10px; }
 
-.run-card { border: 1px solid #f0f0f0; border-radius: 8px; overflow: hidden; }
-.run-card.expanded { border-color: #91caff; }
+.run-card { border: 1px solid var(--nr-border); border-radius: 8px; overflow: hidden; }
+.run-card.expanded { border-color: var(--nr-clay-soft); }
 
 .run-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 14px; cursor: pointer; transition: background 0.15s;
 }
-.run-header:hover { background: #fafafa; }
+.run-header:hover { background: var(--nr-rail); }
 .run-left { display: flex; align-items: center; gap: 8px; }
 .run-name { font-size: 13px; font-weight: 600; }
 .run-right { display: flex; align-items: center; gap: 10px; }
-.run-score { font-size: 13px; font-weight: 700; color: #1677ff; }
+.run-score { font-size: 13px; font-weight: 700; color: var(--nr-clay); }
 
 .run-metrics { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; }
-.metric-chip { font-size: 11px; background: #f0f8ff; border: 1px solid #91caff; border-radius: 4px; padding: 2px 8px; color: #1677ff; }
+.metric-chip { font-size: 11px; background: var(--nr-clay-tint); border: 1px solid var(--nr-clay-soft); border-radius: 4px; padding: 2px 8px; color: var(--nr-clay); }
 
-.run-items { padding: 0 14px 12px; border-top: 1px solid #f0f0f0; }
+.run-items { padding: 0 14px 12px; border-top: 1px solid var(--nr-border); }
 
 .items-table { font-size: 12px; }
-.items-header { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-weight: 600; color: #888; }
-.items-row { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid #fafafa; align-items: flex-start; }
+.items-header { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--nr-border); font-weight: 600; color: var(--nr-ink-2); }
+.items-row { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--nr-rail); align-items: flex-start; }
 .item-text { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
-.metric-high { color: #52c41a; font-weight: 600; }
-.metric-mid  { color: #faad14; }
-.metric-low  { color: #ff4d4f; }
-.field-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+.metric-high { color: var(--nr-sage); font-weight: 600; }
+.metric-mid  { color: var(--nr-gold); }
+.metric-low  { color: var(--nr-danger); }
+.field-hint { font-size: 11px; color: var(--nr-ink-3); margin-top: 4px; }
 
 .private-metrics { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; }
-.private-chip { font-size: 11px; background: #f9f0ff; border: 1px solid #d3adf7; border-radius: 4px; padding: 2px 8px; color: #722ed1; }
+.private-chip { font-size: 11px; background: rgba(124,106,142,.10); border: 1px solid rgba(124,106,142,.40); border-radius: 4px; padding: 2px 8px; color: #7C6A8E; }
 
 .cross-table-wrap { margin-top: 16px; }
-.cross-table-title { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 6px; }
+.cross-table-title { font-size: 12px; font-weight: 600; color: var(--nr-ink-2); margin-bottom: 6px; }
 .cross-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.cross-table th, .cross-table td { border: 1px solid #f0f0f0; padding: 5px 8px; text-align: center; }
-.cross-table th { background: #fafafa; font-weight: 600; color: #666; }
+.cross-table th, .cross-table td { border: 1px solid var(--nr-border); padding: 5px 8px; text-align: center; }
+.cross-table th { background: var(--nr-rail); font-weight: 600; color: var(--nr-ink-2); }
 
 .compare-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .compare-run-info { flex: 1; text-align: center; }
 .crn { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
-.crs { font-size: 24px; font-weight: 700; color: #1677ff; margin-bottom: 6px; }
-.compare-vs { font-size: 18px; font-weight: 700; color: #bbb; padding: 0 16px; }
+.crs { font-size: 24px; font-weight: 700; color: var(--nr-clay); margin-bottom: 6px; }
+.compare-vs { font-size: 18px; font-weight: 700; color: var(--nr-ink-3); padding: 0 16px; }
 
-.compare-agg { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; background: #fafafa; border-radius: 8px; padding: 12px; }
+.compare-agg { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; background: var(--nr-rail); border-radius: 8px; padding: 12px; }
 .agg-row { display: flex; align-items: center; gap: 12px; font-size: 13px; }
-.agg-key { width: 140px; color: #888; font-size: 12px; flex-shrink: 0; }
+.agg-key { width: 140px; color: var(--nr-ink-2); font-size: 12px; flex-shrink: 0; }
 .agg-row span { flex: 1; text-align: center; }
 
-.compare-better { color: #52c41a; font-weight: 700; }
-.compare-worse  { color: #ff4d4f; font-weight: 700; }
-.compare-same   { color: #888; }
+.compare-better { color: var(--nr-sage); font-weight: 700; }
+.compare-worse  { color: var(--nr-danger); font-weight: 700; }
+.compare-same   { color: var(--nr-ink-2); }
 
 .compare-items { max-height: 400px; overflow-y: auto; margin-top: 8px; }
 .ct-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.ct-table th, .ct-table td { border: 1px solid #f0f0f0; padding: 5px 8px; }
-.ct-table th { background: #fafafa; font-weight: 600; color: #666; position: sticky; top: 0; }
+.ct-table th, .ct-table td { border: 1px solid var(--nr-border); padding: 5px 8px; }
+.ct-table th { background: var(--nr-rail); font-weight: 600; color: var(--nr-ink-2); position: sticky; top: 0; }
 .ct-query { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

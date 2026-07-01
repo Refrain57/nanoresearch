@@ -2,7 +2,7 @@
   <app-layout>
     <div class="agents-page">
       <div class="page-header">
-        <h2>Agent 画廊</h2>
+        <h2 class="nr-serif">Agent 画廊</h2>
         <a-button type="primary" @click="openCreate">
           <plus-outlined /> 新建 Agent
         </a-button>
@@ -194,23 +194,23 @@ async function handleCreate() {
 .delete-btn { position: absolute; top: 8px; right: 8px; z-index: 1; opacity: 0; transition: opacity 0.15s; }
 .agent-card-wrap:hover .delete-btn { opacity: 1; }
 
-.section-header { display: flex; align-items: center; gap: 10px; margin: 32px 0 16px; border-top: 1px solid #f0f0f0; padding-top: 32px; }
+.section-header { display: flex; align-items: center; gap: 10px; margin: 32px 0 16px; border-top: 1px solid var(--nr-border); padding-top: 32px; }
 .section-header h3 { font-size: 16px; font-weight: 700; margin: 0; }
-.skill-count { font-size: 13px; color: #999; }
+.skill-count { font-size: 13px; color: var(--nr-ink-3); }
 .skills-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-.skill-card { background: #fafafa; border: 1px solid #f0f0f0; border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
-.skill-name { font-size: 13px; font-weight: 600; color: #1677ff; }
-.skill-desc { font-size: 12px; color: #666; line-height: 1.5; flex: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.skill-card { background: var(--nr-rail); border: 1px solid var(--nr-border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.skill-name { font-size: 13px; font-weight: 600; color: var(--nr-clay); }
+.skill-desc { font-size: 12px; color: var(--nr-ink-2); line-height: 1.5; flex: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 .skill-check-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
 .skill-check-item {
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-  border: 1px solid #f0f0f0; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--nr-border); border-radius: 6px; cursor: pointer;
   transition: all 0.15s;
 }
-.skill-check-item:hover { border-color: #91caff; background: #f0f8ff; }
-.skill-check-item.selected { border-color: #1677ff; background: #e6f4ff; }
-.skill-check-name { font-size: 13px; font-weight: 600; color: #333; white-space: nowrap; }
-.skill-check-desc { font-size: 12px; color: #888; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.skill-check-icon { color: #1677ff; flex-shrink: 0; }
+.skill-check-item:hover { border-color: var(--nr-clay-soft); background: var(--nr-clay-tint); }
+.skill-check-item.selected { border-color: var(--nr-clay); background: var(--nr-clay-soft); }
+.skill-check-name { font-size: 13px; font-weight: 600; color: var(--nr-ink); white-space: nowrap; }
+.skill-check-desc { font-size: 12px; color: var(--nr-ink-2); flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.skill-check-icon { color: var(--nr-clay); flex-shrink: 0; }
 </style>

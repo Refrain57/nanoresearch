@@ -6,7 +6,7 @@
           <!-- 头部 -->
           <div class="detail-header">
             <div>
-              <h2>{{ agent.name }} <a-tag v-if="agent.is_default" color="blue">默认</a-tag></h2>
+              <h2 class="nr-serif">{{ agent.name }} <a-tag v-if="agent.is_default" color="blue">默认</a-tag></h2>
               <p class="desc">{{ agent.description || '暂无描述' }}</p>
               <div class="meta">v{{ agent.version }} · {{ agent.provider || '未知 provider' }} · {{ agent.model || '未设置模型' }}</div>
             </div>
@@ -449,52 +449,52 @@ async function loadPromptPreview() {
 .agent-detail-page { padding: 32px; max-width: 900px; }
 .detail-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
 .detail-header h2 { font-size: 24px; font-weight: 700; margin: 0 0 4px; }
-.desc { color: #666; margin: 4px 0; }
-.meta { color: #999; font-size: 13px; }
+.desc { color: var(--nr-ink-2); margin: 4px 0; }
+.meta { color: var(--nr-ink-3); font-size: 13px; }
 .header-actions { display: flex; gap: 8px; }
 .info-row { display: flex; gap: 16px; margin-bottom: 16px; }
-.info-card { flex: 1; background: #fafafa; border-radius: 8px; }
+.info-card { flex: 1; background: var(--nr-rail); border-radius: 8px; }
 .capabilities { display: flex; flex-wrap: wrap; gap: 8px; }
 .stats-row { display: flex; gap: 32px; }
 .stat { text-align: center; }
-.num { font-size: 24px; font-weight: 700; color: #1677ff; }
-.label { font-size: 12px; color: #999; }
-.section-card { background: #fafafa; border-radius: 8px; margin-bottom: 16px; }
-.skill-row, .tool-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+.num { font-size: 24px; font-weight: 700; color: var(--nr-clay); }
+.label { font-size: 12px; color: var(--nr-ink-3); }
+.section-card { background: var(--nr-rail); border-radius: 8px; margin-bottom: 16px; }
+.skill-row, .tool-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--nr-border); }
 .skill-row:last-child, .tool-row:last-child { border-bottom: none; }
 .skill-name { font-weight: 500; }
-.skill-desc { color: #888; font-size: 13px; }
+.skill-desc { color: var(--nr-ink-2); font-size: 13px; }
 .skill-tags { margin-top: 4px; }
 .card-title-row { display: flex; align-items: center; justify-content: space-between; }
 .stats-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.stats-table th { text-align: left; padding: 6px 10px; color: #888; font-weight: 600; border-bottom: 1px solid #f0f0f0; }
-.stats-table td { padding: 8px 10px; border-bottom: 1px solid #f9f9f9; }
+.stats-table th { text-align: left; padding: 6px 10px; color: var(--nr-ink-2); font-weight: 600; border-bottom: 1px solid var(--nr-border); }
+.stats-table td { padding: 8px 10px; border-bottom: 1px solid var(--nr-rail); }
 .stats-table tr:last-child td { border-bottom: none; }
-.tool-name-cell { font-family: monospace; color: #1677ff; font-weight: 500; }
-.success-cell { color: #52c41a; }
-.error-cell { color: #f5222d; }
+.tool-name-cell { font-family: monospace; color: var(--nr-clay); font-weight: 500; }
+.success-cell { color: var(--nr-sage); }
+.error-cell { color: var(--nr-danger); }
 .rate-bar-wrap { display: flex; align-items: center; gap: 8px; }
-.rate-bar { height: 6px; border-radius: 3px; background: #52c41a; min-width: 2px; max-width: 80px; }
-.rate-text { font-size: 12px; color: #555; }
-.run-dur { font-size: 12px; color: #aaa; margin-left: 8px; }
+.rate-bar { height: 6px; border-radius: 3px; background: var(--nr-sage); min-width: 2px; max-width: 80px; }
+.rate-text { font-size: 12px; color: var(--nr-ink-2); }
+.run-dur { font-size: 12px; color: var(--nr-ink-3); margin-left: 8px; }
 .add-skill-list { display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto; margin-top: 8px; }
-.add-skill-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 6px; cursor: pointer; border: 1px solid #f0f0f0; }
-.add-skill-row:hover { background: #e6f4ff; border-color: #91caff; }
-.add-skill-name { font-size: 13px; font-weight: 600; color: #1677ff; }
-.add-skill-desc { font-size: 12px; color: #888; margin-top: 2px; }
+.add-skill-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--nr-border); }
+.add-skill-row:hover { background: var(--nr-clay-soft); border-color: var(--nr-clay-soft); }
+.add-skill-name { font-size: 13px; font-weight: 600; color: var(--nr-clay); }
+.add-skill-desc { font-size: 12px; color: var(--nr-ink-2); margin-top: 2px; }
 
 .harness-section { margin-bottom: 20px; }
 .harness-section:last-child { margin-bottom: 0; }
-.harness-label { font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px; }
-.harness-hint { font-size: 12px; color: #aaa; font-weight: 400; }
+.harness-label { font-size: 13px; font-weight: 600; color: var(--nr-ink); margin-bottom: 8px; }
+.harness-hint { font-size: 12px; color: var(--nr-ink-3); font-weight: 400; }
 .harness-textarea { font-family: monospace; font-size: 13px; }
 .harness-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .harness-field { display: flex; flex-direction: column; gap: 6px; }
-.harness-field-label { font-size: 12px; color: #555; }
+.harness-field-label { font-size: 12px; color: var(--nr-ink-2); }
 .prompt-preview-text {
   font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word;
-  background: #f8f8f8; border-radius: 6px; padding: 12px; max-height: 60vh; overflow-y: auto;
-  border: 1px solid #f0f0f0; margin: 0;
+  background: var(--nr-rail); border-radius: 6px; padding: 12px; max-height: 60vh; overflow-y: auto;
+  border: 1px solid var(--nr-border); margin: 0;
 }
-.kb-hint { font-size: 12px; color: #aaa; font-weight: 400; }
+.kb-hint { font-size: 12px; color: var(--nr-ink-3); font-weight: 400; }
 </style>

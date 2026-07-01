@@ -158,6 +158,46 @@ def safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def build_citations_from_chunks(chunks: list, start_index: int = 1) -> list:
+    """Build deduped, indexed citation items from retrieval chunks.
+
+    Args:
+        chunks: List of chunk dicts with keys chunk_id, score, text, metadata.
+        start_index: Starting index for citation numbering (default 1).
+
+    Returns:
+        List of citation dicts with keys:
+        index, chunk_id, source, score, snippet, page, doc_id.
+    """
+    out: list = []
+    seen: set = set()
+    idx = start_index
+    for c in chunks or []:
+        cid = c.get("chunk_id") or ""
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        md = c.get("metadata") or {}
+        text = (c.get("text") or "").strip()
+        snippet = text[:200] + "..." if len(text) > 200 else text
+        page = md.get("page", md.get("page_num"))
+        try:
+            page = int(page) if page is not None else None
+        except (ValueError, TypeError):
+            page = None
+        out.append({
+            "index": idx,
+            "chunk_id": cid,
+            "source": md.get("source_path", md.get("source", "unknown")),
+            "score": round(float(c.get("score", 0.0)), 4),
+            "snippet": snippet,
+            "page": page,
+            "doc_id": md.get("doc_id", ""),
+        })
+        idx += 1
+    return out
+
+
 def estimate_tokens(text: str) -> int:
     """Estimate token count for text (rough approximation).
 
