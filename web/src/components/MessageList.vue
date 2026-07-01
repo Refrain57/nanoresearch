@@ -74,13 +74,19 @@ function linkifyCitations(html, validIndices) {
   if (!validIndices || validIndices.size === 0) return html
   // Split so odd-index segments are the <pre>…</pre> / <code>…</code> blocks (left untouched).
   const parts = html.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi)
+  // Renumber by first appearance: the model emits [^n] where n = retrieval-rank
+  // citation index (not reading order), so display 1,2,3… in order of first
+  // appearance while keeping the real index in data-cite for the popover lookup.
+  const labelByIndex = new Map()
+  let nextLabel = 1
   return parts.map((seg, i) => {
     if (i % 2 === 1) return seg
     return seg.replace(/\[\^(\d+)\]/g, (m, d) => {
       const n = Number(d)
-      return validIndices.has(n)
-        ? `<sup class="cite-ref" data-cite="${n}">[${n}]</sup>`
-        : m
+      if (!validIndices.has(n)) return m
+      let label = labelByIndex.get(n)
+      if (label === undefined) { label = nextLabel++; labelByIndex.set(n, label) }
+      return `<sup class="cite-ref" data-cite="${n}">[${label}]</sup>`
     })
   }).join('')
 }
