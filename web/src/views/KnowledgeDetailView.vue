@@ -1110,8 +1110,13 @@ async function selectEntity(name) {
 async function toggleTripleEvidence(tripleId) {
   if (expandedTriple.value === tripleId) { expandedTriple.value = null; return }
   expandedTriple.value = tripleId
-  const r = await getTripleChunks(kbId, tripleId)
-  tripleChunks.value = r.chunks || []
+  tripleChunks.value = []
+  try {
+    const r = await getTripleChunks(kbId, tripleId)
+    tripleChunks.value = r.chunks || []
+  } catch (e) {
+    message.error('加载证据失败')
+  }
 }
 
 // Load eval data when switching to eval tab
