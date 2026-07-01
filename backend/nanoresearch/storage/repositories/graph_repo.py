@@ -292,6 +292,7 @@ class GraphRepository:
                     func.count(distinct(KbChunk.document_id)).label("doc_count"),
                 )
                 .join(KbChunk, KbChunk.id == KgTripleMention.chunk_id)
+                .where(KgTripleMention.kb_id == kb_id)
                 .group_by(KgTripleMention.triple_id)
                 .subquery()
             )
@@ -314,14 +315,14 @@ class GraphRepository:
                 for r in result.all()
             ]
 
-    async def get_chunks_by_triple(self, triple_id: uuid.UUID) -> list[KbChunk]:
+    async def get_chunks_by_triple(self, kb_id: uuid.UUID, triple_id: uuid.UUID) -> list[KbChunk]:
         """Evidence chunks for a fact (triple), via triple mentions."""
         from nanoresearch.storage.models import KbChunk
         async with self._factory() as db:
             result = await db.execute(
                 select(KbChunk)
                 .join(KgTripleMention, KgTripleMention.chunk_id == KbChunk.id)
-                .where(KgTripleMention.triple_id == triple_id)
+                .where(KgTripleMention.triple_id == triple_id, KgTripleMention.kb_id == kb_id)
                 .distinct()
             )
             return list(result.scalars().all())

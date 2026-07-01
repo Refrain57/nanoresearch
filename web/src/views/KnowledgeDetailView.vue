@@ -387,20 +387,26 @@
 
         <!-- Tab 5: Knowledge Graph / Wiki -->
         <a-tab-pane key="graph" tab="知识图谱/Wiki">
-          <div v-if="!wikiEntities.length && !wikiLoading" class="wiki-empty">
-            <a-empty description="暂无知识图谱数据，请先在「文档」页重建知识图谱" />
-          </div>
-          <div v-else class="wiki-wrap">
+          <div class="wiki-wrap">
             <div class="wiki-list">
               <a-input-search v-model:value="wikiSearch" placeholder="搜索实体…"
                 allow-clear @search="loadWikiEntities" style="margin-bottom:8px" />
               <a-spin :spinning="wikiLoading">
-                <div v-for="e in wikiEntities" :key="e.name"
-                  class="wiki-ent" :class="{ active: entityDetail?.name === e.name }"
-                  @click="selectEntity(e.name)">
-                  <span class="wiki-ent-name">{{ e.name }}</span>
-                  <span class="wiki-ent-count">{{ e.mentions }}</span>
-                </div>
+                <template v-if="wikiLoading" />
+                <template v-else-if="!wikiEntities.length && wikiSearch">
+                  <a-empty description="无匹配实体" />
+                </template>
+                <template v-else-if="!wikiEntities.length">
+                  <a-empty description="暂无知识图谱数据，请先在「文档」页重建知识图谱" />
+                </template>
+                <template v-else>
+                  <div v-for="e in wikiEntities" :key="e.name"
+                    class="wiki-ent" :class="{ active: entityDetail?.name === e.name }"
+                    @click="selectEntity(e.name)">
+                    <span class="wiki-ent-name">{{ e.name }}</span>
+                    <span class="wiki-ent-count">{{ e.mentions }}</span>
+                  </div>
+                </template>
               </a-spin>
             </div>
             <div class="wiki-detail">
@@ -444,6 +450,7 @@
             </div>
           </div>
         </a-tab-pane>
+
       </a-tabs>
 
       <!-- Query result detail modal -->
@@ -1105,6 +1112,8 @@ async function loadWikiEntities() {
   try {
     const r = await listGraphEntities(kbId, { search: wikiSearch.value, limit: 100 })
     wikiEntities.value = r.entities || []
+  } catch (e) {
+    message.error('加载实体失败')
   } finally { wikiLoading.value = false }
 }
 
@@ -1114,6 +1123,8 @@ async function selectEntity(name) {
   tripleChunks.value = []
   try {
     entityDetail.value = await getGraphEntity(kbId, name)
+  } catch (e) {
+    message.error('加载实体详情失败')
   } finally { detailLoading.value = false }
 }
 

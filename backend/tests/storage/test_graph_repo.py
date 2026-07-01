@@ -124,7 +124,7 @@ def test_get_chunks_by_triple():
         f = make_factory()
         s = await _seed(f)
         repo = GraphRepository(f)
-        chunks = await repo.get_chunks_by_triple(s["tid"])
+        chunks = await repo.get_chunks_by_triple(s["kb_id"], s["tid"])
         assert len(chunks) == 3
         assert {c.content for c in chunks} == {"3dgs vs nerf", "3dgs faster", "nerf detail"}
     run(_())

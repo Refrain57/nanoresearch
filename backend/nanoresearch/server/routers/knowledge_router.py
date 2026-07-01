@@ -761,7 +761,7 @@ async def get_triple_chunks(
     uid: str = Depends(get_current_user),
 ):
     await _get_kb_or_404(kb_id, uid, request)
-    chunks = await _graph_repo(request).get_chunks_by_triple(uuid.UUID(triple_id))
+    chunks = await _graph_repo(request).get_chunks_by_triple(uuid.UUID(kb_id), uuid.UUID(triple_id))
     # Resolve document_id -> original filename (chunk carries only the ingest path context).
     from nanoresearch.storage.models import KbDocument
     from sqlalchemy import select as _select
