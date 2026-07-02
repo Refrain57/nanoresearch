@@ -104,6 +104,9 @@ async def check_schema_migrations() -> None:
         ("optimization_proposals", "baseline_version_id"),
         # Memory layering P1 (add_memory_facts.sql)
         ("memory_facts", "id"),
+        # Cron production redesign (migrate_cron_jobs.py)
+        ("cron_jobs", "id"),
+        ("cron_jobs", "next_run_at"),
     ]
     missing = []
     async with _engine.connect() as conn:
