@@ -407,41 +407,9 @@ async def test_query(
 ):
     kb = await _get_kb_or_404(kb_id, uid, request)
     settings = _rag_settings(request)
-    chroma_col = kb.chroma_collection or kb_id
 
     try:
-        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
-        from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
-        from nanoresearch.rag.core.query_engine.sparse_retriever import SparseRetriever
-        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
-        from nanoresearch.rag.core.query_engine.fusion import RRFFusion
-        from nanoresearch.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
-        from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
-        from nanoresearch.rag.ingestion.storage.bm25_indexer import BM25Indexer
-        from nanoresearch.rag.core.settings import resolve_path
-
-        embedding = EmbeddingFactory.create(settings)
-        vector_store = VectorStoreFactory.create(settings, collection_name=chroma_col)
-        bm25 = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{chroma_col}")))
-
-        dense = DenseRetriever(settings=settings, embedding_client=embedding, vector_store=vector_store)
-        sparse = SparseRetriever(settings=settings, bm25_indexer=bm25, vector_store=vector_store, default_collection=chroma_col)
-        fusion = RRFFusion()
-        hybrid = HybridSearch(
-            settings=settings,
-            query_processor=QueryProcessor(),
-            dense_retriever=dense,
-            sparse_retriever=sparse,
-            fusion=fusion,
-            config=HybridSearchConfig(
-                fusion_top_k=body.top_k,
-                enable_dense=body.enable_dense,
-                enable_sparse=body.enable_sparse,
-                enable_graph_expansion=kb.enable_graph_expansion,
-            ),
-            session_factory=request.app.state.session_factory,
-            kb_id=kb.id,
-        )
+        hybrid = _build_hybrid_search(request, kb, settings, body.top_k)
 
         result = await hybrid.async_search(body.query, top_k=body.top_k, return_details=True)
 
@@ -468,6 +436,55 @@ async def test_query(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"检索失败: {e}")
+
+
+# ---------------------------------------------------------------------------
+# RAG retrieval helpers
+# ---------------------------------------------------------------------------
+
+def _build_hybrid_search(request: Request, kb, settings, top_k: int):
+    from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
+    from nanoresearch.rag.core.query_engine.sparse_retriever import SparseRetriever
+    from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
+    from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+    from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
+    from nanoresearch.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
+    from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
+    from nanoresearch.rag.ingestion.storage.bm25_indexer import BM25Indexer
+    from nanoresearch.rag.core.settings import resolve_path
+    chroma_col = kb.chroma_collection or str(kb.id)
+    embedding = EmbeddingFactory.create(settings)
+    vector_store = VectorStoreFactory.create(settings, collection_name=chroma_col)
+    bm25 = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{chroma_col}")))
+    dense = DenseRetriever(settings=settings, embedding_client=embedding, vector_store=vector_store)
+    sparse = SparseRetriever(settings=settings, bm25_indexer=bm25, vector_store=vector_store, default_collection=chroma_col)
+    return HybridSearch(
+        settings=settings, query_processor=QueryProcessor(),
+        dense_retriever=dense, sparse_retriever=sparse, fusion=RRFFusion(),
+        config=HybridSearchConfig(fusion_top_k=top_k, enable_dense=True, enable_sparse=True,
+                                  enable_graph_expansion=kb.enable_graph_expansion),
+        session_factory=request.app.state.session_factory, kb_id=kb.id,
+    )
+
+
+async def _retrieve_concept_evidence(request: Request, kb, settings, topic: str, top_k: int = 8) -> list[dict]:
+    from nanoresearch.storage.models import KbDocument
+    from sqlalchemy import select as _select
+    hybrid = _build_hybrid_search(request, kb, settings, top_k)
+    result = await hybrid.async_search(topic, top_k=top_k, return_details=True)
+    chroma_ids = [r.chunk_id for r in result.results]
+    pg_chunks = await _kb_repo(request).get_chunks_by_chroma_ids(chroma_ids)
+    doc_ids = list({c.document_id for c in pg_chunks})
+    name_map = {}
+    if doc_ids:
+        async with request.app.state.session_factory() as db:
+            res = await db.execute(_select(KbDocument.id, KbDocument.filename).where(KbDocument.id.in_(doc_ids)))
+            name_map = {row[0]: row[1] for row in res.all()}
+    return [
+        {"chunk_id": str(c.id), "content": c.content or "",
+         "source": name_map.get(c.document_id, ""), "page": (c.chunk_metadata or {}).get("page")}
+        for c in pg_chunks
+    ]
 
 
 # ---------------------------------------------------------------------------
