@@ -622,7 +622,7 @@ async def run_agent_job(
                 redis, _lock_key, _lock_token, 30_000, _refresh_stop, _abort_evt, _proc_task,
                 cont_lock_key=_cont_lock_key if _is_continuation else None,
                 cont_lock_token=_cont_lock_token if _is_continuation else None))
-        await _proc_task   # refresher cancels this on lease loss → CancelledError
+        outbound = await _proc_task   # refresher cancels this on lease loss → CancelledError
 
         # Phase 1: if this run spawned subagents (pending non-empty), do NOT finish the turn.
         # Leave status=running and emit NO run_end — the run_events stream stays open so the
@@ -653,6 +653,19 @@ async def run_agent_job(
         )
         await xadd_event(redis, run_stream_key,
                          {"type": "run_end", "status": "completed", "duration_ms": duration_ms})
+
+        # Cron delivery (web): a cron run executes in its dedicated conversation, so push its
+        # result back into the origin conversation + that conversation's live SSE stream. No-op
+        # for ordinary runs (cron is None) and for non-web / non-deliver jobs.
+        if cron is not None:
+            try:
+                from nanoresearch.cron.delivery import deliver_cron_result_web
+                await deliver_cron_result_web(
+                    redis, loop.sessions, uid=uid, cron=cron,
+                    response_text=(outbound.content if outbound is not None else None),
+                )
+            except Exception:
+                logger.warning("cron delivery failed (non-fatal)")
     except Exception as e:
         logger.error("run_agent_job failed: %s", e, exc_info=True)
         await run_repo.update(

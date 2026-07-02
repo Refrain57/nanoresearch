@@ -427,6 +427,52 @@ async def run_events(
     )
 
 
+@router.get("/api/conversations/{conv_id}/live")
+async def conversation_live(
+    conv_id: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    """SSE: long-lived per-conversation live stream (`conv_live:{conv_id}`).
+
+    Carries server→client pushes NOT tied to a run the frontend started — e.g. a cron result
+    delivered into this conversation. The web UI keeps one of these open per open conversation,
+    so such messages appear immediately without polling. Only NEW events (after connect) are
+    delivered; conversation history is loaded separately from the DB, so there is no replay.
+    """
+    from nanoresearch.bus.redis_keys import RedisKeys
+    from nanoresearch.bus.stream import xread_next
+
+    conv = await _get_conv_or_404(conv_id, uid, request)
+    redis = request.app.state.redis
+    stream_key = RedisKeys.conv_live(str(conv.id))
+
+    async def _stream():
+        import time as _time
+
+        # Start from "now": Redis stream IDs are `<ms>-<seq>`, so a current-time cursor makes
+        # XREAD deliver only events added after connect. This never replays history (which the
+        # DB already holds) and avoids the evolving-'$' cursor pitfall (see stream.py). After the
+        # first real event, xread_next advances the cursor to a concrete id.
+        cursor = f"{int(_time.time() * 1000)}-0"
+
+        while True:
+            if await request.is_disconnected():
+                return
+            events, cursor = await xread_next(redis, stream_key, cursor, timeout_ms=15_000)
+            if not events:
+                yield ": heartbeat\n\n"   # keep the connection alive through proxies
+                continue
+            for ev in events:
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
