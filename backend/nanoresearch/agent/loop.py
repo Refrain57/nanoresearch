@@ -658,8 +658,10 @@ class AgentLoop:
             "Startup consolidation for {}: {} msgs (tail protected, range {}:{})",
             session.key, len(chunk), start, end_idx,
         )
+        _conv_id = session.key.split(":", 1)[1] if ":" in session.key else session.key
         success = await self.memory_consolidator.consolidate_messages(
-            chunk, agent_id=agent_id, uid=self._uid
+            chunk, agent_id=agent_id, uid=self._uid, conversation_id=_conv_id,
+            turn_start=start, turn_end=end_idx,
         )
         if success:
             session.last_consolidated = end_idx

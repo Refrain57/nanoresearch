@@ -1,4 +1,4 @@
-"""C3: consolidation summaries must clear the 0.7 user_memory gate (not be dropped)."""
+"""P3: the session summary is written to mem_conv_summaries (conv-scoped), not user_memory."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,13 +9,20 @@ from nanoresearch.agent.memory import MemoryStore
 
 
 class _CapturingKnowledge:
-    """Captures memories passed to write_user_memory_sync."""
+    """Captures summary + event writes."""
     def __init__(self):
-        self.written: list[dict] = []
+        self.summaries: list[dict] = []
+        self.events: list = []
 
-    def write_user_memory_sync(self, memories, uid=None):  # noqa: ARG002
-        self.written.extend(memories)
-        return (len(memories), 0)
+    def write_conv_summary_sync(self, text, uid=None, conversation_id=None,
+                                turn_start=0, turn_end=0, topic=""):
+        self.summaries.append({"text": text, "uid": uid, "conversation_id": conversation_id,
+                               "turn_start": turn_start, "turn_end": turn_end})
+        return "cs_1"
+
+    def write_events_sync(self, events, uid=None):
+        self.events.append((uid, events))
+        return [f"ev_{i}" for i in range(len(events))]
 
 
 class _FakeToolCall:
@@ -39,23 +46,19 @@ class _FakeProvider:
         return _FakeResponse()
 
 
-def _real_gate_passes(confidence: float) -> bool:
-    """Mirror knowledge_search.py:153 — items below 0.7 are dropped."""
-    return confidence >= 0.7
-
-
 @pytest.mark.asyncio
-async def test_consolidation_summary_clears_07_gate(tmp_path: Path):
+async def test_consolidation_summary_written_to_conv_summaries(tmp_path: Path):
     knowledge = _CapturingKnowledge()
     store = MemoryStore(workspace=tmp_path, knowledge_search=knowledge)
 
     ok = await store.consolidate(
         messages=[{"role": "user", "content": "tell me about CityGaussianV2"}],
         provider=_FakeProvider(), model="fake-model", uid="u1",
+        conversation_id="c1", turn_start=0, turn_end=4,
     )
 
     assert ok is True
-    assert knowledge.written, "summary must be written, not silently dropped"
-    summary = next(m for m in knowledge.written if m["type"] == "consolidation_summary")
-    assert summary["confidence"] >= 0.7
-    assert _real_gate_passes(summary["confidence"]), "must survive the real 0.7 filter"
+    assert knowledge.summaries, "summary must be written to conv_summaries, not dropped"
+    s = knowledge.summaries[0]
+    assert s["conversation_id"] == "c1" and s["turn_end"] == 4
+    assert "CityGaussianV2" in s["text"]
