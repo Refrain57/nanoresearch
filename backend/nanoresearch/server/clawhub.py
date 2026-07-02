@@ -107,6 +107,7 @@ async def _run_cli(*args: str) -> None:
         _out, err = await asyncio.wait_for(proc.communicate(), timeout=_CLI_TIMEOUT)
     except asyncio.TimeoutError as e:
         proc.kill()
+        await proc.wait()
         raise ClawHubCLIError("clawhub CLI timed out") from e
     if proc.returncode != 0:
         raise ClawHubCLIError(
@@ -116,8 +117,4 @@ async def _run_cli(*args: str) -> None:
 
 
 async def install(slug: str, workdir: Path) -> None:
-    await _run_cli("install", slug, "--workdir", str(workdir))
-
-
-async def uninstall(name: str, workdir: Path) -> None:
-    await _run_cli("uninstall", name, "--yes", "--workdir", str(workdir))
+    await _run_cli("install", "--workdir", str(workdir), "--", slug)

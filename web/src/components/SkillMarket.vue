@@ -48,11 +48,14 @@ const activeSlug = ref('')
 
 async function doSearch() {
   if (!query.value.trim()) return
+  searched.value = false
+  results.value = []
   loading.value = true
   try {
     results.value = await searchMarket(query.value.trim())
     searched.value = true
   } catch (e) {
+    results.value = []
     message.error(e.message || '搜索失败')
   } finally {
     loading.value = false

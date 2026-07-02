@@ -79,6 +79,10 @@ async def test_install_builds_argv(monkeypatch):
     assert "@bob/tool" in calls["argv"]
     assert "--workdir" in calls["argv"]
     assert str(Path("/ws/users/alice")) in calls["argv"]
+    # slug must appear AFTER the "--" terminator (defense-in-depth)
+    argv = list(calls["argv"])
+    sep_idx = argv.index("--")
+    assert argv.index("@bob/tool") > sep_idx
 
 
 @pytest.mark.asyncio
