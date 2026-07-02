@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -85,3 +86,24 @@ async def download_file(
         filename=resolved.name,
         media_type=media_type or "application/octet-stream",
     )
+
+
+@router.delete("/api/workspace/files/{file_path:path}")
+async def delete_file(
+    file_path: str,
+    request: Request,
+    uid: str = Depends(get_current_user),
+):
+    if Path(file_path).name in EDITABLE_FILES:
+        raise HTTPException(status_code=403, detail="系统文件不允许删除")
+    workspace = _user_workspace(request, uid)
+    resolved = _safe_resolve(workspace, file_path)
+    if resolved == workspace.resolve():
+        raise HTTPException(status_code=403, detail="不允许删除工作区根目录")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if resolved.is_dir():
+        shutil.rmtree(resolved)
+    else:
+        resolved.unlink()
+    return {"deleted": file_path}

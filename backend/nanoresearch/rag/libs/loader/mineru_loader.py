@@ -27,6 +27,57 @@ from nanoresearch.rag.libs.loader.base_loader import BaseLoader
 logger = logging.getLogger(__name__)
 
 
+def _block_text(block: Dict[str, Any]) -> str:
+    """Concatenate a MinerU block's text from its lines/spans (recursing into
+    nested ``blocks`` used by table/image blocks)."""
+    parts: list[str] = []
+    for line in block.get("lines", []) or []:
+        for span in line.get("spans", []) or []:
+            content = span.get("content") or span.get("text") or ""
+            if content:
+                parts.append(content)
+    for sub in block.get("blocks", []) or []:
+        nested = _block_text(sub)
+        if nested:
+            parts.append(nested)
+    return " ".join(parts)
+
+
+def mineru_blocks_from_middle(middle: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Extract grounding blocks from a MinerU ``middle.json`` structure.
+
+    Returns reading-order blocks ``[{text, page, bbox}]`` where ``page`` is
+    1-based and ``bbox`` is ``[x0, y0, x1, y1]`` normalized to ``[0, 1]``
+    fractions of page width/height (top-left origin). Blocks without a bbox,
+    without extractable text, or on pages with an unusable ``page_size`` are
+    skipped — they can't be text-aligned to a chunk anyway.
+    """
+    blocks: list[Dict[str, Any]] = []
+    for page in middle.get("pdf_info", []) or []:
+        size = page.get("page_size") or [0, 0]
+        try:
+            page_w, page_h = float(size[0]), float(size[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if page_w <= 0 or page_h <= 0:
+            continue
+        page_no = int(page.get("page_idx", 0)) + 1
+        for block in page.get("para_blocks", []) or []:
+            bbox = block.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            text = _block_text(block)
+            if not text.strip():
+                continue
+            x0, y0, x1, y1 = bbox
+            blocks.append({
+                "text": text,
+                "page": page_no,
+                "bbox": [x0 / page_w, y0 / page_h, x1 / page_w, y1 / page_h],
+            })
+    return blocks
+
+
 class MinerULoader(BaseLoader):
     """PDF Loader using MinerU (magic-pdf) for high-quality OCR extraction.
 
@@ -79,7 +130,7 @@ class MinerULoader(BaseLoader):
     # ------------------------------------------------------------------
 
     def _load_local(self, path: Path, doc_id: str, doc_hash: str) -> Document:
-        markdown_text, image_types = self._run_magic_pdf(path, doc_hash)
+        markdown_text, image_types, blocks = self._run_magic_pdf(path, doc_hash)
 
         if not markdown_text or not markdown_text.strip():
             raise RuntimeError(f"MinerU returned empty content for {path.name}")
@@ -95,15 +146,34 @@ class MinerULoader(BaseLoader):
             metadata["title"] = title
         if image_types:
             metadata["image_types"] = image_types
+        if blocks:
+            metadata["mineru_blocks"] = blocks
 
         return Document(id=doc_id, text=markdown_text, metadata=metadata)
 
-    def _run_magic_pdf(self, path: Path, doc_hash: str) -> tuple[str, dict]:
-        """Run magic-pdf pipeline and return (markdown, image_types).
+    @staticmethod
+    def _blocks_from_pipe_result(pipe_result: Any) -> list:
+        """Extract grounding blocks from a magic-pdf 1.x pipe_result via
+        ``get_middle_json()``. Returns [] on any failure (grounding is optional)."""
+        import json
+
+        try:
+            middle = json.loads(pipe_result.get_middle_json())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"MinerU grounding: get_middle_json failed: {exc}")
+            return []
+        return mineru_blocks_from_middle(middle)
+
+    def _run_magic_pdf(self, path: Path, doc_hash: str) -> tuple[str, dict, list]:
+        """Run magic-pdf pipeline and return (markdown, image_types, blocks).
 
         image_types maps absolute image path → "table" | "figure" for every
         image extracted from the document.  Used by the ingestion pipeline to
         propagate per-chunk type hints into ImageCaptioner.
+
+        blocks is the reading-order list of grounding blocks
+        ([{text, page, bbox}], bbox normalized to [0,1]) from middle.json; empty
+        if unavailable.
 
         Supports magic-pdf 0.6.x (UNIPipe) and 1.x (PymuDocDataset) APIs.
         """
@@ -149,7 +219,8 @@ class MinerULoader(BaseLoader):
             pipe_result = infer_result.pipe_ocr_mode(image_writer) if use_ocr else infer_result.pipe_txt_mode(image_writer)
             markdown = pipe_result.get_markdown(str(img_dir))
             image_types = self._extract_image_types(pipe_result, img_dir)
-            return markdown, image_types
+            blocks = self._blocks_from_pipe_result(pipe_result)
+            return markdown, image_types, blocks
 
         # Fallback: v0.6.x API (UNIPipe)
         import magic_pdf.model as model_config
@@ -164,7 +235,14 @@ class MinerULoader(BaseLoader):
         pipe.pipe_classify()
         pipe.pipe_analyze()
         pipe.pipe_parse()
-        return pipe.get_markdown(str(img_dir)), {}
+        blocks: list = []
+        try:
+            mid = getattr(pipe, "pdf_mid_data", None) or {}
+            if mid:
+                blocks = mineru_blocks_from_middle(mid)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"MinerU grounding (v0.6.x): failed to extract blocks: {exc}")
+        return pipe.get_markdown(str(img_dir)), {}, blocks
 
     def _extract_image_types(self, pipe_result: Any, img_dir: Path) -> dict:
         """Try to extract image type info (table vs figure) from MinerU content_list.
@@ -205,6 +283,7 @@ class MinerULoader(BaseLoader):
 
     def _load_http(self, path: Path, doc_id: str, doc_hash: str) -> Document:
         import base64
+        import json
         import httpx
 
         url = f"{self.mineru_url}/api/v1/extract"
@@ -249,6 +328,16 @@ class MinerULoader(BaseLoader):
                 image_types[str(img_path)] = img_type
                 image_types[img_name] = img_type
 
+        # Grounding blocks (if the server returned middle.json)
+        blocks: list = []
+        raw_middle = data.get("middle_json") or (data.get("result") or {}).get("middle_json")
+        if raw_middle:
+            try:
+                middle = raw_middle if isinstance(raw_middle, dict) else json.loads(raw_middle)
+                blocks = mineru_blocks_from_middle(middle)
+            except Exception as exc:
+                logger.warning(f"MinerU grounding (http): failed to parse middle_json: {exc}")
+
         metadata: Dict[str, Any] = {
             "source_path": str(path),
             "doc_type": "pdf",
@@ -260,6 +349,8 @@ class MinerULoader(BaseLoader):
             metadata["title"] = title
         if image_types:
             metadata["image_types"] = image_types
+        if blocks:
+            metadata["mineru_blocks"] = blocks
 
         return Document(id=doc_id, text=markdown_text, metadata=metadata)
 

@@ -79,6 +79,12 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
             app.state.redis, app.state.session_factory, app.state.arq_pool)
         await app.state.stuck_watchdog.start()
 
+        # CronScheduler — time-triggered dispatcher. Scans cron_jobs and posts due jobs to the
+        # mailbox (→ dispatcher → worker). This is what makes web-created cron jobs actually fire.
+        from nanoresearch.cron.scheduler import CronScheduler
+        app.state.cron_scheduler = CronScheduler(app.state.redis, app.state.session_factory)
+        await app.state.cron_scheduler.start()
+
         if channel_manager:
             # Channels route inbound messages via bus → channel_loop.run() must be active
             tasks.append(asyncio.create_task(channel_loop.run()))
@@ -93,6 +99,8 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if getattr(app.state, "cron_scheduler", None):
+            await app.state.cron_scheduler.stop()
         if getattr(app.state, "stuck_watchdog", None):
             await app.state.stuck_watchdog.stop()
         if getattr(app.state, "dispatcher", None):
@@ -117,6 +125,7 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     app.state.redis_monitor = None # initialised in lifespan before first request
     app.state.dispatcher = None    # initialised in lifespan before first request
     app.state.stuck_watchdog = None  # initialised in lifespan before first request
+    app.state.cron_scheduler = None  # initialised in lifespan before first request
     app.state.rag_settings = rag_settings  # loaded lazily if None
     app.state.allowed_models = allowed_models or []
     app.state.config = config

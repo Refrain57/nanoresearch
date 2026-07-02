@@ -385,6 +385,19 @@ def _make_on_citations(redis, run_stream_key: str):
     return on_citations
 
 
+def _apply_cron_run_context(loop, cron: dict | None) -> None:
+    """Mark a cron-triggered run so its agent can't schedule further cron jobs.
+
+    The self-schedule guard lives on the CronTool as a ContextVar; the loop is fresh per run,
+    so setting it once here holds for the whole run. No-op for ordinary (non-cron) runs.
+    """
+    if cron is None:
+        return
+    ct = loop.tools.get("cron")
+    if ct is not None and hasattr(ct, "set_cron_context"):
+        ct.set_cron_context(True)
+
+
 async def run_agent_job(
     ctx: dict,
     *,
@@ -403,6 +416,9 @@ async def run_agent_job(
     agent_kb_id: str | None = None,
     job_id: str | None = None,
     conversation_id: str | None = None,
+    # Cron production redesign: present iff this run was posted by the CronScheduler. Carries
+    # {deliver, channel, to, task_context}; marks the run as cron-triggered (self-schedule guard).
+    cron: dict | None = None,
     # Phase 0 mailbox lock lifecycle (set by the dispatcher; absent for CLI/legacy).
     _lock_key: str | None = None,
     _lock_token: str | None = None,
@@ -479,6 +495,7 @@ async def run_agent_job(
             uid, ctx,
             model_override=(agent_override or {}).get("model"),
         )
+        _apply_cron_run_context(loop, cron)
 
         tool_calls_log: list[dict] = []
 

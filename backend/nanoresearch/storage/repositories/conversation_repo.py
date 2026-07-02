@@ -73,6 +73,7 @@ class ConversationRepository:
         metadata: dict | None = None,
         created_at: datetime | None = None,
         title: str | None = None,
+        conv_id: uuid.UUID | None = None,
     ) -> Conversation:
         channel, _, chat_id = key.partition(":")
         conv = Conversation(
@@ -86,6 +87,8 @@ class ConversationRepository:
             created_at=created_at or datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
+        if conv_id is not None:
+            conv.id = conv_id
         async with self._factory() as db:
             db.add(conv)
             await db.commit()

@@ -43,6 +43,19 @@ def create_tables() -> None:
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS cron_jobs CASCADE"))
     Base.metadata.drop_all(engine)
+    """Recreate all tables from a clean schema using SQLAlchemy metadata.
+
+    Uses ``DROP SCHEMA public CASCADE`` rather than ``Base.metadata.drop_all``:
+    once the schema is fully populated, ``drop_all`` cannot honour cross-table
+    FK dependency ordering and raises ``DependentObjectsStillExist``, which made
+    re-running the suite fail. A schema cascade drop always yields a clean slate.
+    """
+    from sqlalchemy import create_engine, text
+    sync_url = TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    engine = create_engine(sync_url, echo=False)
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
     Base.metadata.create_all(engine)
     engine.dispose()
 
@@ -53,7 +66,7 @@ def truncate_all() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE TABLE agent_runs, messages, conversations, agents, users "
+                "TRUNCATE TABLE cron_jobs, agent_runs, messages, conversations, agents, users "
                 "RESTART IDENTITY CASCADE"
             )
     finally:

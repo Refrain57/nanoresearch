@@ -39,6 +39,7 @@ from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
 from nanoresearch.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
 
 # Ingestion layer imports
+from nanoresearch.rag.ingestion.grounding import align_chunks_to_blocks
 from nanoresearch.rag.ingestion.chunking.document_chunker import DocumentChunker
 from nanoresearch.rag.ingestion.transform.chunk_refiner import ChunkRefiner
 from nanoresearch.rag.ingestion.transform.metadata_enricher import MetadataEnricher
@@ -460,6 +461,20 @@ class IngestionPipeline:
                             chunk_types[ref] = img_type
                     if chunk_types:
                         chunk.metadata["image_types"] = chunk_types
+
+            # Attach page+bbox grounding by aligning chunks to MinerU blocks.
+            # Runs here (pre-transform) so ChunkRefiner's rewrites can't break
+            # the text match; grounding lives in metadata and survives them.
+            # Grounding is optional — never let it break ingestion.
+            _mineru_blocks = document.metadata.pop("mineru_blocks", [])
+            if _mineru_blocks:
+                try:
+                    align_chunks_to_blocks(chunks, _mineru_blocks)
+                    _grounded = sum(1 for c in chunks if c.metadata.get("grounding"))
+                    logger.info(f"  Grounding: {_grounded}/{len(chunks)} chunks aligned to blocks")
+                except Exception as _ge:
+                    logger.warning(f"Grounding alignment failed: {_ge}")
+
             if trace is not None:
                 trace.record_stage("split", {
                     "method": "recursive",

@@ -658,64 +658,10 @@ def gateway(
         rag_store=rag_store,
         rag_settings=rag_settings,
     )
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        from nanoresearch.agent.tools.cron import CronTool
-        from nanoresearch.agent.tools.message import MessageTool
-        from nanoresearch.utils.evaluator import evaluate_response
-
-        reminder_note = (
-            "[Scheduled Task] Timer finished.\n\n"
-            f"Task '{job.name}' has been triggered.\n"
-            f"Scheduled instruction: {job.payload.message}"
-        )
-
-        cron_tool = agent.tools.get("cron")
-        cron_token = None
-        if isinstance(cron_tool, CronTool):
-            cron_token = cron_tool.set_cron_context(True)
-        try:
-            resp = await agent.process_direct(
-                reminder_note,
-                session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
-            )
-        finally:
-            if isinstance(cron_tool, CronTool) and cron_token is not None:
-                cron_tool.reset_cron_context(cron_token)
-
-        response = resp.content if resp else ""
-
-        message_tool = agent.tools.get("message")
-        if (
-            isinstance(message_tool, MessageTool)
-            and message_tool._sent_contents
-            and job.payload.channel
-            and job.payload.to
-        ):
-            user_key = f"{job.payload.channel}:{job.payload.to}"
-            user_session = agent.sessions.get_or_create(user_key)
-            user_session.add_message("user", f"[Scheduled Task: {job.name}]")
-            user_session.add_message("assistant", "\n\n".join(message_tool._sent_contents))
-            agent.sessions.save(user_session)
-
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-            return response
-
-        if job.payload.deliver and job.payload.to and response:
-            should_notify = await evaluate_response(
-                response, job.payload.message, provider, agent.model,
-            )
-            if should_notify:
-                from nanoresearch.bus.events import OutboundMessage
-                await bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response,
-                ))
-        return response
-    cron.on_job = on_cron_job
+    # Cron production redesign (decision B): the gateway no longer runs an in-process cron
+    # scheduler. Production cron runs under `serve` + worker, where CronScheduler is started in
+    # the FastAPI lifespan. The `cron` CronService above is retained only so legacy store paths
+    # resolve; it is never started here. (Full removal: phase-2 Task 10.)
 
     # Create channel manager
     channels = ChannelManager(config, bus)
@@ -804,7 +750,6 @@ def gateway(
 
     async def run():
         try:
-            await cron.start()
             await heartbeat.start()
             await asyncio.gather(
                 _dashboard_server.serve(),
@@ -821,7 +766,6 @@ def gateway(
             _dashboard_server.should_exit = True
             await agent.close_mcp()
             heartbeat.stop()
-            cron.stop()
             agent.stop()
             await channels.stop_all()
 
