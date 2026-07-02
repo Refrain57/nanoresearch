@@ -100,6 +100,21 @@ def _merge_citations(existing: list[dict], new: list[dict]) -> list[dict]:
     return merged
 
 
+def build_sent_attachment_messages(contents, medias, workspace_root):
+    """Build assistant message dicts for web-bridge persistence, attaching
+    workspace-relative media descriptors when present."""
+    from nanoresearch.server.routers.workspace_paths import build_attachment_descriptors
+    msgs = []
+    for i, c in enumerate(contents):
+        m = {"role": "assistant", "content": c}
+        abs_media = medias[i] if i < len(medias) else []
+        desc = build_attachment_descriptors(abs_media, workspace_root)
+        if desc:
+            m["media"] = desc
+        msgs.append(m)
+    return msgs
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -949,7 +964,8 @@ class AgentLoop:
         if msg.channel == "web":
             _mt = self.tools.get("message")
             if isinstance(_mt, MessageTool) and (_sent := _mt.sent_contents()):
-                _send_msgs = [{"role": "assistant", "content": c} for c in _sent]
+                _send_msgs = build_sent_attachment_messages(
+                    _sent, _mt.sent_media(), self.workspace)
                 if all_msgs and all_msgs[-1].get("role") == "assistant":
                     all_msgs = all_msgs[:-1] + _send_msgs + [all_msgs[-1]]
                 else:
