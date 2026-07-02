@@ -32,18 +32,21 @@ class KnowledgeSearch:
     Search pipeline: BM25 (in-memory) + vector → RRF fusion → optional Rerank → time decay.
 
     Attributes:
-        user_memory_store: ChromaDB collection for user memory.
+        mem_events_store: ChromaDB collection for atomic events.
+        mem_conv_summaries_store: ChromaDB collection for conversation summaries.
         dense_encoder: Embedding encoder for vector search.
     """
 
     def __init__(
         self,
         dense_encoder: BaseEmbedding,
-        user_memory_store: ChromaStore | None = None,
         settings: "Settings | None" = None,
+        mem_events_store: ChromaStore | None = None,
+        mem_conv_summaries_store: ChromaStore | None = None,
     ):
         self.dense_encoder = dense_encoder
-        self.user_memory_store = user_memory_store
+        self.mem_events_store = mem_events_store
+        self.mem_conv_summaries_store = mem_conv_summaries_store
         self._settings = settings
         self._reranker: "BaseReranker | None | bool" = None  # None=uninit, False=unavailable
 
@@ -51,17 +54,21 @@ class KnowledgeSearch:
     def from_settings(cls, settings: "Settings", collection_suffix: str = "") -> "KnowledgeSearch":
         from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
 
-        user_memory_collection = f"user_memory{collection_suffix}"
-        user_memory_store = ChromaStore(
+        mem_events_store = ChromaStore(
             settings=settings,
-            collection_name=user_memory_collection,
+            collection_name=f"mem_events{collection_suffix}",
+        )
+        mem_conv_summaries_store = ChromaStore(
+            settings=settings,
+            collection_name=f"mem_conv_summaries{collection_suffix}",
         )
         dense_encoder = EmbeddingFactory.create(settings)
 
         return cls(
             dense_encoder=dense_encoder,
-            user_memory_store=user_memory_store,
             settings=settings,
+            mem_events_store=mem_events_store,
+            mem_conv_summaries_store=mem_conv_summaries_store,
         )
 
     def _get_reranker(self) -> "BaseReranker | None":
@@ -89,25 +96,33 @@ class KnowledgeSearch:
 
     # ============== User Memory Methods ==============
 
-    def search_user_memory_sync(
+    def _hybrid_search(
         self,
+        store: "ChromaStore | None",
         query: str,
         top_k: int = 5,
         apply_decay: bool = True,
         uid: str | None = None,
+        extra_filters: dict[str, Any] | None = None,
+        exclude_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Search user memory using BM25 + vector → RRF → optional Rerank → time decay."""
-        if not self.user_memory_store:
+        """Shared hybrid recall chain (over-retrieve → uid/metadata filter → BM25 → RRF →
+        optional rerank → time decay). Reused verbatim by every memory collection so ranking
+        behaviour never diverges per store (plan C6)."""
+        if not store:
             return []
 
         # Step 1: Vector search — over-retrieve for downstream filtering
         vector = self._embed(query)
-        candidates = self.user_memory_store.query(
-            vector=vector, top_k=top_k * 4,
-        )
+        candidates = store.query(vector=vector, top_k=top_k * 4)
 
         if uid:
             candidates = [r for r in candidates if r.get("metadata", {}).get("uid") == uid]
+        if extra_filters:
+            for fk, fv in extra_filters.items():
+                candidates = [r for r in candidates if r.get("metadata", {}).get(fk) == fv]
+        if exclude_ids:
+            candidates = [r for r in candidates if r.get("id") not in exclude_ids]
 
         if not candidates:
             return []
@@ -140,101 +155,103 @@ class KnowledgeSearch:
 
         return fused[:top_k]
 
-    def write_user_memory_sync(
-        self,
-        memories: list[dict[str, Any]],
-        similarity_threshold: float = 0.85,
-        uid: str | None = None,
-    ) -> tuple[int, int]:
-        """Write user memories with deduplication (sync version)."""
-        if not memories or not self.user_memory_store:
-            return (0, 0)
+    # ============== Events (P2) — append-only, no TTL/cleanup (plan C5) ==============
 
-        memories = [m for m in memories if m.get("confidence", 0) >= 0.7]
-        if not memories:
-            return (0, 0)
-
-        texts = [m["text"] for m in memories]
+    def write_events_sync(self, events: list[dict[str, Any]], uid: str | None = None) -> list[str]:
+        """Append atomic events to mem_events; returns the new record ids (used to backfill
+        memory_facts.derived_from — plan C4). Append-only: no dedup gate, no TTL/cleanup."""
+        if not events or not self.mem_events_store:
+            return []
+        texts = [
+            f"{e.get('topic', '')} | {e.get('action', '')} | {e.get('result', '')}"
+            for e in events
+        ]
         vectors = self.dense_encoder.embed(texts)
+        to_insert, ids = [], []
+        for e, vec, text in zip(events, vectors, texts):
+            record_id = f"ev_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            to_insert.append({
+                "id": record_id,
+                "vector": vec,
+                "metadata": {
+                    "type": "event",
+                    "uid": uid or "",
+                    "conversation_id": e.get("conversation_id", ""),
+                    "created_at": e.get("time", datetime.now().isoformat()),
+                    "topic": e.get("topic", ""),
+                    "action": e.get("action", ""),
+                    "result": e.get("result", ""),
+                    "text": text,
+                },
+            })
+            ids.append(record_id)
+        self.mem_events_store.insert_batch(to_insert)
+        logger.info(f"KnowledgeSearch: wrote {len(ids)} events")
+        return ids
 
-        existing_results = self.user_memory_store.query_batch(
-            vectors, top_k=1, threshold=similarity_threshold
+    def search_events_sync(self, query: str, top_k: int = 5, apply_decay: bool = True,
+                           uid: str | None = None) -> list[dict[str, Any]]:
+        """Semantic recall over mem_events via the shared hybrid chain. Decay is a ranking
+        weight only — events are never cleaned up (plan C5)."""
+        return self._hybrid_search(
+            self.mem_events_store, query, top_k=top_k, apply_decay=apply_decay, uid=uid,
         )
 
-        written_ids, skipped_ids = [], []
-        to_insert = []
+    # ============== Conversation summaries (P3) — conv-scoped, append-only ==============
 
-        for mem, vec, existing_list in zip(memories, vectors, existing_results):
-            if existing_list:
-                skipped_ids.append(existing_list[0]["id"])
-            else:
-                record_id = f"um_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
-                to_insert.append({
-                    "id": record_id,
-                    "vector": vec,
-                    "metadata": {
-                        "type": mem.get("type", "factual"),
-                        "confidence": mem.get("confidence", 0.7),
-                        "is_evergreen": mem.get("is_evergreen", False),
-                        "created_at": mem.get("created_at", datetime.now().isoformat()),
-                        "text": mem["text"],
-                        "uid": uid or "",
-                    }
-                })
-                written_ids.append(record_id)
+    def write_conv_summary_sync(self, text: str, uid: str | None, conversation_id: str,
+                                turn_start: int, turn_end: int, topic: str = "") -> str:
+        """Append one conversation-segment summary; returns its record id. Append-only, no TTL."""
+        if not text or not self.mem_conv_summaries_store:
+            return ""
+        vec = self.dense_encoder.embed([text])[0]
+        record_id = f"cs_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        self.mem_conv_summaries_store.insert_batch([{
+            "id": record_id,
+            "vector": vec,
+            "metadata": {
+                "type": "conv_summary",
+                "uid": uid or "",
+                "conversation_id": conversation_id or "",
+                "turn_start": turn_start,
+                "turn_end": turn_end,
+                "topic": topic,
+                "created_at": datetime.now().isoformat(),
+                "text": text,
+            },
+        }])
+        return record_id
 
-        if to_insert:
-            self.user_memory_store.insert_batch(to_insert)
-
-        logger.info(
-            f"KnowledgeSearch: wrote {len(written_ids)} user memories, "
-            f"skipped {len(skipped_ids)} duplicates"
-        )
-        return (len(written_ids), len(skipped_ids))
-
-    async def write_user_memory(
-        self,
-        memories: list[dict[str, Any]],
-        similarity_threshold: float = 0.85,
-        uid: str | None = None,
-    ) -> tuple[int, int]:
-        """Write user memories with deduplication (async wrapper)."""
-        return self.write_user_memory_sync(memories, similarity_threshold, uid=uid)
-
-    async def cleanup_old_user_memory(self, max_age_days: int = 90) -> int:
-        """Delete non-evergreen user memories older than max_age_days."""
-        if not self.user_memory_store or max_age_days <= 0:
-            return 0
-
-        cutoff = datetime.now() - timedelta(days=max_age_days)
-        all_memories = self.user_memory_store.query(
-            vector=self._embed(""), top_k=10000,
-            filters={"is_evergreen": False}
+    def search_conv_summaries_sync(self, query: str, uid: str | None = None,
+                                   conversation_id: str | None = None, top_k: int = 5,
+                                   exclude_ids: list[str] | None = None,
+                                   apply_decay: bool = True) -> list[dict[str, Any]]:
+        """Semantic recall over mem_conv_summaries, filtered to one conversation (plan §4.2)."""
+        extra = {"conversation_id": conversation_id} if conversation_id else None
+        return self._hybrid_search(
+            self.mem_conv_summaries_store, query, top_k=top_k, apply_decay=apply_decay,
+            uid=uid, extra_filters=extra, exclude_ids=set(exclude_ids) if exclude_ids else None,
         )
 
-        ids_to_delete = []
-        for mem in all_memories:
-            created_at_str = mem.get("metadata", {}).get("created_at", "")
-            if created_at_str:
-                try:
-                    created_at = datetime.fromisoformat(created_at_str)
-                    if created_at < cutoff:
-                        ids_to_delete.append(mem["id"])
-                except (ValueError, TypeError):
-                    pass
-
-        if ids_to_delete:
-            self.user_memory_store.delete(ids=ids_to_delete)
-            logger.info(f"KnowledgeSearch: cleaned up {len(ids_to_delete)} old user memories")
-
-        return len(ids_to_delete)
+    def list_conv_summaries_sync(self, uid: str | None, conversation_id: str) -> list[dict[str, Any]]:
+        """All summaries for one conversation (cheap listing for the recent window)."""
+        if not self.mem_conv_summaries_store:
+            return []
+        rows = self.mem_conv_summaries_store.query(vector=self._embed(""), top_k=1000)
+        return [
+            r for r in rows
+            if r.get("metadata", {}).get("uid") == uid
+            and r.get("metadata", {}).get("conversation_id") == conversation_id
+        ]
 
     # ============== Statistics ==============
 
     def get_stats(self) -> dict[str, int]:
         return {
-            "user_memory": self.user_memory_store.get_collection_stats()["count"]
-            if self.user_memory_store else 0,
+            "mem_events": self.mem_events_store.get_collection_stats()["count"]
+            if self.mem_events_store else 0,
+            "mem_conv_summaries": self.mem_conv_summaries_store.get_collection_stats()["count"]
+            if self.mem_conv_summaries_store else 0,
         }
 
     # ============== Helper Methods ==============

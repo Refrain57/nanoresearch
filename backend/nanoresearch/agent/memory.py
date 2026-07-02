@@ -35,6 +35,7 @@ TOKEN_CONSOLIDATION_TARGET_RATIO = float(os.environ.get("TOKEN_CONSOLIDATION_TAR
 CONSOLIDATION_SUMMARY_CONFIDENCE = float(os.environ.get("CONSOLIDATION_SUMMARY_CONFIDENCE", "0.7"))
 
 from nanoresearch.utils.helpers import as_aware_utc, ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
+from nanoresearch.agent.memory_facts import compute_profile_diff, parse_memory_md, render_memory_md
 
 if TYPE_CHECKING:
     from nanoresearch.providers.base import LLMProvider
@@ -123,6 +124,11 @@ _CONSOLIDATION_SYSTEM_PROMPT = r"""You are a memory consolidation agent. Analyze
 - 使用固定字段格式
 - 关键词 grep 可搜索
 
+### events（原子行为事件）
+从本段对话提取用户的原子行为事件，每条 {topic, action, result}：用户就什么(topic)做了什么(action)、得到什么结果(result)。
+- 只记用户侧行为与结果，忽略助手自己的回复内容。
+- 事件是可检索的历史锚点，尽量客观、最小、可 grep。本段无值得记的事件则返回空数组。
+
 Call the save_memory tool with your consolidation."""
 
 
@@ -145,6 +151,20 @@ _SAVE_MEMORY_TOOL = [
                         "description": "Full updated long-term memory as markdown with fixed sections: "
                         "FACTS (bullet list), USER_PROFILE (max 3 sentences), FOCUS_AREAS (bullet list, max 5). "
                         "Include all existing content plus new information. Return unchanged if nothing new.",
+                    },
+                    "events": {
+                        "type": "array",
+                        "description": "Atomic USER-behaviour events from THIS chunk — what the user did and the "
+                        "outcome. Ignore the agent's own replies. Empty list if none.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "topic": {"type": "string", "description": "what it was about"},
+                                "action": {"type": "string", "description": "what the user did"},
+                                "result": {"type": "string", "description": "the outcome / finding"},
+                            },
+                            "required": ["topic", "action", "result"],
+                        },
                     },
                 },
                 "required": ["history_entry", "memory_update"],
@@ -186,7 +206,8 @@ class MemoryStore:
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None):
+    def __init__(self, workspace: Path, knowledge_search: Any = None, agent_id: str | None = None,
+                 session_factory: Any = None):
         if agent_id:
             self.memory_dir = ensure_dir(workspace / "agents" / agent_id / "memory")
         else:
@@ -195,6 +216,7 @@ class MemoryStore:
         self._consecutive_failures = 0
         self._cached_hash: str | None = None
         self._knowledge_search = knowledge_search
+        self._session_factory = session_factory
 
     def get_content_hash(self) -> str:
         """Calculate stable SHA-256 hash of memory content.
@@ -231,6 +253,33 @@ class MemoryStore:
     def get_memory_context(self) -> str:
         """Return raw MEMORY.md content for XML wrapping in context builder."""
         return self.read_long_term()
+
+    async def _apply_profile_update(self, update_md: str, uid: str | None,
+                                    derived_from_event_ids: list[str] | None = None) -> None:
+        """Apply the LLM profile output as an incremental diff to the memory_facts store,
+        then render MEMORY.md as a one-way projection. Never wholesale-overwrites the store;
+        never removes source=manual facts. Newly-added facts carry derived_from = the event
+        ids written in the same consolidation batch (traceability, plan C4). On any error or
+        missing store context, falls back to writing update_md straight to MEMORY.md."""
+        if not self._session_factory or not uid:
+            self.write_long_term(update_md)
+            return
+        try:
+            from nanoresearch.storage.repositories.memory_facts_repo import MemoryFactsRepository
+            repo = MemoryFactsRepository(self._session_factory)
+            current = await repo.list_active(uid)
+            new_lines = parse_memory_md(update_md)
+            diff = compute_profile_diff(current, new_lines)
+            for section, text in diff.add:
+                await repo.insert_extracted(uid, section, text,
+                                            derived_from=derived_from_event_ids or [])
+            for fid in diff.remove_ids:
+                await repo.deactivate(fid)
+            active = await repo.list_active(uid)
+            self.write_long_term(render_memory_md(active))
+        except Exception:
+            logger.exception("profile store apply failed; falling back to legacy overwrite")
+            self.write_long_term(update_md)
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
@@ -280,6 +329,9 @@ class MemoryStore:
         provider: LLMProvider,
         model: str,
         uid: str | None = None,
+        conversation_id: str | None = None,
+        turn_start: int = 0,
+        turn_end: int = 0,
     ) -> bool:
         """Consolidate the provided message chunk into MEMORY.md."""
         if not messages:
@@ -350,20 +402,31 @@ Call save_memory with your updated memory following the exact format specified."
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
                 return self._fail_or_raw_archive(messages, uid=uid)
 
-            # Write to user_memory (only if knowledge_search is available)
+            _now_iso = datetime.now().isoformat()
+
+            # Atomic events first (append-only) so their ids can anchor the profile facts (C4).
+            event_ids: list[str] = []
             if self._knowledge_search:
-                from datetime import datetime
-                self._knowledge_search.write_user_memory_sync([{
-                    "text": entry,
-                    "type": "consolidation_summary",
-                    "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
-                    "is_evergreen": False,
-                    "created_at": datetime.now().isoformat(),
-                }], uid=uid)
+                raw_events = args.get("events") or []
+                events = [{
+                    "topic": ev.get("topic", ""),
+                    "action": ev.get("action", ""),
+                    "result": ev.get("result", ""),
+                    "time": _now_iso,
+                    "conversation_id": conversation_id or "",
+                } for ev in raw_events if isinstance(ev, dict)]
+                if events:
+                    event_ids = self._knowledge_search.write_events_sync(events, uid=uid)
+
+            # Session summary → mem_conv_summaries (conv-scoped; sliding-window recall in P3).
+            if self._knowledge_search and conversation_id:
+                self._knowledge_search.write_conv_summary_sync(
+                    entry, uid=uid, conversation_id=conversation_id,
+                    turn_start=turn_start, turn_end=turn_end,
+                )
 
             update = _ensure_text(update)
-            if update != current_memory:
-                self.write_long_term(update)
+            await self._apply_profile_update(update, uid, derived_from_event_ids=event_ids)
 
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
@@ -382,21 +445,21 @@ Call save_memory with your updated memory following the exact format specified."
         return True
 
     def _raw_archive(self, messages: list[dict], uid: str | None = None) -> None:
-        """Fallback: dump raw messages to user_memory without LLM summarization."""
+        """Fallback: dump raw messages to mem_events without LLM summarization."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         # Format messages as searchable text
         formatted = self._format_messages(messages)
         text = f"[{ts}] [RAW] {len(messages)} messages\n{formatted}"
 
-        # Write to user_memory (sync version)
+        # Append as a single raw event (append-only; no confidence gate / TTL).
         if self._knowledge_search:
-            self._knowledge_search.write_user_memory_sync([{
-                "text": text,
-                "type": "raw_archive",
-                "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
-                "is_evergreen": False,
-                "created_at": datetime.now().isoformat(),
+            self._knowledge_search.write_events_sync([{
+                "topic": "raw_archive",
+                "action": f"archived {len(messages)} messages",
+                "result": text,
+                "time": datetime.now().isoformat(),
+                "conversation_id": "",
             }], uid=uid)
 
         logger.warning(
@@ -441,21 +504,25 @@ class MemoryConsolidator:
         self._last_session_tokens: dict[str, int] = {}
 
     def _get_store(self, agent_id: str | None = None) -> MemoryStore:
-        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search, agent_id=agent_id)
+        factory = getattr(self.sessions, "_factory", None)
+        return MemoryStore(self._workspace, knowledge_search=self._knowledge_search,
+                           agent_id=agent_id, session_factory=factory)
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
-    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None, uid: str | None = None) -> bool:
+    async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None,
+                                   uid: str | None = None, conversation_id: str | None = None,
+                                   turn_start: int = 0, turn_end: int = 0) -> bool:
         """Archive a selected message chunk into persistent memory."""
-        success = await self._get_store(agent_id).consolidate(messages, self.provider, self.model, uid=uid)
+        success = await self._get_store(agent_id).consolidate(
+            messages, self.provider, self.model, uid=uid, conversation_id=conversation_id,
+            turn_start=turn_start, turn_end=turn_end,
+        )
 
-        # After successful consolidation, extract knowledge from conversation
+        # Structural lint (report only, no auto-fix)
         if success and self._knowledge_search:
-            await self._extract_conversation_knowledge(messages, uid=uid)
-
-            # Run structural lint (report only, no auto-fix)
             try:
                 from nanoresearch.research.knowledge_lint import KnowledgeLint
                 lint = KnowledgeLint(self._knowledge_search, provider=None, model=None)
@@ -468,25 +535,6 @@ class MemoryConsolidator:
                 logger.warning(f"Structural lint failed: {e}")
 
         return success
-
-    async def _extract_conversation_knowledge(self, messages: list[dict[str, object]], uid: str | None = None) -> None:
-        """Extract knowledge claims from conversation messages.
-
-        This is called after consolidation to extract claims from agent statements.
-        """
-        try:
-            # Lazy init the extractor
-            if self._knowledge_extractor is None:
-                from nanoresearch.agent.conversation_knowledge_extractor import ConversationKnowledgeExtractor
-                self._knowledge_extractor = ConversationKnowledgeExtractor(
-                    provider=self.provider,
-                    model=self.model,
-                    knowledge_search=self._knowledge_search,
-                )
-
-            await self._knowledge_extractor.extract_from_messages(messages, uid=uid)
-        except Exception as e:
-            logger.warning(f"Conversation knowledge extraction failed: {e}")
 
     def pick_consolidation_boundary(
         self,
@@ -541,12 +589,16 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
-    async def archive_messages(self, messages: list[dict[str, object]], agent_id: str | None = None, uid: str | None = None) -> bool:
+    async def archive_messages(self, messages: list[dict[str, object]], agent_id: str | None = None,
+                               uid: str | None = None, conversation_id: str | None = None,
+                               turn_start: int = 0, turn_end: int = 0) -> bool:
         """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
         if not messages:
             return True
         for _ in range(MemoryStore._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
-            if await self.consolidate_messages(messages, agent_id=agent_id, uid=uid):
+            if await self.consolidate_messages(messages, agent_id=agent_id, uid=uid,
+                                               conversation_id=conversation_id,
+                                               turn_start=turn_start, turn_end=turn_end):
                 return True
         return True
 
@@ -616,7 +668,10 @@ class MemoryConsolidator:
                     source,
                     len(chunk),
                 )
-                if not await self.consolidate_messages(chunk, agent_id=agent_id, uid=uid):
+                _conv_id = session.key.split(":", 1)[1] if ":" in session.key else session.key
+                if not await self.consolidate_messages(chunk, agent_id=agent_id, uid=uid,
+                                                       conversation_id=_conv_id,
+                                                       turn_start=old_last_consolidated, turn_end=end_idx):
                     return
 
                 # Lua LTRIM: atomically advance Redis list start to new boundary (fast-path).
