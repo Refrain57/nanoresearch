@@ -54,16 +54,17 @@ class ConversationRepository:
             )
             return result.scalar_one_or_none()
 
-    async def get_messages_paged(self, conv_id: uuid.UUID, limit: int = 50, offset: int = 0) -> list[Message]:
+    async def get_messages_paged(
+        self, conv_id: uuid.UUID, limit: int = 40, before_seq: int | None = None
+    ) -> list[Message]:
         async with self._factory() as db:
-            result = await db.execute(
-                select(Message)
-                .where(Message.conversation_id == conv_id)
-                .order_by(Message.seq)
-                .limit(limit)
-                .offset(offset)
-            )
-            return list(result.scalars().all())
+            stmt = select(Message).where(Message.conversation_id == conv_id)
+            if before_seq is not None:
+                stmt = stmt.where(Message.seq < before_seq)
+            stmt = stmt.order_by(Message.seq.desc()).limit(limit)
+            rows = list((await db.execute(stmt)).scalars().all())
+            rows.reverse()  # 升序返回，前端可直接 append/prepend
+            return rows
 
     async def create(
         self,

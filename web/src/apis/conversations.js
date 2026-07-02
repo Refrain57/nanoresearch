@@ -7,7 +7,9 @@ export const listConversations = (params = {}) => {
 export const createConversation = (data = {}) => apiPost('/api/conversations', data)
 export const getConversation = (id) => apiGet(`/api/conversations/${id}`)
 export const getMessages = (id, params = {}) => {
-  const qs = new URLSearchParams(params).toString()
+  const clean = {}
+  for (const [k, v] of Object.entries(params)) if (v != null) clean[k] = v
+  const qs = new URLSearchParams(clean).toString()
   return apiGet(`/api/conversations/${id}/messages${qs ? '?' + qs : ''}`)
 }
 export const deleteConversation  = (id) => apiDelete(`/api/conversations/${id}`)
