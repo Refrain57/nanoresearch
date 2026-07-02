@@ -330,6 +330,8 @@ class MemoryStore:
         model: str,
         uid: str | None = None,
         conversation_id: str | None = None,
+        turn_start: int = 0,
+        turn_end: int = 0,
     ) -> bool:
         """Consolidate the provided message chunk into MEMORY.md."""
         if not messages:
@@ -416,15 +418,12 @@ Call save_memory with your updated memory following the exact format specified."
                 if events:
                     event_ids = self._knowledge_search.write_events_sync(events, uid=uid)
 
-            # Session summary → user_memory (moves to mem_conv_summaries in P3).
-            if self._knowledge_search:
-                self._knowledge_search.write_user_memory_sync([{
-                    "text": entry,
-                    "type": "consolidation_summary",
-                    "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
-                    "is_evergreen": False,
-                    "created_at": _now_iso,
-                }], uid=uid)
+            # Session summary → mem_conv_summaries (conv-scoped; sliding-window recall in P3).
+            if self._knowledge_search and conversation_id:
+                self._knowledge_search.write_conv_summary_sync(
+                    entry, uid=uid, conversation_id=conversation_id,
+                    turn_start=turn_start, turn_end=turn_end,
+                )
 
             update = _ensure_text(update)
             await self._apply_profile_update(update, uid, derived_from_event_ids=event_ids)
@@ -514,10 +513,12 @@ class MemoryConsolidator:
         return self._locks.setdefault(session_key, asyncio.Lock())
 
     async def consolidate_messages(self, messages: list[dict[str, object]], agent_id: str | None = None,
-                                   uid: str | None = None, conversation_id: str | None = None) -> bool:
+                                   uid: str | None = None, conversation_id: str | None = None,
+                                   turn_start: int = 0, turn_end: int = 0) -> bool:
         """Archive a selected message chunk into persistent memory."""
         success = await self._get_store(agent_id).consolidate(
             messages, self.provider, self.model, uid=uid, conversation_id=conversation_id,
+            turn_start=turn_start, turn_end=turn_end,
         )
 
         # Structural lint (report only, no auto-fix)
@@ -589,13 +590,15 @@ class MemoryConsolidator:
         )
 
     async def archive_messages(self, messages: list[dict[str, object]], agent_id: str | None = None,
-                               uid: str | None = None, conversation_id: str | None = None) -> bool:
+                               uid: str | None = None, conversation_id: str | None = None,
+                               turn_start: int = 0, turn_end: int = 0) -> bool:
         """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
         if not messages:
             return True
         for _ in range(MemoryStore._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
             if await self.consolidate_messages(messages, agent_id=agent_id, uid=uid,
-                                               conversation_id=conversation_id):
+                                               conversation_id=conversation_id,
+                                               turn_start=turn_start, turn_end=turn_end):
                 return True
         return True
 
@@ -667,7 +670,8 @@ class MemoryConsolidator:
                 )
                 _conv_id = session.key.split(":", 1)[1] if ":" in session.key else session.key
                 if not await self.consolidate_messages(chunk, agent_id=agent_id, uid=uid,
-                                                       conversation_id=_conv_id):
+                                                       conversation_id=_conv_id,
+                                                       turn_start=old_last_consolidated, turn_end=end_idx):
                     return
 
                 # Lua LTRIM: atomically advance Redis list start to new boundary (fast-path).

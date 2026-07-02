@@ -40,6 +40,11 @@ class _FakeKS:
         self.summaries.append((uid, memories))
         return (len(memories), 0)
 
+    def write_conv_summary_sync(self, text, uid=None, conversation_id=None,
+                                turn_start=0, turn_end=0, topic=""):
+        self.summaries.append({"text": text, "conversation_id": conversation_id, "turn_end": turn_end})
+        return "cs_1"
+
 
 class _TC:
     def __init__(self, args):

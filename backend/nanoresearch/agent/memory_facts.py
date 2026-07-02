@@ -92,3 +92,25 @@ def compute_profile_diff(current: list[Fact], new_lines: list[tuple[str, str]]) 
         if key not in new_keys and fact.source == "extracted" and fact.id:
             diff.remove_ids.append(fact.id)
     return diff
+
+
+def select_recent_window(summaries, cap_tokens, est_fn, min_segments: int = 1):
+    """Pick the minimal most-recent conversation-summary slice for deterministic re-injection.
+
+    NOT a greedy fill (plan C3): take only the newest ``min_segments`` segment(s) — just enough
+    to catch back-references. ``cap_tokens`` is a hard CEILING that trims the oldest-of-near when
+    even the minimal slice would exceed it (keeping at least one) — never a target to fill toward.
+
+    Returns ``(near, far_remainder)``: ``near`` in turn-ascending order (deterministic re-inject),
+    ``far_remainder`` = the older segments (candidates for semantic recall).
+    """
+    ordered = sorted(summaries, key=lambda s: s.get("turn_end", 0))
+    if not ordered or min_segments <= 0:
+        return [], list(ordered)
+    k = min(min_segments, len(ordered))
+    near = ordered[-k:]
+    # cap is a ceiling, not a fill target: trim oldest-of-near while over budget (keep >= 1)
+    while len(near) > 1 and sum(est_fn(s) for s in near) > cap_tokens:
+        near = near[1:]
+    far = ordered[: len(ordered) - len(near)]
+    return near, far
