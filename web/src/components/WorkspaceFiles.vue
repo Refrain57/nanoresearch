@@ -71,47 +71,21 @@
       </div>
     </a-spin>
 
-    <!-- 文件预览浮窗 -->
-    <a-modal
-      v-model:open="previewOpen"
-      :title="previewName"
-      :footer="null"
-      width="80%"
-      wrap-class-name="wf-preview-modal"
-      @cancel="closePreview"
-    >
-      <a-spin :spinning="previewLoading">
-        <div class="wf-preview-body">
-          <img v-if="previewType === 'image' && previewUrl" :src="previewUrl" class="wf-preview-img" />
-          <VuePdfEmbed v-else-if="previewType === 'pdf' && previewUrl" :source="previewUrl" class="wf-preview-pdf" />
-          <div v-else-if="previewType === 'markdown'" class="wf-preview-md" v-html="renderedMd"></div>
-          <pre v-else-if="previewType === 'text'" class="wf-preview-text">{{ previewText }}</pre>
-        </div>
-      </a-spin>
-      <div class="wf-preview-actions">
-        <a-button size="small" @click="downloadPreview">
-          <download-outlined /> 下载
-        </a-button>
-      </div>
-    </a-modal>
+    <!-- 文件预览浮窗（共享组件） -->
+    <FilePreviewModal v-model:open="previewOpen" :file="previewFile" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Empty, message } from 'ant-design-vue'
 import {
   FolderOutlined, FolderOpenOutlined, FileOutlined,
   DownloadOutlined, ReloadOutlined, RightOutlined, LeftOutlined,
   DeleteOutlined,
 } from '@ant-design/icons-vue'
-import VuePdfEmbed from 'vue-pdf-embed'
-import 'vue-pdf-embed/dist/styles/textLayer.css'
-import 'vue-pdf-embed/dist/styles/annotationLayer.css'
-import { marked } from 'marked'
 import { listWorkspaceFiles, deleteWorkspaceFile, fetchWorkspaceFileBlob } from '@/apis/workspace'
-
-marked.setOptions({ breaks: true, gfm: true })
+import FilePreviewModal from '@/components/FilePreviewModal.vue'
 
 const loading = ref(false)
 const entries = ref([])
@@ -120,30 +94,13 @@ const currentDir = ref('')
 const dirs = computed(() => entries.value.filter(e => e.is_dir))
 const files = computed(() => entries.value.filter(e => !e.is_dir))
 
-// ── 预览状态 ──
+// ── 预览状态（预览逻辑在 FilePreviewModal 内） ──
 const previewOpen = ref(false)
-const previewLoading = ref(false)
-const previewType = ref('')   // 'image' | 'pdf' | 'text'
-const previewName = ref('')
-const previewUrl = ref('')     // 图片/PDF 的 object URL
-const previewText = ref('')
-let previewBlob = null         // 供浮窗内「下载」复用
-let openSeq = 0                // 递增序号，用于丢弃过期的预览请求
-
-// .md 预览：剥掉开头的 YAML frontmatter 再交给 marked 渲染
-const renderedMd = computed(() => {
-  if (previewType.value !== 'markdown') return ''
-  const body = previewText.value
-    .replace(/^﻿/, '')
-    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
-  return marked.parse(body)
-})
-
-const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']
-const TEXT_EXTS = ['md', 'txt', 'json', 'log', 'csv', 'yaml', 'yml', 'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'css', 'html', 'xml', 'sh', 'toml', 'ini']
+const previewFile = ref(null)
+const PREVIEWABLE = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'pdf', 'md', 'txt', 'json', 'log', 'csv', 'yaml', 'yml', 'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'css', 'html', 'xml', 'sh', 'toml', 'ini']
 
 function extOf(name) {
-  const i = name.lastIndexOf('.')
+  const i = (name || '').lastIndexOf('.')
   return i >= 0 ? name.slice(i + 1).toLowerCase() : ''
 }
 
@@ -182,59 +139,13 @@ function formatSize(bytes) {
 }
 
 // ── 预览 / 下载 / 删除 ──
-function revokePreviewUrl() {
-  if (previewUrl.value) {
-    URL.revokeObjectURL(previewUrl.value)
-    previewUrl.value = ''
-  }
-}
-
-function closePreview() {
-  previewOpen.value = false
-  openSeq++
-  revokePreviewUrl()
-  previewText.value = ''
-  previewBlob = null
-}
-
-async function openFile(entry) {
+function openFile(entry) {
   const ext = extOf(entry.name)
-  const kind = IMAGE_EXTS.includes(ext) ? 'image'
-    : ext === 'pdf' ? 'pdf'
-    : ext === 'md' ? 'markdown'
-    : TEXT_EXTS.includes(ext) ? 'text'
-    : 'other'
-
-  if (kind === 'other') {
+  if (PREVIEWABLE.includes(ext)) {
+    previewFile.value = { path: entry.path, name: entry.name }
+    previewOpen.value = true
+  } else {
     downloadFile(entry)
-    return
-  }
-
-  const mySeq = ++openSeq
-  revokePreviewUrl()
-  previewText.value = ''
-  previewBlob = null
-  previewName.value = entry.name
-  previewType.value = kind
-  previewOpen.value = true
-  previewLoading.value = true
-  try {
-    const blob = await fetchWorkspaceFileBlob(entry.path)
-    if (mySeq !== openSeq) return
-    if (kind === 'text' || kind === 'markdown') {
-      const text = await blob.text()
-      if (mySeq !== openSeq) return
-      previewText.value = text
-    } else {
-      previewUrl.value = URL.createObjectURL(blob)
-    }
-    previewBlob = blob
-  } catch (e) {
-    if (mySeq !== openSeq) return
-    message.error(`预览 ${entry.name} 失败：` + (e.message || ''))
-    closePreview()
-  } finally {
-    if (mySeq === openSeq) previewLoading.value = false
   }
 }
 
@@ -258,10 +169,6 @@ async function downloadFile(entry) {
   }
 }
 
-function downloadPreview() {
-  if (previewBlob) triggerBlobDownload(previewBlob, previewName.value)
-}
-
 async function deleteEntry(entry) {
   try {
     await deleteWorkspaceFile(entry.path)
@@ -273,7 +180,6 @@ async function deleteEntry(entry) {
 }
 
 onMounted(() => fetchDir())
-onBeforeUnmount(revokePreviewUrl)
 </script>
 
 <style scoped>
@@ -336,76 +242,4 @@ onBeforeUnmount(revokePreviewUrl)
 }
 .wf-row:hover .wf-del { opacity: 0.6; }
 .wf-del:hover { color: #cf1322; opacity: 1; }
-
-.wf-preview-body {
-  max-height: 70vh;
-  overflow: auto;
-  display: flex;
-  justify-content: center;
-}
-.wf-preview-img { max-width: 100%; height: auto; }
-.wf-preview-pdf { width: 100%; }
-.wf-preview-text {
-  width: 100%;
-  margin: 0;
-  padding: 12px 14px;
-  background: var(--nr-canvas, #faf7f2);
-  color: var(--nr-ink, #2b2b2b);
-  border-radius: 6px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.wf-preview-md {
-  width: 100%;
-  padding: 4px 8px 12px;
-  font-size: 13.5px;
-  line-height: 1.7;
-  color: var(--nr-ink, #2b2b2b);
-  word-break: break-word;
-  text-align: left;
-}
-.wf-preview-md :deep(h1),
-.wf-preview-md :deep(h2),
-.wf-preview-md :deep(h3),
-.wf-preview-md :deep(h4) { margin: 1em 0 0.5em; line-height: 1.3; font-weight: 600; }
-.wf-preview-md :deep(h1) { font-size: 1.5em; }
-.wf-preview-md :deep(h2) { font-size: 1.3em; border-bottom: 1px solid var(--nr-border); padding-bottom: 0.3em; }
-.wf-preview-md :deep(h3) { font-size: 1.15em; }
-.wf-preview-md :deep(p) { margin: 0.5em 0; }
-.wf-preview-md :deep(ul),
-.wf-preview-md :deep(ol) { padding-left: 1.5em; margin: 0.5em 0; }
-.wf-preview-md :deep(li) { margin: 0.25em 0; }
-.wf-preview-md :deep(code) {
-  background: var(--nr-border, #eee);
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-.wf-preview-md :deep(pre) {
-  background: var(--nr-canvas, #faf7f2);
-  padding: 10px 12px;
-  border-radius: 6px;
-  overflow-x: auto;
-}
-.wf-preview-md :deep(pre code) { background: none; padding: 0; }
-.wf-preview-md :deep(a) { color: var(--nr-clay, #b5651d); }
-.wf-preview-md :deep(blockquote) {
-  margin: 0.5em 0;
-  padding-left: 1em;
-  border-left: 3px solid var(--nr-border);
-  color: var(--nr-ink-3);
-}
-.wf-preview-md :deep(table) { border-collapse: collapse; margin: 0.5em 0; }
-.wf-preview-md :deep(th),
-.wf-preview-md :deep(td) { border: 1px solid var(--nr-border); padding: 4px 8px; }
-.wf-preview-md :deep(img) { max-width: 100%; }
-.wf-preview-md :deep(hr) { border: none; border-top: 1px solid var(--nr-border); margin: 1em 0; }
-
-.wf-preview-actions {
-  margin-top: 12px;
-  display: flex;
-  justify-content: flex-end;
-}
 </style>
