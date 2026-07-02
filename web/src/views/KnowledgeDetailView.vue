@@ -417,20 +417,7 @@
                     <span class="wiki-sub">被 {{ entityDetail.mention_count }} 处提及</span>
                   </h2>
 
-                  <div class="wiki-article">
-                    <a-spin :spinning="articleLoading">
-                      <template v-if="article">
-                        <CitationText :text="article.markdown" :citations="article.citations" />
-                        <div class="wiki-article-meta">
-                          <a-tag v-if="article.stale" color="orange">来源已更新</a-tag>
-                          <a-button size="small" type="link" @click="genArticle">
-                            {{ article.stale ? '重新生成' : '重新生成词条' }}
-                          </a-button>
-                        </div>
-                      </template>
-                      <a-button v-else type="dashed" block @click="genArticle">生成词条</a-button>
-                    </a-spin>
-                  </div>
+                  <ArticleView :article="article" :loading="articleLoading" @generate="genArticle" />
 
                   <h3>事实</h3>
                   <a-empty v-if="!entityDetail.facts.length" description="无事实" />
@@ -758,7 +745,7 @@ import {
 } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import EntityNeighborGraph from '@/components/EntityNeighborGraph.vue'
-import CitationText from '@/components/CitationText.vue'
+import ArticleView from '@/components/ArticleView.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useSettingsStore } from '@/stores/settings'
 import { apiPost } from '@/apis/base'
@@ -1827,6 +1814,4 @@ function formatSize(bytes) {
 .wiki-chunk-text { font-size: 13px; white-space: pre-wrap; }
 .wiki-neighbor { cursor: pointer; margin-bottom: 6px; }
 .wiki-empty { padding: 40px 0; }
-.wiki-article { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #f0f0f0; }
-.wiki-article-meta { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
 </style>
