@@ -15,9 +15,8 @@
 - Descriptor shape is exactly `{"path": <workspace-relative posix str>, "name": <basename str>, "size": <int bytes>}`. No other keys.
 - Security: never serve/read a media path outside the user's workspace root (`AgentLoop.workspace` = `base_workspace/users/{uid}`). Mapping uses `Path.relative_to`; `ValueError` ⇒ drop.
 - Type policy (frontend): images inline; `.md`/`.pdf` preview modal; everything else download-only card. All types downloadable.
-- Backend tests run from `backend/`. BEFORE running them, confirm the worktree's package is imported:
-  `python -c "import nanoresearch,sys; print(nanoresearch.__file__)"` must point inside this worktree. If it points at the original repo, run `pip install -e ./backend` in the worktree venv (or prepend `PYTHONPATH=$(pwd)/backend`).
-- Frontend build gate: `npm run build` from `web/` must pass.
+- Backend test env: `D:/Code/nanobot/backend/.venv/Scripts/python.exe` (pytest 9.1.0). Run tests FROM the worktree's `backend/` dir with `-m pytest` — e.g. `cd <worktree>/backend && D:/Code/nanobot/backend/.venv/Scripts/python.exe -m pytest tests/xxx.py -v`. Because `python -m` puts the worktree `backend/` on `sys.path[0]`, `import nanoresearch` resolves to the **worktree** (verified: `nanoresearch.__file__` points inside the worktree). **Do NOT run `pip install -e`** — it would repoint the shared editable install and break the original checkout's running backend.
+- Frontend build gate: `npm run build` from the worktree's `web/` must pass. (Node deps already installed; do not reinstall unless a missing-module error occurs.)
 
 ---
 
