@@ -34,9 +34,14 @@ def pg_conn():
 
 def create_tables() -> None:
     """Drop and recreate all tables using SQLAlchemy metadata + psycopg2."""
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, text
     sync_url = TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
     engine = create_engine(sync_url, echo=False)
+    # Some branches (e.g. cron redesign) leave a `cron_jobs` table with a FK to
+    # `conversations` that isn't in this branch's ORM metadata; drop_all can't
+    # remove it and then fails to drop `conversations`. Clear stray tables first.
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS cron_jobs CASCADE"))
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     engine.dispose()
