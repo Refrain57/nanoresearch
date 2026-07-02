@@ -124,6 +124,7 @@ const previewName = ref('')
 const previewUrl = ref('')     // 图片/PDF 的 object URL
 const previewText = ref('')
 let previewBlob = null         // 供浮窗内「下载」复用
+let openSeq = 0                // 递增序号，用于丢弃过期的预览请求
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']
 const TEXT_EXTS = ['md', 'txt', 'json', 'log', 'csv', 'yaml', 'yml', 'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'css', 'html', 'xml', 'sh', 'toml', 'ini']
@@ -177,6 +178,7 @@ function revokePreviewUrl() {
 
 function closePreview() {
   previewOpen.value = false
+  openSeq++
   revokePreviewUrl()
   previewText.value = ''
   previewBlob = null
@@ -194,6 +196,7 @@ async function openFile(entry) {
     return
   }
 
+  const mySeq = ++openSeq
   revokePreviewUrl()
   previewText.value = ''
   previewBlob = null
@@ -203,17 +206,21 @@ async function openFile(entry) {
   previewLoading.value = true
   try {
     const blob = await fetchWorkspaceFileBlob(entry.path)
-    previewBlob = blob
+    if (mySeq !== openSeq) return
     if (kind === 'text') {
-      previewText.value = await blob.text()
+      const text = await blob.text()
+      if (mySeq !== openSeq) return
+      previewText.value = text
     } else {
       previewUrl.value = URL.createObjectURL(blob)
     }
+    previewBlob = blob
   } catch (e) {
+    if (mySeq !== openSeq) return
     message.error(`预览 ${entry.name} 失败：` + (e.message || ''))
     closePreview()
   } finally {
-    previewLoading.value = false
+    if (mySeq === openSeq) previewLoading.value = false
   }
 }
 
