@@ -41,9 +41,11 @@ class KnowledgeSearch:
         dense_encoder: BaseEmbedding,
         user_memory_store: ChromaStore | None = None,
         settings: "Settings | None" = None,
+        mem_events_store: ChromaStore | None = None,
     ):
         self.dense_encoder = dense_encoder
         self.user_memory_store = user_memory_store
+        self.mem_events_store = mem_events_store
         self._settings = settings
         self._reranker: "BaseReranker | None | bool" = None  # None=uninit, False=unavailable
 
@@ -51,10 +53,13 @@ class KnowledgeSearch:
     def from_settings(cls, settings: "Settings", collection_suffix: str = "") -> "KnowledgeSearch":
         from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
 
-        user_memory_collection = f"user_memory{collection_suffix}"
         user_memory_store = ChromaStore(
             settings=settings,
-            collection_name=user_memory_collection,
+            collection_name=f"user_memory{collection_suffix}",
+        )
+        mem_events_store = ChromaStore(
+            settings=settings,
+            collection_name=f"mem_events{collection_suffix}",
         )
         dense_encoder = EmbeddingFactory.create(settings)
 
@@ -62,6 +67,7 @@ class KnowledgeSearch:
             dense_encoder=dense_encoder,
             user_memory_store=user_memory_store,
             settings=settings,
+            mem_events_store=mem_events_store,
         )
 
     def _get_reranker(self) -> "BaseReranker | None":
@@ -89,25 +95,33 @@ class KnowledgeSearch:
 
     # ============== User Memory Methods ==============
 
-    def search_user_memory_sync(
+    def _hybrid_search(
         self,
+        store: "ChromaStore | None",
         query: str,
         top_k: int = 5,
         apply_decay: bool = True,
         uid: str | None = None,
+        extra_filters: dict[str, Any] | None = None,
+        exclude_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Search user memory using BM25 + vector → RRF → optional Rerank → time decay."""
-        if not self.user_memory_store:
+        """Shared hybrid recall chain (over-retrieve → uid/metadata filter → BM25 → RRF →
+        optional rerank → time decay). Reused verbatim by every memory collection so ranking
+        behaviour never diverges per store (plan C6)."""
+        if not store:
             return []
 
         # Step 1: Vector search — over-retrieve for downstream filtering
         vector = self._embed(query)
-        candidates = self.user_memory_store.query(
-            vector=vector, top_k=top_k * 4,
-        )
+        candidates = store.query(vector=vector, top_k=top_k * 4)
 
         if uid:
             candidates = [r for r in candidates if r.get("metadata", {}).get("uid") == uid]
+        if extra_filters:
+            for fk, fv in extra_filters.items():
+                candidates = [r for r in candidates if r.get("metadata", {}).get(fk) == fv]
+        if exclude_ids:
+            candidates = [r for r in candidates if r.get("id") not in exclude_ids]
 
         if not candidates:
             return []
@@ -139,6 +153,18 @@ class KnowledgeSearch:
             fused = self._apply_decay(fused)
 
         return fused[:top_k]
+
+    def search_user_memory_sync(
+        self,
+        query: str,
+        top_k: int = 5,
+        apply_decay: bool = True,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search user memory via the shared hybrid chain."""
+        return self._hybrid_search(
+            self.user_memory_store, query, top_k=top_k, apply_decay=apply_decay, uid=uid,
+        )
 
     def write_user_memory_sync(
         self,
@@ -191,6 +217,48 @@ class KnowledgeSearch:
             f"skipped {len(skipped_ids)} duplicates"
         )
         return (len(written_ids), len(skipped_ids))
+
+    # ============== Events (P2) — append-only, no TTL/cleanup (plan C5) ==============
+
+    def write_events_sync(self, events: list[dict[str, Any]], uid: str | None = None) -> list[str]:
+        """Append atomic events to mem_events; returns the new record ids (used to backfill
+        memory_facts.derived_from — plan C4). Append-only: no dedup gate, no TTL/cleanup."""
+        if not events or not self.mem_events_store:
+            return []
+        texts = [
+            f"{e.get('topic', '')} | {e.get('action', '')} | {e.get('result', '')}"
+            for e in events
+        ]
+        vectors = self.dense_encoder.embed(texts)
+        to_insert, ids = [], []
+        for e, vec, text in zip(events, vectors, texts):
+            record_id = f"ev_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            to_insert.append({
+                "id": record_id,
+                "vector": vec,
+                "metadata": {
+                    "type": "event",
+                    "uid": uid or "",
+                    "conversation_id": e.get("conversation_id", ""),
+                    "created_at": e.get("time", datetime.now().isoformat()),
+                    "topic": e.get("topic", ""),
+                    "action": e.get("action", ""),
+                    "result": e.get("result", ""),
+                    "text": text,
+                },
+            })
+            ids.append(record_id)
+        self.mem_events_store.insert_batch(to_insert)
+        logger.info(f"KnowledgeSearch: wrote {len(ids)} events")
+        return ids
+
+    def search_events_sync(self, query: str, top_k: int = 5, apply_decay: bool = True,
+                           uid: str | None = None) -> list[dict[str, Any]]:
+        """Semantic recall over mem_events via the shared hybrid chain. Decay is a ranking
+        weight only — events are never cleaned up (plan C5)."""
+        return self._hybrid_search(
+            self.mem_events_store, query, top_k=top_k, apply_decay=apply_decay, uid=uid,
+        )
 
     async def write_user_memory(
         self,
