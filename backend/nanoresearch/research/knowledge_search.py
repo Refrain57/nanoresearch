@@ -32,20 +32,19 @@ class KnowledgeSearch:
     Search pipeline: BM25 (in-memory) + vector → RRF fusion → optional Rerank → time decay.
 
     Attributes:
-        user_memory_store: ChromaDB collection for user memory.
+        mem_events_store: ChromaDB collection for atomic events.
+        mem_conv_summaries_store: ChromaDB collection for conversation summaries.
         dense_encoder: Embedding encoder for vector search.
     """
 
     def __init__(
         self,
         dense_encoder: BaseEmbedding,
-        user_memory_store: ChromaStore | None = None,
         settings: "Settings | None" = None,
         mem_events_store: ChromaStore | None = None,
         mem_conv_summaries_store: ChromaStore | None = None,
     ):
         self.dense_encoder = dense_encoder
-        self.user_memory_store = user_memory_store
         self.mem_events_store = mem_events_store
         self.mem_conv_summaries_store = mem_conv_summaries_store
         self._settings = settings
@@ -55,10 +54,6 @@ class KnowledgeSearch:
     def from_settings(cls, settings: "Settings", collection_suffix: str = "") -> "KnowledgeSearch":
         from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
 
-        user_memory_store = ChromaStore(
-            settings=settings,
-            collection_name=f"user_memory{collection_suffix}",
-        )
         mem_events_store = ChromaStore(
             settings=settings,
             collection_name=f"mem_events{collection_suffix}",
@@ -71,7 +66,6 @@ class KnowledgeSearch:
 
         return cls(
             dense_encoder=dense_encoder,
-            user_memory_store=user_memory_store,
             settings=settings,
             mem_events_store=mem_events_store,
             mem_conv_summaries_store=mem_conv_summaries_store,
@@ -160,70 +154,6 @@ class KnowledgeSearch:
             fused = self._apply_decay(fused)
 
         return fused[:top_k]
-
-    def search_user_memory_sync(
-        self,
-        query: str,
-        top_k: int = 5,
-        apply_decay: bool = True,
-        uid: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Search user memory via the shared hybrid chain."""
-        return self._hybrid_search(
-            self.user_memory_store, query, top_k=top_k, apply_decay=apply_decay, uid=uid,
-        )
-
-    def write_user_memory_sync(
-        self,
-        memories: list[dict[str, Any]],
-        similarity_threshold: float = 0.85,
-        uid: str | None = None,
-    ) -> tuple[int, int]:
-        """Write user memories with deduplication (sync version)."""
-        if not memories or not self.user_memory_store:
-            return (0, 0)
-
-        memories = [m for m in memories if m.get("confidence", 0) >= 0.7]
-        if not memories:
-            return (0, 0)
-
-        texts = [m["text"] for m in memories]
-        vectors = self.dense_encoder.embed(texts)
-
-        existing_results = self.user_memory_store.query_batch(
-            vectors, top_k=1, threshold=similarity_threshold
-        )
-
-        written_ids, skipped_ids = [], []
-        to_insert = []
-
-        for mem, vec, existing_list in zip(memories, vectors, existing_results):
-            if existing_list:
-                skipped_ids.append(existing_list[0]["id"])
-            else:
-                record_id = f"um_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
-                to_insert.append({
-                    "id": record_id,
-                    "vector": vec,
-                    "metadata": {
-                        "type": mem.get("type", "factual"),
-                        "confidence": mem.get("confidence", 0.7),
-                        "is_evergreen": mem.get("is_evergreen", False),
-                        "created_at": mem.get("created_at", datetime.now().isoformat()),
-                        "text": mem["text"],
-                        "uid": uid or "",
-                    }
-                })
-                written_ids.append(record_id)
-
-        if to_insert:
-            self.user_memory_store.insert_batch(to_insert)
-
-        logger.info(
-            f"KnowledgeSearch: wrote {len(written_ids)} user memories, "
-            f"skipped {len(skipped_ids)} duplicates"
-        )
-        return (len(written_ids), len(skipped_ids))
 
     # ============== Events (P2) — append-only, no TTL/cleanup (plan C5) ==============
 
@@ -314,49 +244,14 @@ class KnowledgeSearch:
             and r.get("metadata", {}).get("conversation_id") == conversation_id
         ]
 
-    async def write_user_memory(
-        self,
-        memories: list[dict[str, Any]],
-        similarity_threshold: float = 0.85,
-        uid: str | None = None,
-    ) -> tuple[int, int]:
-        """Write user memories with deduplication (async wrapper)."""
-        return self.write_user_memory_sync(memories, similarity_threshold, uid=uid)
-
-    async def cleanup_old_user_memory(self, max_age_days: int = 90) -> int:
-        """Delete non-evergreen user memories older than max_age_days."""
-        if not self.user_memory_store or max_age_days <= 0:
-            return 0
-
-        cutoff = datetime.now() - timedelta(days=max_age_days)
-        all_memories = self.user_memory_store.query(
-            vector=self._embed(""), top_k=10000,
-            filters={"is_evergreen": False}
-        )
-
-        ids_to_delete = []
-        for mem in all_memories:
-            created_at_str = mem.get("metadata", {}).get("created_at", "")
-            if created_at_str:
-                try:
-                    created_at = datetime.fromisoformat(created_at_str)
-                    if created_at < cutoff:
-                        ids_to_delete.append(mem["id"])
-                except (ValueError, TypeError):
-                    pass
-
-        if ids_to_delete:
-            self.user_memory_store.delete(ids=ids_to_delete)
-            logger.info(f"KnowledgeSearch: cleaned up {len(ids_to_delete)} old user memories")
-
-        return len(ids_to_delete)
-
     # ============== Statistics ==============
 
     def get_stats(self) -> dict[str, int]:
         return {
-            "user_memory": self.user_memory_store.get_collection_stats()["count"]
-            if self.user_memory_store else 0,
+            "mem_events": self.mem_events_store.get_collection_stats()["count"]
+            if self.mem_events_store else 0,
+            "mem_conv_summaries": self.mem_conv_summaries_store.get_collection_stats()["count"]
+            if self.mem_conv_summaries_store else 0,
         }
 
     # ============== Helper Methods ==============

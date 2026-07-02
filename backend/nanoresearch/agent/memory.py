@@ -445,21 +445,21 @@ Call save_memory with your updated memory following the exact format specified."
         return True
 
     def _raw_archive(self, messages: list[dict], uid: str | None = None) -> None:
-        """Fallback: dump raw messages to user_memory without LLM summarization."""
+        """Fallback: dump raw messages to mem_events without LLM summarization."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         # Format messages as searchable text
         formatted = self._format_messages(messages)
         text = f"[{ts}] [RAW] {len(messages)} messages\n{formatted}"
 
-        # Write to user_memory (sync version)
+        # Append as a single raw event (append-only; no confidence gate / TTL).
         if self._knowledge_search:
-            self._knowledge_search.write_user_memory_sync([{
-                "text": text,
-                "type": "raw_archive",
-                "confidence": CONSOLIDATION_SUMMARY_CONFIDENCE,
-                "is_evergreen": False,
-                "created_at": datetime.now().isoformat(),
+            self._knowledge_search.write_events_sync([{
+                "topic": "raw_archive",
+                "action": f"archived {len(messages)} messages",
+                "result": text,
+                "time": datetime.now().isoformat(),
+                "conversation_id": "",
             }], uid=uid)
 
         logger.warning(
