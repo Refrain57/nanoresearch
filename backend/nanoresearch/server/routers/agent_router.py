@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from nanoresearch.server.middleware.auth import get_current_user
+from nanoresearch.server.routers.workspace_paths import user_workspace
 from nanoresearch.storage.repositories.agent_repo import AgentRepository
 from nanoresearch.storage.repositories.knowledge_repo import KnowledgeRepository
 from nanoresearch.storage.repositories.run_repo import RunRepository
@@ -59,10 +60,10 @@ async def _agent_to_card(agent, stats: dict) -> dict:
 
 
 @router.get("/api/skills")
-async def list_skills(_uid: str = Depends(get_current_user)):
+async def list_skills(request: Request, uid: str = Depends(get_current_user)):
     from nanoresearch.agent.skills import BUILTIN_SKILLS_DIR, SkillsLoader
     loader = SkillsLoader(
-        workspace=BUILTIN_SKILLS_DIR.parent,
+        workspace=user_workspace(request, uid),
         builtin_skills_dir=BUILTIN_SKILLS_DIR,
     )
     result = []
