@@ -65,8 +65,9 @@ class ContextBuilder:
             return ""
 
         try:
-            # Search user_memory collection (filter by uid if available)
-            memories = self.knowledge_search.search_user_memory_sync(
+            # Semantic recall over mem_events (uid-scoped). The events layer replaces the
+            # flat user_memory <history> (P2).
+            memories = self.knowledge_search.search_events_sync(
                 query, top_k=5, apply_decay=True, uid=uid,
             )
 
