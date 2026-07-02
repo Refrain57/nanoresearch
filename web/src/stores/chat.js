@@ -140,12 +140,14 @@ function _mapRawMessage(m) {
     : (stored?.text ?? stored?.content ?? '')
   const tool_calls = m.tool_calls ?? stored?.tool_calls
   const citations = typeof stored === 'string' ? null : (stored?._citations ?? null)
+  const media = typeof stored === 'string' ? null : (stored?.media ?? null)
   return {
     ...m,
     content: { text },
     tool_calls,
     toolCalls: _normalizeToolCalls(tool_calls),
     citations: citations?.length ? citations : undefined,
+    media: media?.length ? media : undefined,
   }
 }
 

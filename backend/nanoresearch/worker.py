@@ -384,6 +384,28 @@ def _make_on_citations(redis, run_stream_key: str):
     return on_citations
 
 
+def _make_web_message_sink(redis, run_stream_key: str, workspace_root):
+    """Factory: return a MessageTool send-callback that emits an agent_message SSE
+    event for web-channel sends, including workspace-relative attachment descriptors.
+
+    Extracted as a module-level factory (mirroring _make_on_citations) so it can be
+    unit-tested with a fake Redis without a running worker.
+    """
+    from nanoresearch.bus.stream import xadd_event
+    from nanoresearch.server.routers.workspace_paths import build_attachment_descriptors
+
+    async def _sink(m) -> None:
+        if getattr(m, "channel", None) != "web":
+            return
+        await xadd_event(redis, run_stream_key, {
+            "type": "agent_message",
+            "content": m.content,
+            "media": build_attachment_descriptors(getattr(m, "media", None), workspace_root),
+        })
+
+    return _sink
+
+
 def _apply_cron_run_context(loop, cron: dict | None) -> None:
     """Mark a cron-triggered run so its agent can't schedule further cron jobs.
 
@@ -588,11 +610,7 @@ async def run_agent_job(
         from nanoresearch.agent.tools.message import MessageTool as _MessageTool
         _mt = loop.tools.get("message")
         if isinstance(_mt, _MessageTool):
-            async def _web_message_sink(m: Any) -> None:
-                if getattr(m, "channel", None) == "web":
-                    await xadd_event(redis, run_stream_key,
-                                     {"type": "agent_message", "content": m.content})
-            _mt.set_send_callback(_web_message_sink)
+            _mt.set_send_callback(_make_web_message_sink(redis, run_stream_key, loop.workspace))
 
         _proc_task = asyncio.create_task(loop.process_direct(
             content,

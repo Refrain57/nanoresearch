@@ -546,6 +546,7 @@ async function connectStream(runId, convId) {
         id: `agent-msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         role: 'assistant',
         content: { text: event.content },
+        media: event.media || [],
         seq: chatStore.messages.length,
       })
     },

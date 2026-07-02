@@ -22,6 +22,7 @@ class MessageTool(Tool):
         self._default_message_id = default_message_id
         self._sent_in_turn: bool = False
         self._sent_contents: list[str] = []
+        self._sent_media: list[list[str]] = []
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context."""
@@ -37,6 +38,7 @@ class MessageTool(Tool):
         """Reset per-turn send tracking."""
         self._sent_in_turn = False
         self._sent_contents = []
+        self._sent_media = []
 
     def sent_contents(self) -> list[str]:
         """Contents sent to the default channel/chat this turn.
@@ -44,6 +46,11 @@ class MessageTool(Tool):
         Used by the web bridge to persist agent-sent messages into the saved turn (the SSE
         stream that delivered them live is not itself persisted)."""
         return list(self._sent_contents)
+
+    def sent_media(self) -> list[list[str]]:
+        """Media-path lists for sends to the default channel/chat this turn,
+        index-aligned with sent_contents()."""
+        return [list(m) for m in self._sent_media]
 
     @property
     def name(self) -> str:
@@ -118,6 +125,7 @@ class MessageTool(Tool):
             if channel == self._default_channel and chat_id == self._default_chat_id:
                 self._sent_in_turn = True
                 self._sent_contents.append(content)
+                self._sent_media.append(list(media or []))
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
