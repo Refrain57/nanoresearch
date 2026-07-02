@@ -389,79 +389,79 @@
         <a-tab-pane key="graph" tab="知识图谱/Wiki">
           <div class="wiki-wrap">
             <div class="wiki-list">
-              <a-input-search v-model:value="wikiSearch" placeholder="搜索实体…"
-                allow-clear @search="loadWikiEntities" style="margin-bottom:8px" />
-              <a-spin :spinning="wikiLoading">
-                <template v-if="wikiLoading" />
-                <template v-else-if="!wikiEntities.length && wikiSearch">
-                  <a-empty description="无匹配实体" />
-                </template>
-                <template v-else-if="!wikiEntities.length">
-                  <a-empty description="暂无知识图谱数据，请先在「文档」页重建知识图谱" />
-                </template>
-                <template v-else>
-                  <div v-for="e in wikiEntities" :key="e.name"
-                    class="wiki-ent" :class="{ active: entityDetail?.name === e.name }"
-                    @click="selectEntity(e.name)">
-                    <span class="wiki-ent-name">{{ e.name }}</span>
-                    <span class="wiki-ent-count">{{ e.mentions }}</span>
-                  </div>
-                </template>
-              </a-spin>
+              <div class="wiki-nav">
+                <div class="wiki-nav-item" :class="{active: wikiView==='overview'}" @click="openOverview">📄 总览</div>
+                <div class="wiki-nav-sec">概念</div>
+                <a-input-search v-model:value="conceptInput" placeholder="新建概念…" enter-button="生成" size="small" @search="newConcept" style="margin-bottom:4px" />
+                <div v-for="c in concepts" :key="c.key" class="wiki-nav-item"
+                     :class="{active: wikiView==='concept' && activeConcept===c.key}"
+                     @click="openConcept(c.key)">{{ c.key }}</div>
+                <div class="wiki-nav-sec">实体</div>
+                <a-input-search v-model:value="wikiSearch" placeholder="搜索实体…"
+                  allow-clear @search="loadWikiEntities" style="margin-bottom:8px" />
+                <a-spin :spinning="wikiLoading">
+                  <template v-if="wikiLoading" />
+                  <template v-else-if="!wikiEntities.length && wikiSearch">
+                    <a-empty description="无匹配实体" />
+                  </template>
+                  <template v-else-if="!wikiEntities.length">
+                    <a-empty description="暂无知识图谱数据，请先在「文档」页重建知识图谱" />
+                  </template>
+                  <template v-else>
+                    <div v-for="e in wikiEntities" :key="e.name"
+                      class="wiki-ent" :class="{ active: wikiView==='entity' && entityDetail?.name === e.name }"
+                      @click="selectEntity(e.name)">
+                      <span class="wiki-ent-name">{{ e.name }}</span>
+                      <span class="wiki-ent-count">{{ e.mentions }}</span>
+                    </div>
+                  </template>
+                </a-spin>
+              </div>
             </div>
             <div class="wiki-detail">
-              <a-spin :spinning="detailLoading">
-                <template v-if="entityDetail">
-                  <h2 class="wiki-title">{{ entityDetail.name }}
-                    <a-tag>{{ entityDetail.label }}</a-tag>
-                    <span class="wiki-sub">被 {{ entityDetail.mention_count }} 处提及</span>
-                  </h2>
+              <ArticleView v-if="wikiView==='overview'" :article="overviewArticle" :loading="overviewLoading" @generate="genOverview" />
+              <ArticleView v-else-if="wikiView==='concept'" :article="conceptArticle" :loading="conceptLoading" @generate="genConcept" />
+              <template v-else>
+                <a-spin :spinning="detailLoading">
+                  <template v-if="entityDetail">
+                    <h2 class="wiki-title">{{ entityDetail.name }}
+                      <a-tag>{{ entityDetail.label }}</a-tag>
+                      <span class="wiki-sub">被 {{ entityDetail.mention_count }} 处提及</span>
+                    </h2>
 
-                  <div class="wiki-article">
-                    <a-spin :spinning="articleLoading">
-                      <template v-if="article">
-                        <CitationText :text="article.markdown" :citations="article.citations" />
-                        <div class="wiki-article-meta">
-                          <a-tag v-if="article.stale" color="orange">来源已更新</a-tag>
-                          <a-button size="small" type="link" @click="genArticle">
-                            {{ article.stale ? '重新生成' : '重新生成词条' }}
-                          </a-button>
+                    <ArticleView :article="article" :loading="articleLoading" @generate="genArticle" />
+
+                    <h3>事实</h3>
+                    <a-empty v-if="!entityDetail.facts.length" description="无事实" />
+                    <div v-for="f in entityDetail.facts" :key="f.triple_id" class="wiki-fact">
+                      <div class="wiki-fact-row" @click="toggleTripleEvidence(f.triple_id)">
+                        <span>{{ f.source }} <em>—{{ f.label }}→</em> {{ f.target }}</span>
+                        <a-tag color="blue">{{ f.doc_count }} 篇文档</a-tag>
+                      </div>
+                      <div v-if="expandedTriple === f.triple_id" class="wiki-evidence">
+                        <div v-for="(c, i) in tripleChunks" :key="i" class="wiki-chunk">
+                          <div class="wiki-chunk-src">{{ c.source }}<span v-if="c.page != null"> · p{{ c.page }}</span></div>
+                          <div class="wiki-chunk-text">{{ c.content }}</div>
                         </div>
-                      </template>
-                      <a-button v-else type="dashed" block @click="genArticle">生成词条</a-button>
-                    </a-spin>
-                  </div>
-
-                  <h3>事实</h3>
-                  <a-empty v-if="!entityDetail.facts.length" description="无事实" />
-                  <div v-for="f in entityDetail.facts" :key="f.triple_id" class="wiki-fact">
-                    <div class="wiki-fact-row" @click="toggleTripleEvidence(f.triple_id)">
-                      <span>{{ f.source }} <em>—{{ f.label }}→</em> {{ f.target }}</span>
-                      <a-tag color="blue">{{ f.doc_count }} 篇文档</a-tag>
-                    </div>
-                    <div v-if="expandedTriple === f.triple_id" class="wiki-evidence">
-                      <div v-for="(c, i) in tripleChunks" :key="i" class="wiki-chunk">
-                        <div class="wiki-chunk-src">{{ c.source }}<span v-if="c.page != null"> · p{{ c.page }}</span></div>
-                        <div class="wiki-chunk-text">{{ c.content }}</div>
                       </div>
                     </div>
-                  </div>
 
-                  <h3 style="margin-top:16px">邻居实体</h3>
-                  <a-tag v-for="n in entityDetail.neighbors" :key="n"
-                    class="wiki-neighbor" @click="selectEntity(n)">{{ n }}</a-tag>
+                    <h3 style="margin-top:16px">邻居实体</h3>
+                    <a-tag v-for="n in entityDetail.neighbors" :key="n"
+                      class="wiki-neighbor" @click="selectEntity(n)">{{ n }}</a-tag>
 
-                  <a-collapse ghost style="margin-top:8px">
-                    <a-collapse-panel key="graph" header="知识图谱">
-                      <EntityNeighborGraph
-                        :center="entityDetail.name"
-                        :neighbors="entityDetail.neighbors"
-                        @select="selectEntity" />
-                    </a-collapse-panel>
-                  </a-collapse>
-                </template>
-                <a-empty v-else description="选择左侧实体查看详情" />
-              </a-spin>
+                    <a-collapse ghost style="margin-top:8px">
+                      <a-collapse-panel key="graph" header="知识图谱">
+                        <EntityNeighborGraph
+                          :center="entityDetail.name"
+                          :neighbors="entityDetail.neighbors"
+                          @select="selectEntity" />
+                      </a-collapse-panel>
+                    </a-collapse>
+                  </template>
+                  <a-empty v-else description="选择左侧实体查看详情" />
+                </a-spin>
+              </template>
             </div>
           </div>
         </a-tab-pane>
@@ -758,11 +758,11 @@ import {
 } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import EntityNeighborGraph from '@/components/EntityNeighborGraph.vue'
-import CitationText from '@/components/CitationText.vue'
+import ArticleView from '@/components/ArticleView.vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useSettingsStore } from '@/stores/settings'
 import { apiPost } from '@/apis/base'
-import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats, listGraphEntities, getGraphEntity, getTripleChunks, getEntityArticle, generateEntityArticle } from '@/apis/knowledge'
+import { listDocumentChunks, testQuery, getDocumentFileBlob, buildDocGraph, getDocEntities, buildKbGraph, getGraphStats, listGraphEntities, getGraphEntity, getTripleChunks, getEntityArticle, generateEntityArticle, listConcepts, getConceptArticle, generateConceptArticle, getOverviewArticle, generateOverviewArticle } from '@/apis/knowledge'
 import {
   listDatasets, uploadDataset, deleteDataset, generateDataset,
   listEvalRuns, createEvalRun, createRagasRun, createAgentRun, getEvalRun, deleteEvalRun
@@ -1123,6 +1123,16 @@ const detailLoading  = ref(false)
 const expandedTriple = ref(null)      // triple_id whose evidence is open
 const tripleChunks   = ref([])        // evidence chunks for expandedTriple
 
+// ── Wiki view state ──
+const wikiView       = ref('entity')  // 'overview' | 'concept' | 'entity'
+const concepts       = ref([])        // [{key, generated_at}]
+const conceptInput   = ref('')
+const activeConcept  = ref('')
+const conceptArticle = ref(null)
+const conceptLoading = ref(false)
+const overviewArticle = ref(null)
+const overviewLoading = ref(false)
+
 // ── LLM entity article ──
 const article        = ref(null)      // {markdown, citations, model, generated_at, stale}
 const articleLoading = ref(false)
@@ -1141,6 +1151,46 @@ async function genArticle() {
   finally { articleLoading.value = false }
 }
 
+// ── Concept methods ──
+async function loadConcepts() {
+  try { concepts.value = (await listConcepts(kbId)).concepts || [] } catch (e) {}
+}
+
+async function openConcept(topic) {
+  wikiView.value = 'concept'; activeConcept.value = topic; conceptArticle.value = null
+  try { conceptArticle.value = (await getConceptArticle(kbId, topic)).article } catch (e) {}
+}
+
+async function genConcept() {
+  const topic = activeConcept.value || conceptInput.value.trim(); if (!topic) return
+  conceptLoading.value = true
+  try {
+    conceptArticle.value = (await generateConceptArticle(kbId, topic)).article
+    activeConcept.value = topic
+    await loadConcepts()
+  } catch (e) { message.error('生成概念页失败') }
+  finally { conceptLoading.value = false }
+}
+
+function newConcept() {
+  const t = conceptInput.value.trim(); if (!t) return
+  activeConcept.value = t; conceptArticle.value = null; wikiView.value = 'concept'
+  genConcept(); conceptInput.value = ''
+}
+
+// ── Overview methods ──
+async function openOverview() {
+  wikiView.value = 'overview'
+  try { overviewArticle.value = (await getOverviewArticle(kbId)).article } catch (e) {}
+}
+
+async function genOverview() {
+  overviewLoading.value = true
+  try { overviewArticle.value = (await generateOverviewArticle(kbId)).article }
+  catch (e) { message.error('生成总览失败') }
+  finally { overviewLoading.value = false }
+}
+
 async function loadWikiEntities() {
   wikiLoading.value = true
   try {
@@ -1152,6 +1202,7 @@ async function loadWikiEntities() {
 }
 
 async function selectEntity(name) {
+  wikiView.value = 'entity'
   detailLoading.value = true
   expandedTriple.value = null
   tripleChunks.value = []
@@ -1183,6 +1234,7 @@ watch(activeTab, async (tab) => {
   }
   if (tab === 'graph' && !wikiEntities.value.length) {
     await loadWikiEntities()
+    await loadConcepts()
   }
 })
 
@@ -1811,6 +1863,11 @@ function formatSize(bytes) {
 /* Wiki entity browser */
 .wiki-wrap { display: flex; gap: 16px; }
 .wiki-list { width: 260px; flex-shrink: 0; max-height: 70vh; overflow-y: auto; border-right: 1px solid #eee; padding-right: 8px; }
+.wiki-nav { display: flex; flex-direction: column; gap: 2px; }
+.wiki-nav-sec { font-size: 12px; color: #999; margin: 10px 0 4px; }
+.wiki-nav-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.wiki-nav-item:hover { background: #f5f5f5; }
+.wiki-nav-item.active { background: #e6f0ff; }
 .wiki-ent { display: flex; justify-content: space-between; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
 .wiki-ent:hover { background: #f5f5f5; }
 .wiki-ent.active { background: #e6f0ff; }
@@ -1827,6 +1884,4 @@ function formatSize(bytes) {
 .wiki-chunk-text { font-size: 13px; white-space: pre-wrap; }
 .wiki-neighbor { cursor: pointer; margin-bottom: 6px; }
 .wiki-empty { padding: 40px 0; }
-.wiki-article { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #f0f0f0; }
-.wiki-article-meta { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
 </style>

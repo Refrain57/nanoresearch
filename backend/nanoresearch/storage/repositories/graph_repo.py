@@ -432,3 +432,16 @@ class GraphRepository:
             await db.commit()
             await db.refresh(row)
             return row
+
+    async def list_articles_by_prefix(self, kb_id: uuid.UUID, prefix: str) -> list[dict]:
+        from nanoresearch.storage.models import KgEntityArticle
+        async with self._factory() as db:
+            result = await db.execute(
+                select(KgEntityArticle.entity_name, KgEntityArticle.generated_at)
+                .where(KgEntityArticle.kb_id == kb_id, KgEntityArticle.entity_name.like(f"{prefix}%"))
+                .order_by(KgEntityArticle.generated_at.desc())
+            )
+            return [
+                {"key": r[0][len(prefix):], "generated_at": r[1].isoformat() if r[1] else None}
+                for r in result.all()
+            ]

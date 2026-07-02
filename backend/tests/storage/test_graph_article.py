@@ -93,3 +93,17 @@ def test_article_upsert_and_get():
         got2 = await repo.get_article(s["kb_id"], "3dgs")
         assert got2.markdown == "新正文" and got2.evidence_hash == "hash2"
     run(_())
+
+
+def test_list_articles_by_prefix():
+    async def _():
+        f = make_factory()
+        s = await _seed(f)
+        repo = GraphRepository(f)
+        await repo.upsert_article(s["kb_id"], "concept::体渲染", "a", [], "h", "m")
+        await repo.upsert_article(s["kb_id"], "concept::实时渲染", "b", [], "h", "m")
+        await repo.upsert_article(s["kb_id"], "3dgs", "c", [], "h", "m")   # entity, not concept
+        rows = await repo.list_articles_by_prefix(s["kb_id"], "concept::")
+        names = {r["key"] for r in rows}
+        assert names == {"体渲染", "实时渲染"}     # entity excluded, prefix stripped
+    run(_())

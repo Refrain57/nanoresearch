@@ -407,41 +407,9 @@ async def test_query(
 ):
     kb = await _get_kb_or_404(kb_id, uid, request)
     settings = _rag_settings(request)
-    chroma_col = kb.chroma_collection or kb_id
 
     try:
-        from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
-        from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
-        from nanoresearch.rag.core.query_engine.sparse_retriever import SparseRetriever
-        from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
-        from nanoresearch.rag.core.query_engine.fusion import RRFFusion
-        from nanoresearch.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
-        from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
-        from nanoresearch.rag.ingestion.storage.bm25_indexer import BM25Indexer
-        from nanoresearch.rag.core.settings import resolve_path
-
-        embedding = EmbeddingFactory.create(settings)
-        vector_store = VectorStoreFactory.create(settings, collection_name=chroma_col)
-        bm25 = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{chroma_col}")))
-
-        dense = DenseRetriever(settings=settings, embedding_client=embedding, vector_store=vector_store)
-        sparse = SparseRetriever(settings=settings, bm25_indexer=bm25, vector_store=vector_store, default_collection=chroma_col)
-        fusion = RRFFusion()
-        hybrid = HybridSearch(
-            settings=settings,
-            query_processor=QueryProcessor(),
-            dense_retriever=dense,
-            sparse_retriever=sparse,
-            fusion=fusion,
-            config=HybridSearchConfig(
-                fusion_top_k=body.top_k,
-                enable_dense=body.enable_dense,
-                enable_sparse=body.enable_sparse,
-                enable_graph_expansion=kb.enable_graph_expansion,
-            ),
-            session_factory=request.app.state.session_factory,
-            kb_id=kb.id,
-        )
+        hybrid = _build_hybrid_search(request, kb, settings, body.top_k, body.enable_dense, body.enable_sparse)
 
         result = await hybrid.async_search(body.query, top_k=body.top_k, return_details=True)
 
@@ -468,6 +436,55 @@ async def test_query(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"检索失败: {e}")
+
+
+# ---------------------------------------------------------------------------
+# RAG retrieval helpers
+# ---------------------------------------------------------------------------
+
+def _build_hybrid_search(request: Request, kb, settings, top_k: int, enable_dense: bool = True, enable_sparse: bool = True):
+    from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
+    from nanoresearch.rag.core.query_engine.sparse_retriever import SparseRetriever
+    from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
+    from nanoresearch.rag.core.query_engine.fusion import RRFFusion
+    from nanoresearch.rag.core.query_engine.hybrid_search import HybridSearch, HybridSearchConfig
+    from nanoresearch.rag.libs.vector_store.vector_store_factory import VectorStoreFactory
+    from nanoresearch.rag.libs.embedding.embedding_factory import EmbeddingFactory
+    from nanoresearch.rag.ingestion.storage.bm25_indexer import BM25Indexer
+    from nanoresearch.rag.core.settings import resolve_path
+    chroma_col = kb.chroma_collection or str(kb.id)
+    embedding = EmbeddingFactory.create(settings)
+    vector_store = VectorStoreFactory.create(settings, collection_name=chroma_col)
+    bm25 = BM25Indexer(index_dir=str(resolve_path(f"~/.nanoresearch/rag/bm25/{chroma_col}")))
+    dense = DenseRetriever(settings=settings, embedding_client=embedding, vector_store=vector_store)
+    sparse = SparseRetriever(settings=settings, bm25_indexer=bm25, vector_store=vector_store, default_collection=chroma_col)
+    return HybridSearch(
+        settings=settings, query_processor=QueryProcessor(),
+        dense_retriever=dense, sparse_retriever=sparse, fusion=RRFFusion(),
+        config=HybridSearchConfig(fusion_top_k=top_k, enable_dense=enable_dense, enable_sparse=enable_sparse,
+                                  enable_graph_expansion=kb.enable_graph_expansion),
+        session_factory=request.app.state.session_factory, kb_id=kb.id,
+    )
+
+
+async def _retrieve_concept_evidence(request: Request, kb, settings, topic: str, top_k: int = 8) -> list[dict]:
+    from nanoresearch.storage.models import KbDocument
+    from sqlalchemy import select as _select
+    hybrid = _build_hybrid_search(request, kb, settings, top_k)
+    result = await hybrid.async_search(topic, top_k=top_k, return_details=True)
+    chroma_ids = [r.chunk_id for r in result.results]
+    pg_chunks = await _kb_repo(request).get_chunks_by_chroma_ids(chroma_ids)
+    doc_ids = list({c.document_id for c in pg_chunks})
+    name_map = {}
+    if doc_ids:
+        async with request.app.state.session_factory() as db:
+            res = await db.execute(_select(KbDocument.id, KbDocument.filename).where(KbDocument.id.in_(doc_ids)))
+            name_map = {row[0]: row[1] for row in res.all()}
+    return [
+        {"chunk_id": str(c.id), "content": c.content or "",
+         "source": name_map.get(c.document_id, ""), "page": (c.chunk_metadata or {}).get("page")}
+        for c in pg_chunks
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +560,9 @@ def _graph_repo(request: Request):
     from nanoresearch.storage.repositories.graph_repo import GraphRepository
     return GraphRepository(request.app.state.session_factory)
 
+
+_CONCEPT_PREFIX = "concept::"
+_OVERVIEW_KEY = "__overview__"
 
 
 
@@ -822,4 +842,77 @@ async def generate_entity_article(kb_id: str, name: str, request: Request, uid: 
     markdown, citations = await generate_article(settings, name, facts, evidence)
     model = getattr(getattr(settings, "llm", None), "model", None)
     row = await repo.upsert_article(kb_uuid, name, markdown, citations, evidence_signature(evidence), model)
+    return {"article": _article_dict(row, stale=False)}
+
+
+# ---------------------------------------------------------------------------
+# Concept article endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/api/knowledge/{kb_id}/graph/concepts")
+async def list_graph_concepts(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    rows = await _graph_repo(request).list_articles_by_prefix(uuid.UUID(kb_id), _CONCEPT_PREFIX)
+    return {"concepts": rows}
+
+
+@router.get("/api/knowledge/{kb_id}/graph/concept/article")
+async def get_concept_article(kb_id: str, topic: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    from nanoresearch.storage.repositories.graph_repo import _normalize
+    key = _CONCEPT_PREFIX + _normalize(topic)
+    row = await _graph_repo(request).get_article(uuid.UUID(kb_id), key)
+    if row is None:
+        return {"article": None}
+    return {"article": _article_dict(row, stale=False)}   # 概念 stale 判定成本高(要重检索),MVP 不在 GET 判
+
+
+@router.post("/api/knowledge/{kb_id}/graph/concept/article")
+async def generate_concept_article_ep(kb_id: str, topic: str, request: Request, uid: str = Depends(get_current_user)):
+    kb = await _get_kb_or_404(kb_id, uid, request)
+    from nanoresearch.storage.repositories.graph_repo import _normalize
+    from nanoresearch.rag.wiki.article_generator import generate_concept_article, evidence_signature
+    settings = await _resolve_rag_settings(uid, request)
+    evidence = await _retrieve_concept_evidence(request, kb, settings, topic)
+    markdown, citations = await generate_concept_article(settings, topic, evidence)
+    model = getattr(getattr(settings, "llm", None), "model", None)
+    key = _CONCEPT_PREFIX + _normalize(topic)
+    row = await _graph_repo(request).upsert_article(uuid.UUID(kb_id), key, markdown, citations, evidence_signature(evidence), model)
+    return {"article": _article_dict(row, stale=False)}
+
+
+# ---------------------------------------------------------------------------
+# Overview article endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/api/knowledge/{kb_id}/graph/overview/article")
+async def get_overview_article(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    row = await _graph_repo(request).get_article(uuid.UUID(kb_id), _OVERVIEW_KEY)
+    if row is None:
+        return {"article": None}
+    from nanoresearch.rag.wiki.article_generator import overview_signature
+    stats = await _graph_repo(request).get_stats(uuid.UUID(kb_id))
+    top = stats.get("top_entities", [])
+    facts = []
+    for e in top[:10]:
+        facts.extend(await _graph_repo(request).get_entity_facts(uuid.UUID(kb_id), e["name"]))
+    stale = overview_signature(top, facts) != row.evidence_hash
+    return {"article": _article_dict(row, stale)}
+
+
+@router.post("/api/knowledge/{kb_id}/graph/overview/article")
+async def generate_overview_article_ep(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    from nanoresearch.rag.wiki.article_generator import generate_overview_article, overview_signature
+    repo = _graph_repo(request); kb_uuid = uuid.UUID(kb_id)
+    stats = await repo.get_stats(kb_uuid)
+    top = stats.get("top_entities", [])
+    facts = []
+    for e in top[:10]:
+        facts.extend(await repo.get_entity_facts(kb_uuid, e["name"]))
+    settings = await _resolve_rag_settings(uid, request)
+    markdown, citations = await generate_overview_article(settings, top, facts)
+    model = getattr(getattr(settings, "llm", None), "model", None)
+    row = await repo.upsert_article(kb_uuid, _OVERVIEW_KEY, markdown, citations, overview_signature(top, facts), model)
     return {"article": _article_dict(row, stale=False)}
