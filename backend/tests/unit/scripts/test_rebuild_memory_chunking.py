@@ -107,3 +107,40 @@ def test_rebuild_uid_converges_contradictions_via_real_diff_apply(tmp_path):
         assert "偏好 X" not in texts        # converged: earlier contradictory fact removed
 
     run(_())
+
+
+def test_rebuild_uid_limit_processes_only_earliest():
+    seen = []
+
+    async def consolidate_fn(msgs, uid, cid, s, e):
+        seen.append(cid)
+
+    async def _():
+        conversations = [
+            ("cB", 2, [{"role": "user", "content": "b"}]),
+            ("cA", 1, [{"role": "user", "content": "a"}]),
+            ("cC", 3, [{"role": "user", "content": "c"}]),
+        ]
+        n = await rebuild_uid("u1", conversations, consolidate_fn, limit=1)
+        assert seen == ["cA"]   # 试水: 只处理最早的一个对话
+        assert n == 1
+
+    run(_())
+
+
+def test_rebuild_uid_dry_run_does_not_write():
+    called = []
+
+    async def consolidate_fn(msgs, uid, cid, s, e):
+        called.append(cid)
+
+    async def _():
+        conversations = [
+            ("cA", 1, [{"role": "user", "content": "a"}, {"role": "assistant", "content": "A"},
+                       {"role": "user", "content": "b"}]),
+        ]
+        n = await rebuild_uid("u1", conversations, consolidate_fn, dry_run=True)
+        assert called == []   # 干跑不写
+        assert n == 2         # 仍报告 chunk 数(2 个 user-turn 段)
+
+    run(_())

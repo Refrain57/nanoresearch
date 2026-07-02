@@ -30,30 +30,52 @@ def plan_rebuild_chunks(messages: list[dict]) -> list[tuple[int, int]]:
 
 
 async def rebuild_uid(uid: str, conversations: list[tuple[str, Any, list[dict]]],
-                      consolidate_fn: ConsolidateFn) -> int:
+                      consolidate_fn: ConsolidateFn, limit: int | None = None,
+                      dry_run: bool = False) -> int:
     """Rebuild one user's derived memory.
 
     `conversations` = [(conversation_id, created_at, messages)]. Processed in chronological order
     (by created_at) against the SHARED fact store so later conversations override earlier
-    contradictory facts (convergence, C1). Returns the number of chunks consolidated.
+    contradictory facts (convergence, C1). Returns the number of chunks (would-be) consolidated.
+
+    `limit`: process at most this many conversations (试水: limit=1 → 仅最早一个对话).
+    `dry_run`: don't call consolidate_fn — just log the plan (conversations + chunk counts).
     """
+    ordered = sorted(conversations, key=lambda c: c[1])
+    if limit is not None:
+        ordered = ordered[:limit]
     n = 0
-    for conv_id, _created, messages in sorted(conversations, key=lambda c: c[1]):
-        for start, end in plan_rebuild_chunks(messages):
+    for conv_id, _created, messages in ordered:
+        chunks = plan_rebuild_chunks(messages)
+        if dry_run:
+            logger.info("[dry-run] uid={} conv={} chunks={} msgs={}",
+                        uid, conv_id, len(chunks), len(messages))
+            n += len(chunks)
+            continue
+        for start, end in chunks:
             await consolidate_fn(messages[start:end], uid, conv_id, start, end)
             n += 1
     return n
 
 
-async def rebuild_from_pg(uid: str, repo: Any, consolidate_fn: ConsolidateFn) -> int:
-    """Load a uid's conversations from PG (via ConversationRepository) and rebuild them serially."""
+async def rebuild_from_pg(uid: str, repo: Any, consolidate_fn: ConsolidateFn,
+                          limit: int | None = None, dry_run: bool = False,
+                          conversation_id: str | None = None) -> int:
+    """Load a uid's conversations from PG (via ConversationRepository) and rebuild them serially.
+
+    `conversation_id`: if given, only that one conversation (试水: 指定某个对话).
+    `limit` / `dry_run`: forwarded to rebuild_uid.
+    """
     convs = await repo.list_conversations(uid, limit=100_000)
     conversations: list[tuple[str, Any, list[dict]]] = []
     for c in convs:
+        if conversation_id and str(c.id) != conversation_id:
+            continue
         msgs = await repo.get_messages(c.id)
         conversations.append((str(c.id), c.created_at, [m.content for m in msgs]))
-    logger.info("rebuild_from_pg: uid={} conversations={}", uid, len(conversations))
-    return await rebuild_uid(uid, conversations, consolidate_fn)
+    logger.info("rebuild_from_pg: uid={} conversations={} (limit={}, dry_run={})",
+                uid, len(conversations), limit, dry_run)
+    return await rebuild_uid(uid, conversations, consolidate_fn, limit=limit, dry_run=dry_run)
 
 
 def main() -> None:  # pragma: no cover — manual bulk run (needs live LLM + DB + config)
@@ -68,6 +90,12 @@ def main() -> None:  # pragma: no cover — manual bulk run (needs live LLM + DB
 
     parser = argparse.ArgumentParser(description="Rebuild memory layers from the PG log.")
     parser.add_argument("--uid", action="append", dest="uids", help="uid(s) to rebuild")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="max conversations per uid (试水: --limit 1)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只打印计划,不写入")
+    parser.add_argument("--conversation-id", dest="conversation_id", default=None,
+                        help="只重建指定 conversation")
     parser.add_argument("--config", default=None, help="config path")
     args = parser.parse_args()
 
@@ -96,8 +124,9 @@ def main() -> None:  # pragma: no cover — manual bulk run (needs live LLM + DB
                 return await store.consolidate(msgs, provider, model, uid=_uid,
                                                conversation_id=cid, turn_start=s, turn_end=e)
 
-            count = await rebuild_from_pg(uid, repo, consolidate_fn)
-            logger.info("rebuilt uid={}: {} chunks", uid, count)
+            count = await rebuild_from_pg(uid, repo, consolidate_fn, limit=args.limit,
+                                          dry_run=args.dry_run, conversation_id=args.conversation_id)
+            logger.info("rebuilt uid={}: {} chunks (dry_run={})", uid, count, args.dry_run)
 
     asyncio.run(_run())
 
