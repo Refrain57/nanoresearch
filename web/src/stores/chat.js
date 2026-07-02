@@ -10,6 +10,14 @@ export const useChatStore = defineStore('chat', () => {
   const streaming = ref(false)
   const streamingText = ref('')
 
+  const oldestSeq = ref(null)
+  const hasMore = ref(false)
+  const loadingOlder = ref(false)
+  // 内部：已加载的原始（映射但未合并）消息，升序；以及当前 messages 中「合并派生」部分的长度
+  let _rawLoaded = []
+  let _mergedLen = 0
+  const PAGE = 40
+
   async function fetchConversations() {
     conversations.value = await listConversations()
   }
@@ -19,61 +27,49 @@ export const useChatStore = defineStore('chat', () => {
     streamingText.value = ''
     currentConvId.value = id
     messages.value = []
+    _rawLoaded = []
+    _mergedLen = 0
+    oldestSeq.value = null
+    hasMore.value = false
+    loadingOlder.value = false
     try {
-      const raw = await getMessages(id, { limit: 100 })
-      // Guard against race: if user switched again while fetching, discard stale result
-      if (currentConvId.value !== id) {
-        console.warn('[chat] selectConversation stale result discarded: wanted', id, 'but now on', currentConvId.value)
-        return
-      }
-      console.log('[chat] selectConversation loaded', raw.length, 'msgs for', id,
-        raw.map(m => ({ role: m.role, contentType: typeof m.content, hasToolCalls: !!(m.content?.tool_calls?.length) }))
-      )
-      const mapped = raw
-        // Defense-in-depth: the API already drops internal orchestration turns
-        // (subagent results / continuation instruction); skip any that slip through.
-        .filter(m => !(m.content && typeof m.content === 'object' && m.content.internal))
-        .map(m => {
-        const stored = m.content
-        const text = typeof stored === 'string'
-          ? stored
-          : (stored?.text ?? stored?.content ?? '')
-        const tool_calls = m.tool_calls ?? stored?.tool_calls
-        const citations = typeof stored === 'string' ? null : (stored?._citations ?? null)
-        return {
-          ...m,
-          content: { text },
-          tool_calls,
-          toolCalls: _normalizeToolCalls(tool_calls),
-          citations: citations?.length ? citations : undefined,
-        }
-      })
-
-      // Merge tool-call-only assistant messages into the following text assistant message.
-      // DB stores them as separate messages (tool_calls message then text message), but
-      // the streaming path combines them into one — this makes loaded history match.
-      const merged = []
-      let pendingTc = null
-      let pendingCitations = null
-      for (const m of mapped) {
-        if (m.role === 'assistant' && !m.content.text && m.toolCalls?.length) {
-          pendingTc = m.toolCalls // hold, skip this message
-          pendingCitations = m.citations ?? null
-        } else if (m.role === 'assistant' && m.content.text) {
-          merged.push(pendingTc
-            ? { ...m, toolCalls: pendingTc, citations: m.citations ?? pendingCitations ?? undefined }
-            : m)
-          pendingTc = null
-          pendingCitations = null
-        } else {
-          merged.push(m)
-          // non-assistant messages (tool results etc.) don't reset pendingTc
-        }
-      }
+      const resp = await getMessages(id, { limit: PAGE })
+      // Guard against race: user switched conversations while fetching
+      if (currentConvId.value !== id) return
+      _rawLoaded = _toMapped(resp.messages)
+      const merged = _mergeToolCallMessages(_rawLoaded)
+      _mergedLen = merged.length
       messages.value = merged
+      oldestSeq.value = _rawLoaded.length ? _rawLoaded[0].seq : null
+      hasMore.value = !!resp.has_more
     } catch (e) {
       console.error('[chat] selectConversation failed:', e)
       if (currentConvId.value === id) messages.value = []
+    }
+  }
+
+  async function loadOlder() {
+    if (!currentConvId.value || !hasMore.value || loadingOlder.value || oldestSeq.value == null) return
+    const id = currentConvId.value
+    loadingOlder.value = true
+    try {
+      const resp = await getMessages(id, { limit: PAGE, before_seq: oldestSeq.value })
+      if (currentConvId.value !== id) return
+      const olderMapped = _toMapped(resp.messages)
+      if (olderMapped.length) {
+        _rawLoaded = [...olderMapped, ..._rawLoaded]
+        const remerged = _mergeToolCallMessages(_rawLoaded)
+        // 保留流式/重连追加的尾部消息（不属于 _rawLoaded 合并派生的部分）
+        const tail = messages.value.slice(_mergedLen)
+        messages.value = [...remerged, ...tail]
+        _mergedLen = remerged.length
+        oldestSeq.value = _rawLoaded[0].seq
+      }
+      hasMore.value = !!resp.has_more
+    } catch (e) {
+      console.error('[chat] loadOlder failed:', e)
+    } finally {
+      loadingOlder.value = false
     }
   }
 
@@ -121,7 +117,8 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     conversations, messages, currentConvId, streaming, streamingText,
-    fetchConversations, selectConversation, newConversation, removeConversation,
+    oldestSeq, hasMore, loadingOlder,
+    fetchConversations, selectConversation, loadOlder, newConversation, removeConversation,
     sendMessage, appendDelta, finalizeStream
   }
 })
@@ -134,4 +131,49 @@ function _normalizeToolCalls(tc) {
     output_summary: '',
     status: 'success',
   }))
+}
+
+function _mapRawMessage(m) {
+  const stored = m.content
+  const text = typeof stored === 'string'
+    ? stored
+    : (stored?.text ?? stored?.content ?? '')
+  const tool_calls = m.tool_calls ?? stored?.tool_calls
+  const citations = typeof stored === 'string' ? null : (stored?._citations ?? null)
+  return {
+    ...m,
+    content: { text },
+    tool_calls,
+    toolCalls: _normalizeToolCalls(tool_calls),
+    citations: citations?.length ? citations : undefined,
+  }
+}
+
+// 后端已过滤 internal，这里 defense-in-depth 再过滤一次；映射为渲染形状（未合并）。
+function _toMapped(apiMessages) {
+  return (apiMessages || [])
+    .filter(m => !(m.content && typeof m.content === 'object' && m.content.internal))
+    .map(_mapRawMessage)
+}
+
+// 把「仅 tool_calls 的 assistant 消息」并入紧随其后的文本 assistant 消息。
+function _mergeToolCallMessages(mapped) {
+  const merged = []
+  let pendingTc = null
+  let pendingCitations = null
+  for (const m of mapped) {
+    if (m.role === 'assistant' && !m.content.text && m.toolCalls?.length) {
+      pendingTc = m.toolCalls
+      pendingCitations = m.citations ?? null
+    } else if (m.role === 'assistant' && m.content.text) {
+      merged.push(pendingTc
+        ? { ...m, toolCalls: pendingTc, citations: m.citations ?? pendingCitations ?? undefined }
+        : m)
+      pendingTc = null
+      pendingCitations = null
+    } else {
+      merged.push(m)
+    }
+  }
+  return merged
 }
