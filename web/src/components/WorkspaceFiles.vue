@@ -32,38 +32,83 @@
           >
             <folder-outlined class="wf-icon wf-icon-dir" />
             <span class="wf-name">{{ entry.name }}</span>
+            <a-popconfirm
+              :title="`删除目录 ${entry.name}？将递归删除其全部内容。`"
+              ok-text="删除"
+              cancel-text="取消"
+              ok-type="danger"
+              placement="left"
+              @confirm="deleteEntry(entry)"
+            >
+              <delete-outlined class="wf-del" @click.stop />
+            </a-popconfirm>
             <right-outlined class="wf-arrow" />
           </div>
 
           <!-- 文件 -->
-          <a
+          <div
             v-for="entry in files"
             :key="entry.path"
-            :href="`/api/workspace/files/${entry.path}`"
-            target="_blank"
             class="wf-row wf-file"
+            @click="openFile(entry)"
           >
             <file-outlined class="wf-icon" />
             <span class="wf-name">{{ entry.name }}</span>
             <span class="wf-size">{{ formatSize(entry.size) }}</span>
-            <download-outlined class="wf-dl" />
-          </a>
+            <download-outlined class="wf-dl" @click.stop="downloadFile(entry)" />
+            <a-popconfirm
+              :title="`删除文件 ${entry.name}？`"
+              ok-text="删除"
+              cancel-text="取消"
+              ok-type="danger"
+              placement="left"
+              @confirm="deleteEntry(entry)"
+            >
+              <delete-outlined class="wf-del" @click.stop />
+            </a-popconfirm>
+          </div>
         </div>
       </div>
     </a-spin>
+
+    <!-- 文件预览浮窗 -->
+    <a-modal
+      v-model:open="previewOpen"
+      :title="previewName"
+      :footer="null"
+      width="80%"
+      wrap-class-name="wf-preview-modal"
+      @cancel="closePreview"
+    >
+      <a-spin :spinning="previewLoading">
+        <div class="wf-preview-body">
+          <img v-if="previewType === 'image' && previewUrl" :src="previewUrl" class="wf-preview-img" />
+          <VuePdfEmbed v-else-if="previewType === 'pdf' && previewUrl" :source="previewUrl" class="wf-preview-pdf" />
+          <pre v-else-if="previewType === 'text'" class="wf-preview-text">{{ previewText }}</pre>
+        </div>
+      </a-spin>
+      <div class="wf-preview-actions">
+        <a-button size="small" @click="downloadPreview">
+          <download-outlined /> 下载
+        </a-button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { Empty } from 'ant-design-vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { Empty, message } from 'ant-design-vue'
 import {
   FolderOutlined, FolderOpenOutlined, FileOutlined,
   DownloadOutlined, ReloadOutlined, RightOutlined, LeftOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons-vue'
-import { useUserStore } from '@/stores/user'
+import VuePdfEmbed from 'vue-pdf-embed'
+import 'vue-pdf-embed/dist/styles/textLayer.css'
+import 'vue-pdf-embed/dist/styles/annotationLayer.css'
+import { listWorkspaceFiles, deleteWorkspaceFile, fetchWorkspaceFileBlob } from '@/apis/workspace'
 
-const userStore = useUserStore()
 const loading = ref(false)
 const entries = ref([])
 const currentDir = ref('')
@@ -71,14 +116,30 @@ const currentDir = ref('')
 const dirs = computed(() => entries.value.filter(e => e.is_dir))
 const files = computed(() => entries.value.filter(e => !e.is_dir))
 
+// ── 预览状态 ──
+const previewOpen = ref(false)
+const previewLoading = ref(false)
+const previewType = ref('')   // 'image' | 'pdf' | 'text'
+const previewName = ref('')
+const previewUrl = ref('')     // 图片/PDF 的 object URL
+const previewText = ref('')
+let previewBlob = null         // 供浮窗内「下载」复用
+let openSeq = 0                // 递增序号，用于丢弃过期的预览请求
+
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']
+const TEXT_EXTS = ['md', 'txt', 'json', 'log', 'csv', 'yaml', 'yml', 'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'css', 'html', 'xml', 'sh', 'toml', 'ini']
+
+function extOf(name) {
+  const i = name.lastIndexOf('.')
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : ''
+}
+
 async function fetchDir(dir = '') {
   loading.value = true
   try {
-    const params = dir ? `?dir=${encodeURIComponent(dir)}` : ''
-    const res = await fetch(`/api/workspace/files${params}`, {
-      headers: userStore.getAuthHeaders(),
-    })
-    if (res.ok) entries.value = await res.json()
+    entries.value = await listWorkspaceFiles(dir)
+  } catch (e) {
+    message.error('加载工作区失败：' + (e.message || ''))
   } finally {
     loading.value = false
   }
@@ -107,7 +168,98 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)}M`
 }
 
+// ── 预览 / 下载 / 删除 ──
+function revokePreviewUrl() {
+  if (previewUrl.value) {
+    URL.revokeObjectURL(previewUrl.value)
+    previewUrl.value = ''
+  }
+}
+
+function closePreview() {
+  previewOpen.value = false
+  openSeq++
+  revokePreviewUrl()
+  previewText.value = ''
+  previewBlob = null
+}
+
+async function openFile(entry) {
+  const ext = extOf(entry.name)
+  const kind = IMAGE_EXTS.includes(ext) ? 'image'
+    : ext === 'pdf' ? 'pdf'
+    : TEXT_EXTS.includes(ext) ? 'text'
+    : 'other'
+
+  if (kind === 'other') {
+    downloadFile(entry)
+    return
+  }
+
+  const mySeq = ++openSeq
+  revokePreviewUrl()
+  previewText.value = ''
+  previewBlob = null
+  previewName.value = entry.name
+  previewType.value = kind
+  previewOpen.value = true
+  previewLoading.value = true
+  try {
+    const blob = await fetchWorkspaceFileBlob(entry.path)
+    if (mySeq !== openSeq) return
+    if (kind === 'text') {
+      const text = await blob.text()
+      if (mySeq !== openSeq) return
+      previewText.value = text
+    } else {
+      previewUrl.value = URL.createObjectURL(blob)
+    }
+    previewBlob = blob
+  } catch (e) {
+    if (mySeq !== openSeq) return
+    message.error(`预览 ${entry.name} 失败：` + (e.message || ''))
+    closePreview()
+  } finally {
+    if (mySeq === openSeq) previewLoading.value = false
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+async function downloadFile(entry) {
+  try {
+    const blob = await fetchWorkspaceFileBlob(entry.path)
+    triggerBlobDownload(blob, entry.name)
+  } catch (e) {
+    message.error(`下载 ${entry.name} 失败：` + (e.message || ''))
+  }
+}
+
+function downloadPreview() {
+  if (previewBlob) triggerBlobDownload(previewBlob, previewName.value)
+}
+
+async function deleteEntry(entry) {
+  try {
+    await deleteWorkspaceFile(entry.path)
+    message.success(`已删除 ${entry.name}`)
+    refresh()
+  } catch (e) {
+    message.error(`删除 ${entry.name} 失败：` + (e.message || ''))
+  }
+}
+
 onMounted(() => fetchDir())
+onBeforeUnmount(revokePreviewUrl)
 </script>
 
 <style scoped>
@@ -160,4 +312,40 @@ onMounted(() => fetchDir())
 .wf-arrow { font-size: 10px; color: var(--nr-ink-3); flex-shrink: 0; }
 .wf-dl { font-size: 12px; flex-shrink: 0; opacity: 0; transition: opacity 0.12s; }
 .wf-file:hover .wf-dl { opacity: 0.6; }
+
+.wf-del {
+  font-size: 12px;
+  flex-shrink: 0;
+  opacity: 0;
+  color: var(--nr-ink-3);
+  transition: opacity 0.12s, color 0.12s;
+}
+.wf-row:hover .wf-del { opacity: 0.6; }
+.wf-del:hover { color: #cf1322; opacity: 1; }
+
+.wf-preview-body {
+  max-height: 70vh;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+}
+.wf-preview-img { max-width: 100%; height: auto; }
+.wf-preview-pdf { width: 100%; }
+.wf-preview-text {
+  width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--nr-canvas, #faf7f2);
+  color: var(--nr-ink, #2b2b2b);
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wf-preview-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
 </style>
