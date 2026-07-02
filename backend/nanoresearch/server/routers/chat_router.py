@@ -133,15 +133,16 @@ async def get_conversation(
 async def get_messages(
     conv_id: str,
     request: Request,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = 40,
+    before_seq: int | None = None,
     uid: str = Depends(get_current_user),
 ):
     conv = await _get_conv_or_404(conv_id, uid, request)
     factory = request.app.state.session_factory
     repo = ConversationRepository(factory)
-    msgs = await repo.get_messages_paged(conv.id, limit=limit, offset=offset)
-    return [
+    rows = await repo.get_messages_paged(conv.id, limit=limit, before_seq=before_seq)
+    has_more = len(rows) == limit  # 原始行数判定，先于 internal 过滤
+    messages = [
         {
             "id": str(m.id),
             "role": m.role,
@@ -149,11 +150,11 @@ async def get_messages(
             "seq": m.seq,
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }
-        for m in msgs
+        for m in rows
         # Hide internal orchestration turns (subagent results + continuation instruction).
-        # They stay in the session for the LLM; they must not render as user bubbles.
         if not (isinstance(m.content, dict) and m.content.get("internal"))
     ]
+    return {"messages": messages, "has_more": has_more}
 
 
 @router.delete("/api/conversations/{conv_id}", status_code=204)

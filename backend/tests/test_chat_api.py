@@ -174,28 +174,66 @@ def test_get_messages_empty(app, auth_headers):
         conv_id = client.post("/api/conversations", json={}, headers=auth_headers).json()["id"]
         resp = client.get(f"/api/conversations/{conv_id}/messages", headers=auth_headers)
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.json() == {"messages": [], "has_more": False}
 
 
-def test_get_messages_pagination(app, auth_headers):
-    async def seed(conv_id_str):
-        from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
-        import uuid
+def _seed_msgs(conv_id_str, msgs):
+    import uuid
+    from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+
+    async def _():
         repo = ConversationRepository(make_factory())
-        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg{i}"} for i in range(5)]
         await repo.replace_messages(uuid.UUID(conv_id_str), msgs)
+    run(_())
 
+
+def test_get_messages_recent_first(app, auth_headers):
     with TestClient(app) as client:
         conv_id = client.post("/api/conversations", json={}, headers=auth_headers).json()["id"]
-        run(seed(conv_id))
-        all_resp = client.get(f"/api/conversations/{conv_id}/messages", headers=auth_headers)
-        paged_resp = client.get(
-            f"/api/conversations/{conv_id}/messages?limit=2&offset=1", headers=auth_headers
+        _seed_msgs(conv_id, [{"role": "user", "content": f"m{i}"} for i in range(5)])
+        resp = client.get(f"/api/conversations/{conv_id}/messages?limit=2", headers=auth_headers)
+    body = resp.json()
+    assert [m["seq"] for m in body["messages"]] == [3, 4]
+    assert body["has_more"] is True
+
+
+def test_get_messages_before_seq(app, auth_headers):
+    with TestClient(app) as client:
+        conv_id = client.post("/api/conversations", json={}, headers=auth_headers).json()["id"]
+        _seed_msgs(conv_id, [{"role": "user", "content": f"m{i}"} for i in range(5)])
+        resp = client.get(
+            f"/api/conversations/{conv_id}/messages?limit=2&before_seq=3", headers=auth_headers
         )
-    assert len(all_resp.json()) == 5
-    paged = paged_resp.json()
-    assert len(paged) == 2
-    assert paged[0]["seq"] == 1
+    body = resp.json()
+    assert [m["seq"] for m in body["messages"]] == [1, 2]
+    assert body["has_more"] is True
+
+
+def test_get_messages_has_more_false(app, auth_headers):
+    with TestClient(app) as client:
+        conv_id = client.post("/api/conversations", json={}, headers=auth_headers).json()["id"]
+        _seed_msgs(conv_id, [{"role": "user", "content": f"m{i}"} for i in range(5)])
+        resp = client.get(f"/api/conversations/{conv_id}/messages?limit=10", headers=auth_headers)
+    body = resp.json()
+    assert len(body["messages"]) == 5
+    assert body["has_more"] is False
+
+
+def test_get_messages_has_more_counts_internal(app, auth_headers):
+    """has_more 用原始行数判定（internal 过滤之前）。"""
+    with TestClient(app) as client:
+        conv_id = client.post("/api/conversations", json={}, headers=auth_headers).json()["id"]
+        _seed_msgs(conv_id, [
+            {"role": "user", "content": "m0"},
+            {"role": "assistant", "content": "m1"},
+            {"role": "assistant", "content": "internal", "internal": True},
+            {"role": "user", "content": "m3"},
+        ])
+        # 最近 2 条原始行 = seq[2(internal), 3]；过滤后只剩 seq3，但 has_more 仍为 True
+        resp = client.get(f"/api/conversations/{conv_id}/messages?limit=2", headers=auth_headers)
+    body = resp.json()
+    assert [m["seq"] for m in body["messages"]] == [3]
+    assert body["has_more"] is True
 
 
 # ── Run lifecycle ─────────────────────────────────────────────────────────────
