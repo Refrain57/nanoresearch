@@ -11,7 +11,9 @@ from nanoresearch.server import clawhub
 from nanoresearch.server.middleware.auth import get_current_user
 from nanoresearch.server.routers.workspace_paths import safe_resolve, user_workspace
 
-SLUG_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# clawhub slugs are usually a single segment ("toby-pptx"); scoped "@owner/name" also allowed.
+# Leading char must be alphanumeric, which rejects "--evil" (flag injection) and "../x" (traversal).
+SLUG_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 
 router = APIRouter()
 

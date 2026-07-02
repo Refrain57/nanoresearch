@@ -33,16 +33,33 @@
       <div class="section-header">
         <h3>系统可用 Skills</h3>
         <span class="skill-count">{{ agentStore.skills.length }} 个</span>
+        <a-button size="small" style="margin-left: auto" @click="marketOpen = true">
+          <plus-outlined /> 从市场安装
+        </a-button>
       </div>
       <div class="skills-grid">
         <div v-for="skill in agentStore.skills" :key="skill.name" class="skill-card">
           <div class="skill-name">{{ skill.name }}</div>
           <div class="skill-desc">{{ skill.description }}</div>
-          <a-tag size="small" :color="skill.source === 'builtin' ? 'blue' : 'green'">
-            {{ skill.source === 'builtin' ? '内置' : '自定义' }}
-          </a-tag>
+          <div class="skill-card-footer">
+            <a-tag size="small" :color="skill.source === 'builtin' ? 'blue' : 'green'">
+              {{ skill.source === 'builtin' ? '内置' : '自定义' }}
+            </a-tag>
+            <a-popconfirm
+              v-if="skill.source === 'workspace'"
+              title="从工作区卸载该 skill？使用它的 Agent 将失去该能力。"
+              @confirm="uninstallPoolSkill(skill.name)"
+            >
+              <a-button size="small" danger type="link">卸载</a-button>
+            </a-popconfirm>
+          </div>
         </div>
       </div>
+
+      <!-- 从市场安装 Modal -->
+      <a-modal v-model:open="marketOpen" title="从 ClawHub 技能市场安装" :footer="null" width="640">
+        <skill-market @installed="onMarketInstalled" />
+      </a-modal>
     </div>
 
     <!-- 新建 Agent Modal（两步：基本信息 + 选择 Skill） -->
@@ -99,6 +116,8 @@ import { message } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, CheckOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
 import AgentCard from '@/components/AgentCard.vue'
+import SkillMarket from '@/components/SkillMarket.vue'
+import { uninstallSkill } from '@/apis/skills'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
@@ -110,6 +129,7 @@ const settingsStore = useSettingsStore()
 
 const createOpen = ref(false)
 const creating = ref(false)
+const marketOpen = ref(false)
 const createForm = reactive({
   name: '', description: '', default_model: '', max_iterations: 40, selectedSkills: []
 })
@@ -129,6 +149,20 @@ function toggleCreateSkill(name) {
   const idx = createForm.selectedSkills.indexOf(name)
   if (idx === -1) createForm.selectedSkills.push(name)
   else createForm.selectedSkills.splice(idx, 1)
+}
+
+async function onMarketInstalled() {
+  await agentStore.fetchSkills()
+}
+
+async function uninstallPoolSkill(name) {
+  try {
+    await uninstallSkill(name)
+    await agentStore.fetchSkills()
+    message.success(`已从工作区移除 ${name}`)
+  } catch (e) {
+    message.error(e.message || '移除失败')
+  }
 }
 
 async function handleChat(agent) {
@@ -201,6 +235,7 @@ async function handleCreate() {
 .skill-card { background: var(--nr-rail); border: 1px solid var(--nr-border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
 .skill-name { font-size: 13px; font-weight: 600; color: var(--nr-clay); }
 .skill-desc { font-size: 12px; color: var(--nr-ink-2); line-height: 1.5; flex: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.skill-card-footer { display: flex; align-items: center; justify-content: space-between; }
 
 .skill-check-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
 .skill-check-item {

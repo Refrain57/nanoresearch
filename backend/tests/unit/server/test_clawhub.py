@@ -21,13 +21,15 @@ async def test_search_maps_fields(monkeypatch):
         return httpx.Response(200, json={"results": [
             {"slug": "@bob/web-scraper", "displayName": "Web Scraper",
              "summary": "scrape sites", "version": "1.2.0",
-             "ownerHandle": "bob", "score": 0.9},
+             "ownerHandle": "bob", "score": 0.9,
+             "downloads": 486, "updatedAt": 1778492781450},
         ]})
     monkeypatch.setattr(clawhub, "_client", lambda: _mock_client(handler))
     items = await clawhub.search("scrape", limit=5)
     assert items == [{
         "slug": "@bob/web-scraper", "name": "Web Scraper", "summary": "scrape sites",
         "version": "1.2.0", "owner": "bob", "score": 0.9,
+        "downloads": 486, "updated_at": 1778492781450,
     }]
 
 
