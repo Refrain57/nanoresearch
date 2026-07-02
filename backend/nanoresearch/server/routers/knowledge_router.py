@@ -409,7 +409,7 @@ async def test_query(
     settings = _rag_settings(request)
 
     try:
-        hybrid = _build_hybrid_search(request, kb, settings, body.top_k)
+        hybrid = _build_hybrid_search(request, kb, settings, body.top_k, body.enable_dense, body.enable_sparse)
 
         result = await hybrid.async_search(body.query, top_k=body.top_k, return_details=True)
 
@@ -442,7 +442,7 @@ async def test_query(
 # RAG retrieval helpers
 # ---------------------------------------------------------------------------
 
-def _build_hybrid_search(request: Request, kb, settings, top_k: int):
+def _build_hybrid_search(request: Request, kb, settings, top_k: int, enable_dense: bool = True, enable_sparse: bool = True):
     from nanoresearch.rag.core.query_engine.dense_retriever import DenseRetriever
     from nanoresearch.rag.core.query_engine.sparse_retriever import SparseRetriever
     from nanoresearch.rag.core.query_engine.query_processor import QueryProcessor
@@ -461,7 +461,7 @@ def _build_hybrid_search(request: Request, kb, settings, top_k: int):
     return HybridSearch(
         settings=settings, query_processor=QueryProcessor(),
         dense_retriever=dense, sparse_retriever=sparse, fusion=RRFFusion(),
-        config=HybridSearchConfig(fusion_top_k=top_k, enable_dense=True, enable_sparse=True,
+        config=HybridSearchConfig(fusion_top_k=top_k, enable_dense=enable_dense, enable_sparse=enable_sparse,
                                   enable_graph_expansion=kb.enable_graph_expansion),
         session_factory=request.app.state.session_factory, kb_id=kb.id,
     )
