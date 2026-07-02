@@ -185,9 +185,23 @@ class SearchOrchestrator:
         # Domains with count >= 3 are skipped on subsequent fetches.
         self._failed_domains: dict[str, int] = {}
 
-        # Initialize reranker if enabled
+        # Reranker is heavy: constructing it loads a Cross-Encoder model into memory (~6s).
+        # A SearchOrchestrator is built per agent run, but the vast majority of runs (plain
+        # chat, weather, time, …) never invoke research/rerank — so loading here would tax
+        # EVERY message. Defer to first actual rerank via _ensure_reranker(); the process-level
+        # model cache in CrossEncoderReranker then makes the first real load per worker the only one.
         self._reranker = None
-        if config.rerank_enabled and config.rerank_provider != "none":
+        self._reranker_ready = False
+        self._rerank_wanted = bool(
+            config.rerank_enabled and config.rerank_provider != "none"
+        )
+
+    def _ensure_reranker(self) -> None:
+        """Lazily construct the reranker on first use (see __init__)."""
+        if self._reranker_ready:
+            return
+        self._reranker_ready = True
+        if self._rerank_wanted:
             self._init_reranker()
 
     def _init_reranker(self) -> None:
@@ -250,8 +264,8 @@ class SearchOrchestrator:
 
         rerank_details: list[dict] = []
 
-        # Apply reranking if enabled
-        if self._reranker and deduped:
+        # Apply reranking if enabled (reranker is loaded lazily on first use here)
+        if self._rerank_wanted and deduped:
             deduped, rerank_details = self._rerank_results(plan.topic, deduped)
 
         return deduped, rerank_details
@@ -268,6 +282,11 @@ class SearchOrchestrator:
             rerank_details is a list of {"url": ..., "original_score": ..., "rerank_score": ...}
         """
         rerank_details: list[dict] = []
+
+        # Lazy-load the reranker on first real rerank; if it can't be built, skip reranking.
+        self._ensure_reranker()
+        if self._reranker is None:
+            return results, rerank_details
 
         try:
             # Convert SearchResult to dict format expected by reranker

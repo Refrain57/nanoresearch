@@ -8,11 +8,19 @@ and API-based endpoints.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from nanoresearch.rag.libs.reranker.base_reranker import BaseReranker
 
 logger = logging.getLogger(__name__)
+
+# Process-level cache of loaded Cross-Encoder models, keyed by model name. Loading a model
+# (e.g. BAAI/bge-reranker-v2-m3) takes several seconds and hundreds of MB; a fresh reranker is
+# otherwise built per research run, so without this cache each run would reload the same model.
+# The lock dedupes concurrent first-loads (rerank runs in a thread-pool executor).
+_MODEL_CACHE: Dict[str, Any] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
 
 
 class CrossEncoderRerankError(RuntimeError):
@@ -104,6 +112,11 @@ class CrossEncoderReranker(BaseReranker):
             ImportError: If sentence-transformers is not installed.
             RuntimeError: If model loading fails.
         """
+        # Fast path: already loaded in this process.
+        cached = _MODEL_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+
         try:
             from sentence_transformers import CrossEncoder
         except ImportError as e:
@@ -111,12 +124,18 @@ class CrossEncoderReranker(BaseReranker):
                 "sentence-transformers is required for Cross-Encoder reranking. "
                 "Install it with: pip install sentence-transformers"
             ) from e
-        
+
         try:
-            logger.info(f"Loading Cross-Encoder model: {model_name}")
-            model = CrossEncoder(model_name)
-            logger.info(f"Cross-Encoder model loaded successfully: {model_name}")
-            return model
+            with _MODEL_CACHE_LOCK:
+                # Double-check under the lock: another thread may have loaded it while we waited.
+                cached = _MODEL_CACHE.get(model_name)
+                if cached is not None:
+                    return cached
+                logger.info(f"Loading Cross-Encoder model: {model_name}")
+                model = CrossEncoder(model_name)
+                _MODEL_CACHE[model_name] = model
+                logger.info(f"Cross-Encoder model loaded successfully: {model_name}")
+                return model
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load Cross-Encoder model '{model_name}': {e}"

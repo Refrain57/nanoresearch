@@ -23,6 +23,14 @@ class RedisKeys:
     def run_events(run_id: str) -> str:
         return f"run_events:{run_id}"
 
+    # Per-conversation live stream — server→client push for activity NOT tied to a run the
+    # frontend started (e.g. a cron result delivered into the origin conversation). The web UI
+    # holds one SSE per open conversation; cron delivery XADDs here so it appears live without
+    # polling. Shares RUN_EVENTS_TTL (24h replay window).
+    @staticmethod
+    def conv_live(conversation_id: str) -> str:
+        return f"conv_live:{conversation_id}"
+
     # Session short-term memory — 2 h TTL, MULTI/EXEC write
     SESSION_TTL = 7200
 

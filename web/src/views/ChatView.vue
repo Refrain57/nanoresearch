@@ -241,6 +241,7 @@ import { useUserStore } from '@/stores/user'
 import { useSettingsStore } from '@/stores/settings'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useRunStream } from '@/composables/useRunStream'
+import { useConversationLive } from '@/composables/useConversationLive'
 import { updateAgentOverride } from '@/apis/conversations'
 
 const route = useRoute()
@@ -251,6 +252,7 @@ const userStore = useUserStore()
 const settingsStore = useSettingsStore()
 const kbStore = useKnowledgeStore()
 const runStream = useRunStream()
+const convLive = useConversationLive()
 
 const inputText = ref('')
 const toolHint = ref('')
@@ -325,7 +327,29 @@ onMounted(async () => {
   await Promise.all([chatStore.fetchConversations(), agentStore.fetchList(), kbStore.fetchList()])
   if (route.params.id) await chatStore.selectConversation(route.params.id)
 })
-onUnmounted(() => runStream.stop())
+onUnmounted(() => { runStream.stop(); convLive.stop() })
+
+// Keep one live SSE open for the active conversation so server-pushed messages (e.g. a cron
+// task's result delivered here) appear immediately, without polling. Re-subscribes whenever the
+// active conversation changes.
+watch(() => chatStore.currentConvId, (id) => {
+  convLive.stop()
+  if (!id) return
+  convLive.start(id, {
+    onMessage: (ev) => {
+      if (chatStore.currentConvId !== id) return
+      const text = ev.content?.text ?? ''
+      if (!text) return
+      chatStore.messages.push({
+        id: `cron-${Date.now()}`,
+        role: 'assistant',
+        content: { text },
+        seq: chatStore.messages.length,
+        cron: true,
+      })
+    },
+  })
+})
 
 watch(() => route.params.id, async (id) => {
   // handleSelect already calls selectConversation directly; only handle URL-driven navigation here
