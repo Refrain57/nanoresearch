@@ -490,3 +490,58 @@ class MemoryFact(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class CronJob(Base):
+    """A scheduled task (production cron redesign).
+
+    Source of truth for scheduled jobs (replaces the legacy JSON store). The
+    CronScheduler sentinel scans ``WHERE enabled AND next_run_at <= now()`` via the
+    ``ix_cron_jobs_enabled_next`` index, claims each due job, and dispatches it
+    through the existing mailbox → dispatcher → worker path. Each job owns a
+    dedicated conversation so its ``agent_lock`` never contends with user chat.
+    """
+    __tablename__ = "cron_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid: Mapped[str] = mapped_column(String, ForeignKey("users.uid"), nullable=False, index=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Schedule spec
+    schedule_kind: Mapped[str] = mapped_column(String, nullable=False)   # 'at' | 'every' | 'cron'
+    schedule_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_every_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schedule_expr: Mapped[str | None] = mapped_column(String, nullable=True)
+    schedule_tz: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Task payload
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Misfire policy (spec §0 conclusion ①)
+    misfire_policy: Mapped[str] = mapped_column(String, default="fire_once")  # fire_once | skip | fire_all
+    misfire_grace_s: Mapped[int] = mapped_column(Integer, default=3600)
+
+    # Delivery gate (external channel; phase 2 wires the cross-process bridge)
+    deliver: Mapped[bool] = mapped_column(Boolean, default=False)
+    deliver_channel: Mapped[str | None] = mapped_column(String, nullable=True)
+    deliver_to: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Runtime state
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String, nullable=True)  # ok | error | missed | skipped
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_history: Mapped[list] = mapped_column(JSONB, default=list)          # capped to 20 most recent
+
+    delete_after_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("ix_cron_jobs_enabled_next", "enabled", "next_run_at"),
+    )

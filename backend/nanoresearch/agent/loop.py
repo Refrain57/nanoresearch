@@ -259,9 +259,18 @@ class AgentLoop:
         self.tools.register(PaperFetchTool(workspace=self.workspace))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
-        if self.cron_service:
+        # Cron tool: DB-backed (production redesign). Registered when we have a DB + user
+        # identity, so add/list/remove write the cron_jobs table the CronScheduler scans.
+        if self._session_factory is not None and self._uid:
+            from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
+            from nanoresearch.storage.repositories.cron_repo import CronJobRepository
             self.tools.register(
-                CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
+                CronTool(
+                    CronJobRepository(self._session_factory),
+                    ConversationRepository(self._session_factory),
+                    uid=self._uid,
+                    default_timezone=self.context.timezone or "UTC",
+                )
             )
         if self.research_config.enabled:
             from nanoresearch.agent.tools.research import ResearchTool
@@ -330,7 +339,7 @@ class AgentLoop:
                     elif name == "spawn":
                         tool.set_context(channel, chat_id, run_id=run_id)
                     else:
-                        tool.set_context(channel, chat_id)
+                        tool.set_context(channel, chat_id, agent_id=agent_id)
 
         # Set session_key for MCP tools (for query rewriting)
         for tool_name in self.tools.tool_names:

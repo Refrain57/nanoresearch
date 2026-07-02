@@ -56,7 +56,7 @@ def truncate_all() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE TABLE agent_runs, messages, conversations, agents, users "
+                "TRUNCATE TABLE cron_jobs, agent_runs, messages, conversations, agents, users "
                 "RESTART IDENTITY CASCADE"
             )
     finally:
