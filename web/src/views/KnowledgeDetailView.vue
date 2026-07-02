@@ -582,14 +582,25 @@
         <div v-else-if="previewViewMode === 'source'" class="pdf-viewer-body">
           <div class="pdf-left">
             <template v-if="pdfBlobUrl">
-              <vue-pdf-embed
-                ref="pdfRef"
-                :source="pdfBlobUrl"
-                :page="currentPdfPage"
-                :text-layer="true"
-                class="pdf-embed"
-                @loaded="onPdfLoaded"
-              />
+              <div class="pdf-stage" ref="stageRef">
+                <vue-pdf-embed
+                  ref="pdfRef"
+                  :source="pdfBlobUrl"
+                  :page="currentPdfPage"
+                  :text-layer="true"
+                  class="pdf-embed"
+                  @loaded="onPdfLoaded"
+                  @rendered="onPdfRendered"
+                />
+                <div class="bbox-overlay" :style="overlayStyle">
+                  <div
+                    v-for="(b, i) in currentPageBoxes"
+                    :key="i"
+                    class="bbox-rect"
+                    :style="rectStyle(b)"
+                  />
+                </div>
+              </div>
               <div class="pdf-nav">
                 <a-button size="small" :disabled="currentPdfPage <= 1" @click="currentPdfPage--">‹</a-button>
                 <span class="pdf-nav-label">{{ currentPdfPage }} / {{ totalPdfPages }}</span>
@@ -745,7 +756,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, reactive, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, reactive, watch, nextTick } from 'vue'
 import VuePdfEmbed from 'vue-pdf-embed'
 import 'vue-pdf-embed/dist/styles/textLayer.css'
 import 'vue-pdf-embed/dist/styles/annotationLayer.css'
@@ -796,6 +807,72 @@ const selectedPreviewChunkId = ref(null)
 const pdfRef = ref(null)
 const currentPdfPage = ref(1)
 const totalPdfPages = ref(0)
+
+// ── bbox grounding overlay ──
+const stageRef = ref(null)
+const overlayStyle = ref({ display: 'none' })
+let _bboxRO = null
+let _observedCanvas = null
+
+// Grounding rects (normalized [0,1] bbox) for the selected chunk on the current page.
+const currentPageBoxes = computed(() => {
+  const chunk = previewChunks.value.find(c => c.id === selectedPreviewChunkId.value)
+  const grounding = chunk?.metadata?.grounding
+  if (!Array.isArray(grounding)) return []
+  return grounding
+    .filter(g => Number(g.page) === Number(currentPdfPage.value) && Array.isArray(g.bbox))
+    .map(g => g.bbox)
+})
+
+function rectStyle(bbox) {
+  const [x0, y0, x1, y1] = bbox
+  return {
+    left: `${x0 * 100}%`,
+    top: `${y0 * 100}%`,
+    width: `${(x1 - x0) * 100}%`,
+    height: `${(y1 - y0) * 100}%`,
+  }
+}
+
+// Size/position the overlay to match the rendered PDF canvas (DPR-safe: measure
+// via getBoundingClientRect, never canvas.width/height). Re-observe the canvas
+// each render since a page change replaces the canvas node.
+function measureOverlay() {
+  const stage = stageRef.value
+  const canvas = pdfRef.value?.$el?.querySelector('.vue-pdf-embed__page canvas')
+  if (!stage || !canvas) {
+    overlayStyle.value = { display: 'none' }
+    return
+  }
+  const cr = canvas.getBoundingClientRect()
+  const sr = stage.getBoundingClientRect()
+  overlayStyle.value = {
+    left: `${cr.left - sr.left + stage.scrollLeft}px`,
+    top: `${cr.top - sr.top + stage.scrollTop}px`,
+    width: `${cr.width}px`,
+    height: `${cr.height}px`,
+    display: 'block',
+  }
+  if (canvas !== _observedCanvas) {
+    if (_bboxRO) _bboxRO.disconnect()
+    _bboxRO = new ResizeObserver(() => measureOverlay())
+    _bboxRO.observe(canvas)
+    _observedCanvas = canvas
+  }
+}
+
+async function onPdfRendered() {
+  await nextTick()
+  requestAnimationFrame(measureOverlay)
+}
+
+function _teardownOverlay() {
+  if (_bboxRO) { _bboxRO.disconnect(); _bboxRO = null }
+  _observedCanvas = null
+  overlayStyle.value = { display: 'none' }
+}
+
+onUnmounted(_teardownOverlay)
 
 const isPdfDoc = computed(() => previewDoc.value?.filename?.toLowerCase().endsWith('.pdf'))
 
@@ -879,6 +956,7 @@ function closePreview() {
   selectedPreviewChunkId.value = null
   currentPdfPage.value = 1
   totalPdfPages.value = 0
+  _teardownOverlay()
 }
 
 async function downloadDoc(doc) {
@@ -1746,9 +1824,19 @@ function formatSize(bytes) {
   background: var(--nr-border);
   overflow: hidden;
 }
-.pdf-embed { flex: 1; overflow-y: auto; }
+.pdf-stage { position: relative; flex: 1; overflow: auto; }
+.pdf-stage :deep(.vue-pdf-embed) { overflow: visible; }
 .pdf-embed :deep(.vue-pdf-embed__page) { margin: 0 auto; display: block; }
 .pdf-embed :deep(.textLayer) { position: absolute; }
+.bbox-overlay { position: absolute; pointer-events: none; z-index: 5; }
+.bbox-rect {
+  position: absolute;
+  border: 2px solid var(--nr-clay, #d97757);
+  background: rgba(217, 119, 87, 0.14);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  transition: opacity 0.12s ease;
+}
 .pdf-nav {
   display: flex; align-items: center; justify-content: center; gap: 12px;
   padding: 6px 0; background: #fff; border-top: 1px solid var(--nr-border); flex-shrink: 0;
