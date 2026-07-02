@@ -37,13 +37,7 @@ def create_tables() -> None:
     from sqlalchemy import create_engine
     sync_url = TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
     engine = create_engine(sync_url, echo=False)
-    try:
-        Base.metadata.drop_all(engine)
-    except Exception:
-        # FK constraints from tables outside Base.metadata (e.g. cron_jobs) may
-        # prevent drop_all. Fall through — create_all is idempotent and truncate_all
-        # handles per-test data isolation.
-        pass
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     engine.dispose()
 
