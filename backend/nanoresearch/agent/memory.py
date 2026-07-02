@@ -639,7 +639,7 @@ class MemoryConsolidator:
                         logger.warning("Lua LTRIM failed (non-fatal): {}", _lua_err)
 
                 session.last_consolidated = end_idx
-                self.sessions.save(session)
+                await self.sessions.save(session)
 
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
