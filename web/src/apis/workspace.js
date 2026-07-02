@@ -1,4 +1,4 @@
-import { apiGet, apiPut } from './base'
+import { apiGet, apiPut, apiDelete } from './base'
 import { apiRequest } from './base'
 
 export const listWorkspaceFiles = (dir = '') =>
@@ -9,3 +9,10 @@ export const getWorkspaceFile = (path) =>
 
 export const updateWorkspaceFile = (path, content) =>
   apiPut(`/api/workspace/files/${path}`, { content })
+
+export const deleteWorkspaceFile = (path) =>
+  apiDelete(`/api/workspace/files/${path}`)
+
+export const fetchWorkspaceFileBlob = (path) =>
+  apiRequest(`/api/workspace/files/${path}`, { method: 'GET' }, true, 'blob')
+    .then((res) => res.blob())
