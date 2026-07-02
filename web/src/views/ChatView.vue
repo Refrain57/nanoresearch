@@ -337,8 +337,11 @@ watch(() => route.params.id, async (id) => {
     pendingToolCalls.value = []
     await chatStore.selectConversation(id)
     if (pendingRuns[id]) {
-      const { runId, dbMsgCount, userMsg } = pendingRuns[id]
-      if (chatStore.messages.length <= dbMsgCount) {
+      const { runId, lastSeqBeforeRun, userMsg } = pendingRuns[id]
+      const reloadedLastSeq = chatStore.messages.length
+        ? chatStore.messages[chatStore.messages.length - 1].seq
+        : -1
+      if (reloadedLastSeq <= lastSeqBeforeRun) {
         // DB hasn't grown yet — run still in progress, restore user msg and reconnect SSE
         if (userMsg) chatStore.messages.push({ ...userMsg, seq: chatStore.messages.length })
         chatStore.streaming = true
@@ -413,9 +416,12 @@ async function handleSelect(id) {
   // If this conversation had a run interrupted by a switch, reconnect to the SSE.
   // The backend will replay completed events or resume live streaming.
   if (pendingRuns[id]) {
-    const { runId, dbMsgCount, userMsg } = pendingRuns[id]
-    console.log('[nav] reconnecting to pending run', runId, 'dbMsgCount=', dbMsgCount, 'currentMsgs=', chatStore.messages.length)
-    if (chatStore.messages.length <= dbMsgCount) {
+    const { runId, lastSeqBeforeRun, userMsg } = pendingRuns[id]
+    const reloadedLastSeq = chatStore.messages.length
+      ? chatStore.messages[chatStore.messages.length - 1].seq
+      : -1
+    console.log('[nav] reconnecting to pending run', runId, 'lastSeqBeforeRun=', lastSeqBeforeRun, 'reloadedLastSeq=', reloadedLastSeq)
+    if (reloadedLastSeq <= lastSeqBeforeRun) {
       if (userMsg) chatStore.messages.push({ ...userMsg, seq: chatStore.messages.length })
       chatStore.streaming = true
       await connectStream(runId, id)
@@ -449,6 +455,13 @@ async function handleSend() {
     }
   }
 
+  // Newest real DB seq BEFORE the optimistic push. The reconnect-on-return check
+  // compares this against the reloaded view's newest seq to tell "run finished
+  // (DB grew)" from "still in progress" without depending on the paginated
+  // render count (which now caps at the recent-N page size).
+  const lastSeqBeforeRun = chatStore.messages.length
+    ? chatStore.messages[chatStore.messages.length - 1].seq
+    : -1
   const userMsgEntry = { id: `u-${Date.now()}`, role: 'user', content: { text }, seq: chatStore.messages.length }
   chatStore.messages.push(userMsgEntry)
   inputText.value = ''
@@ -458,8 +471,7 @@ async function handleSend() {
   const run = await chatStore.sendMessage(text, ragMode.value, currentKbId.value)
   if (!run) return
 
-  // dbMsgCount = messages already in DB before this run (exclude the user msg we just pushed)
-  pendingRuns[convId] = { runId: run.run_id, dbMsgCount: chatStore.messages.length - 1, userMsg: userMsgEntry }
+  pendingRuns[convId] = { runId: run.run_id, lastSeqBeforeRun, userMsg: userMsgEntry }
   await connectStream(run.run_id, convId)
 }
 
