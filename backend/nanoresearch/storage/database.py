@@ -102,6 +102,8 @@ async def check_schema_migrations() -> None:
         # Phase 5: baseline anchor + deployment gate (migrate_phase5_baseline_gate.sql)
         ("optimization_proposals", "baseline_score"),
         ("optimization_proposals", "baseline_version_id"),
+        # Memory layering P1 (add_memory_facts.sql)
+        ("memory_facts", "id"),
     ]
     missing = []
     async with _engine.connect() as conn:
