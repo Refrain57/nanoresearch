@@ -474,32 +474,47 @@
               <div class="section-title">用户输入</div>
               <div class="input-box">{{ detail.user_input }}</div>
 
-              <div class="section-title">工具调用链 ({{ detail.tool_call_chain.length }})</div>
-              <div v-if="!detail.tool_call_chain.length" class="muted" style="margin-bottom:12px">无工具调用</div>
-              <a-collapse v-else accordion class="tool-chain">
-                <a-collapse-panel
-                  v-for="tc in detail.tool_call_chain"
-                  :key="tc.order"
-                  :header="toolHeader(tc)"
-                >
-                  <div class="tool-section-label">参数</div>
-                  <pre class="code-block">{{ JSON.stringify(tc.params, null, 2) }}</pre>
-                  <div class="tool-section-label" style="margin-top:8px">返回值</div>
-                  <pre class="code-block result">{{ tc.result }}</pre>
-                  <div v-if="tc.error" class="error-hint">⚠ 工具报错</div>
-                  <div class="tool-meta">耗时 {{ tc.duration_ms != null ? tc.duration_ms.toFixed(0) + ' ms' : '—' }}</div>
-                </a-collapse-panel>
-              </a-collapse>
-
-              <div class="section-title">LLM 调用 ({{ detail.llm_calls.length }})</div>
-              <div class="llm-calls">
-                <div v-for="(c, i) in detail.llm_calls" :key="i" class="llm-call-row">
-                  <span class="mono">#{{ i + 1 }}</span>
-                  <span class="muted">{{ c.model }}</span>
-                  <span>↑ {{ c.input_tokens }}</span>
-                  <span>↓ {{ c.output_tokens }}</span>
+              <!-- Time-share: LLM vs tool vs other (#10) -->
+              <div v-if="timeShare" class="timeshare">
+                <div class="timeshare-head">
+                  <span class="section-title" style="margin:0">时间占比</span>
+                  <span class="muted">总 {{ (timeShare.total / 1000).toFixed(2) }}s</span>
+                </div>
+                <div class="timeshare-bar">
+                  <div class="seg seg-llm" :style="{ width: timeShare.llmPct + '%' }" :title="'LLM ' + timeShare.llmMs.toFixed(0) + 'ms'"></div>
+                  <div class="seg seg-tool" :style="{ width: timeShare.toolPct + '%' }" :title="'工具 ' + timeShare.toolMs.toFixed(0) + 'ms'"></div>
+                  <div class="seg seg-other" :style="{ width: timeShare.otherPct + '%' }" :title="'其余 ' + timeShare.otherMs.toFixed(0) + 'ms'"></div>
+                </div>
+                <div class="timeshare-legend">
+                  <span><i class="dot dot-llm"></i>LLM {{ (timeShare.llmMs / 1000).toFixed(2) }}s</span>
+                  <span><i class="dot dot-tool"></i>工具 {{ (timeShare.toolMs / 1000).toFixed(2) }}s</span>
+                  <span><i class="dot dot-other"></i>其余 {{ (timeShare.otherMs / 1000).toFixed(2) }}s</span>
+                  <span v-if="timeShare.concurrent" class="muted">· 工具并发，时长有重叠</span>
                 </div>
               </div>
+
+              <!-- Interleaved LLM↔tool timeline (#12) -->
+              <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+                <span>逐轮时间线 ({{ timeline.length }})</span>
+                <a-space v-if="detail.has_recordings" :size="8">
+                  <a-tag color="green" style="margin:0">● 已录制 · 可复现</a-tag>
+                  <a-button size="small" :loading="replaying" @click="doReplay">复现本轮</a-button>
+                </a-space>
+              </div>
+              <div v-if="!timeline.length" class="muted" style="margin-bottom:12px">无调用记录</div>
+              <EvalTimeline v-else :items="timeline" />
+
+              <!-- Sandbox replay result -->
+              <template v-if="replayResult">
+                <div class="section-title">沙箱复现结果（{{ replayTimeline.length }} 步 · {{ replayResult.run_status }}）</div>
+                <div class="muted" style="margin-bottom:6px">
+                  重放耗时 {{ replayResult.total_duration_ms ? (replayResult.total_duration_ms / 1000).toFixed(2) + 's' : '—' }}
+                  · Token {{ replayResult.total_input_tokens }}/{{ replayResult.total_output_tokens }}
+                </div>
+                <EvalTimeline :items="replayTimeline" />
+                <div class="section-title">复现最终回答</div>
+                <div class="response-box">{{ replayResult.final_response || '（无内容）' }}</div>
+              </template>
 
               <div class="section-title">最终回答</div>
               <div class="response-box">{{ detail.final_response || '（无内容）' }}</div>
@@ -1397,7 +1412,9 @@ import {
   contextDiagnosis, getToolErrorStats,
   userInputAnalysis, getModelAnalysis,
   getDiagnosis, tunableApply, tunableRollback, tunableVersions,
+  replaySnapshot,
 } from '@/apis/agentEval'
+import EvalTimeline from '@/components/EvalTimeline.vue'
 
 // ── State ──────────────────────────────────────────────────────────────────
 const tab = ref('snapshots')
@@ -1452,6 +1469,57 @@ const detailLoading = ref(false)
 const detail = ref(null)
 const annotating = ref(false)
 const annotation = reactive({ badcase_status: 'pending', root_cause: '', fix_notes: '' })
+
+// Interleaved timeline — merge tool_call_chain + llm_calls by shared `order`.
+function buildTimeline(d) {
+  if (!d) return []
+  const tools = (d.tool_call_chain || []).map((t) => ({ kind: 'tool', order: t.order ?? 0, data: t }))
+  const llms = (d.llm_calls || []).map((c) => ({ kind: 'llm', order: c.order ?? null, data: c }))
+  // Legacy snapshots: llm_calls without `order` → append after the last tool,
+  // preserving recorded sequence, so old records still render.
+  const maxOrder = Math.max(0, ...tools.map((t) => t.order), ...llms.map((l) => l.order || 0))
+  let synth = maxOrder
+  for (const l of llms) { if (l.order == null) l.order = ++synth }
+  return [...tools, ...llms].sort((a, b) => a.order - b.order)
+}
+const timeline = computed(() => buildTimeline(detail.value))
+
+// LLM vs tool vs other time-share (#10). Concurrent tools can overlap wall clock,
+// so segments are normalized to their own sum; the real total is shown as label.
+const timeShare = computed(() => {
+  const d = detail.value
+  if (!d) return null
+  const llmMs = (d.llm_calls || []).reduce((s, c) => s + (c.duration_ms || 0), 0)
+  const toolMs = (d.tool_call_chain || []).reduce((s, t) => s + (t.duration_ms || 0), 0)
+  const total = d.total_duration_ms || 0
+  const otherMs = Math.max(0, total - llmMs - toolMs)
+  const segSum = llmMs + toolMs + otherMs
+  if (segSum <= 0) return null
+  return {
+    total, llmMs, toolMs, otherMs,
+    llmPct: (llmMs / segSum) * 100,
+    toolPct: (toolMs / segSum) * 100,
+    otherPct: (otherMs / segSum) * 100,
+    concurrent: (llmMs + toolMs) > total + 1,
+  }
+})
+
+// Sandbox replay — deterministic re-run against recorded tool outputs.
+const replaying = ref(false)
+const replayResult = ref(null)
+const replayTimeline = computed(() => buildTimeline(replayResult.value))
+async function doReplay() {
+  if (!detail.value) return
+  replaying.value = true
+  try {
+    replayResult.value = await replaySnapshot(detail.value.id)
+    message.success('沙箱复现完成')
+  } catch (e) {
+    message.error('复现失败：' + (e.message || ''))
+  } finally {
+    replaying.value = false
+  }
+}
 
 // Batch classify
 const classifyLoading = ref(false)
@@ -1577,6 +1645,7 @@ async function openDetail(record) {
   drawerOpen.value = true
   detailLoading.value = true
   detail.value = null
+  replayResult.value = null
   diagData.value = null
   diagTabKey.value = 'detail'
   evExpanded.value = false
@@ -1955,12 +2024,6 @@ function tcTypeColor(t) {
   return 'default'
 }
 
-function toolHeader(tc) {
-  const errMark = tc.error ? ' ⚠' : ''
-  const dur = tc.duration_ms != null ? ` · ${tc.duration_ms.toFixed(0)}ms` : ''
-  return `#${tc.order}  ${tc.name}${errMark}${dur}`
-}
-
 function erStatusColor(s) {
   if (s === 'completed') return 'green'
   if (s === 'running') return 'blue'
@@ -2302,9 +2365,19 @@ onMounted(() => {
 .error-hint { color: var(--nr-danger); font-size: 12px; margin-top: 4px; }
 .tool-meta { font-size: 11px; color: var(--nr-ink-3); margin-top: 6px; }
 
-.llm-calls { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
-.llm-call-row { display: flex; gap: 16px; font-size: 12px; padding: 4px 8px; background: var(--nr-rail); border-radius: 4px; }
-.llm-call-row .mono { color: var(--nr-ink-2); }
+/* Time-share bar (LLM vs tool vs other) */
+.timeshare { margin: 8px 0 4px; }
+.timeshare-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.timeshare-bar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; background: var(--nr-rail); border: 1px solid var(--nr-border); }
+.timeshare-bar .seg { height: 100%; transition: width .2s; }
+.timeshare-bar .seg-llm { background: var(--nr-sage, #5E7355); }
+.timeshare-bar .seg-tool { background: var(--nr-gold, #B8912F); }
+.timeshare-bar .seg-other { background: #c2b9a8; }
+.timeshare-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 6px; font-size: 11px; color: var(--nr-ink-2); }
+.timeshare-legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+.timeshare-legend .dot-llm { background: var(--nr-sage, #5E7355); }
+.timeshare-legend .dot-tool { background: var(--nr-gold, #B8912F); }
+.timeshare-legend .dot-other { background: #c2b9a8; }
 
 /* Score colors */
 .score-high { color: var(--nr-sage); font-weight: 600; }

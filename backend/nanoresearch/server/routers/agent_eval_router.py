@@ -686,8 +686,15 @@ async def replay_snapshot(
         "replay_run_id": replay_data.run_id,
         "final_response": replay_data.final_response,
         "tool_call_chain": replay_data.tool_call_chain,
+        # llm_calls + timing let the frontend render the replay on the same
+        # interleaved timeline as the original snapshot.
+        "llm_calls": replay_data.llm_calls,
         "total_input_tokens": replay_data.total_input_tokens,
         "total_output_tokens": replay_data.total_output_tokens,
+        "total_duration_ms": replay_data.total_duration_ms,
+        "ttft_ms": replay_data.ttft_ms,
+        "tool_call_count": replay_data.tool_call_count,
+        "llm_call_count": replay_data.llm_call_count,
         "run_status": replay_data.run_status,
     }
 

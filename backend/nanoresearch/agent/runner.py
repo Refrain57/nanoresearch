@@ -116,6 +116,9 @@ class AgentRunner:
             if spec.reasoning_effort is not None:
                 kwargs["reasoning_effort"] = spec.reasoning_effort
 
+            if spec.snapshot_collector is not None:
+                spec.snapshot_collector.on_llm_start()
+
             if hook.wants_streaming():
                 async def _stream(delta: str) -> None:
                     await hook.on_stream(context, delta)
@@ -128,7 +131,10 @@ class AgentRunner:
                 response = await self.provider.chat_with_retry(**kwargs)
 
             if spec.snapshot_collector is not None:
-                spec.snapshot_collector.on_llm_end(response.usage or {}, spec.model)
+                spec.snapshot_collector.on_llm_end(
+                    response.usage or {}, spec.model,
+                    messages=messages, response=response,
+                )
 
             raw_usage = response.usage or {}
             usage = {
