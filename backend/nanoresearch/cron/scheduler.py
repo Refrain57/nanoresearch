@@ -75,12 +75,16 @@ class CronScheduler:
             self._task = None
 
     async def _run(self) -> None:
+        # Sleep before the first scan: avoids hammering the DB the instant the process starts
+        # (lets startup settle) and keeps the scheduler inert during short-lived test lifespans.
         while self._running:
+            await asyncio.sleep(self._interval_s)
+            if not self._running:
+                break
             try:
                 await self._scan_once()
             except Exception:
                 logger.exception("CronScheduler scan failed")
-            await asyncio.sleep(self._interval_s)
 
     # ── scan + per-job claim/dispatch ────────────────────────────────────────
     async def _scan_once(self) -> list[str]:
