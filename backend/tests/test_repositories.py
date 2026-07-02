@@ -195,3 +195,24 @@ def test_update_meta():
         assert updated.last_consolidated == 5
         assert updated.conv_metadata == {"foo": "bar"}
     run(_())
+
+
+def test_get_messages_paged_recent_first_and_cursor():
+    async def _():
+        user_repo = UserRepository(make_factory())
+        await user_repo.create("grace", hash_password("pw"))
+        conv_repo = ConversationRepository(make_factory())
+        conv = await conv_repo.create(key="web:paged", uid="grace")
+        await conv_repo.replace_messages(
+            conv.id, [{"role": "user", "content": f"m{i}"} for i in range(5)]
+        )
+        # 最近 2 条，升序
+        recent = await conv_repo.get_messages_paged(conv.id, limit=2)
+        assert [m.seq for m in recent] == [3, 4]
+        # seq < 3 的最近 2 条
+        older = await conv_repo.get_messages_paged(conv.id, limit=2, before_seq=3)
+        assert [m.seq for m in older] == [1, 2]
+        # limit 超过总数 → 全部升序
+        allm = await conv_repo.get_messages_paged(conv.id, limit=10)
+        assert [m.seq for m in allm] == [0, 1, 2, 3, 4]
+    run(_())
