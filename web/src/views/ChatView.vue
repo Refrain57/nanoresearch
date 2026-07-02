@@ -499,6 +499,17 @@ async function connectStream(runId, convId) {
         seq: chatStore.messages.length,
       })
     },
+    onAgentMessage: (event) => {
+      // The `message` tool delivered content over SSE; render it as an assistant bubble.
+      // Persisted server-side into the turn, so the run_end DB reload keeps it.
+      if (chatStore.currentConvId !== convId) return
+      chatStore.messages.push({
+        id: `agent-msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        role: 'assistant',
+        content: { text: event.content },
+        seq: chatStore.messages.length,
+      })
+    },
     onEnd: async () => {
       delete pendingRuns[convId]
       if (chatStore.currentConvId !== convId) return

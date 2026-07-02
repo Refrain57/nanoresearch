@@ -360,7 +360,11 @@ async def _continuation_drain_and_append(redis, sessions, session_key, uid):
                 f"{'completed' if item.get('status') == 'ok' else 'failed'}]\n\n"
                 f"Task: {item.get('task', '')}\n\nResult:\n{item.get('result', '')}")
         try:
-            await sessions.append_message(session_key, {"role": "user", "content": body}, uid=uid)
+            # internal=True → LLM-visible (continuation rebuilds context from this history) but
+            # hidden from the frontend chat view, which must not render orchestration text as a
+            # user bubble (get_messages filters it; chat.js filters as defense-in-depth).
+            await sessions.append_message(
+                session_key, {"role": "user", "content": body, "internal": True}, uid=uid)
         except Exception as e:
             logger.warning("continuation append staged result failed (non-fatal): {}", e)
 
@@ -559,6 +563,21 @@ async def run_agent_job(
             await _continuation_drain_and_append(redis, loop.sessions, session_key, uid)
 
         _chat_id = session_key.split(":", 1)[-1]
+
+        # Web bridge: the `message` tool is wired to bus.publish_outbound, whose outbound queue
+        # nothing consumes in the worker → its content would be silently dropped (the frontend
+        # only reads the run_events SSE stream). Re-point it to run_events so agent-sent messages
+        # reach the web UI. Persistence across the run_end reload is handled in _process_message
+        # (folds the sends into the saved turn as assistant messages).
+        from nanoresearch.agent.tools.message import MessageTool as _MessageTool
+        _mt = loop.tools.get("message")
+        if isinstance(_mt, _MessageTool):
+            async def _web_message_sink(m: Any) -> None:
+                if getattr(m, "channel", None) == "web":
+                    await xadd_event(redis, run_stream_key,
+                                     {"type": "agent_message", "content": m.content})
+            _mt.set_send_callback(_web_message_sink)
+
         _proc_task = asyncio.create_task(loop.process_direct(
             content,
             session_key=session_key,
@@ -578,6 +597,9 @@ async def run_agent_job(
             kb_bindings=kb_bindings,
             kb_map=kb_map,
             conversation_id=conversation_id,
+            # Continuation runs carry an internal summarize instruction as `content`; mark it so
+            # the persisted user turn is hidden from the frontend (kept for the LLM).
+            internal_content=_is_continuation,
         ))
         if _mailbox_enabled:
             _refresh_task = asyncio.create_task(_lock_refresher(

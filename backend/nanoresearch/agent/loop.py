@@ -792,6 +792,7 @@ class AgentLoop:
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
         conversation_id: str | None = None,
+        internal_content: bool = False,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # New turn: clear the per-turn citation accumulator so RAG citations from a
@@ -933,7 +934,21 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, 1 + len(history))
+        # Web bridge: the `message` tool's sends were delivered live via the SSE run_events stream
+        # (worker sink), but that stream isn't persisted. Fold them into the saved turn as assistant
+        # messages so the run_end reload (which reads the DB) keeps them — placed before any trailing
+        # final-answer assistant message to preserve the live send-then-final order.
+        if msg.channel == "web":
+            _mt = self.tools.get("message")
+            if isinstance(_mt, MessageTool) and (_sent := _mt.sent_contents()):
+                _send_msgs = [{"role": "assistant", "content": c} for c in _sent]
+                if all_msgs and all_msgs[-1].get("role") == "assistant":
+                    all_msgs = all_msgs[:-1] + _send_msgs + [all_msgs[-1]]
+                else:
+                    all_msgs = all_msgs + _send_msgs
+
+        self._save_turn(session, all_msgs, 1 + len(history),
+                        mark_first_user_internal=internal_content)
         await self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session, agent_id=agent_id, uid=self._uid))
 
@@ -988,9 +1003,16 @@ class AgentLoop:
 
         return filtered
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
-        """Save new-turn messages into session, truncating large tool results."""
+    def _save_turn(self, session: Session, messages: list[dict], skip: int,
+                   mark_first_user_internal: bool = False) -> None:
+        """Save new-turn messages into session, truncating large tool results.
+
+        mark_first_user_internal: stamp `internal=True` on the first saved user message — used by
+        the subagent continuation, whose triggering `content` is an internal summarize instruction
+        that must stay LLM-visible but not render as a user bubble on the frontend.
+        """
         from datetime import datetime
+        _internal_pending = mark_first_user_internal
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -1021,6 +1043,10 @@ class AgentLoop:
                 and not entry.get("tool_calls")
             ):
                 entry["_citations"] = self._turn_citations
+            # Stamp the first actually-saved user message as internal (continuation instruction).
+            if _internal_pending and role == "user":
+                entry["internal"] = True
+                _internal_pending = False
             entry.setdefault("timestamp", utcnow_aware().isoformat())
             session.messages.append(entry)
         session.updated_at = utcnow_aware()
@@ -1046,6 +1072,7 @@ class AgentLoop:
         kb_map: dict[str, str] | None = None,
         run_id: str | None = None,
         conversation_id: str | None = None,
+        internal_content: bool = False,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
@@ -1064,4 +1091,5 @@ class AgentLoop:
             kb_map=kb_map,
             run_id=run_id,
             conversation_id=conversation_id,
+            internal_content=internal_content,
         )

@@ -38,6 +38,13 @@ class MessageTool(Tool):
         self._sent_in_turn = False
         self._sent_contents = []
 
+    def sent_contents(self) -> list[str]:
+        """Contents sent to the default channel/chat this turn.
+
+        Used by the web bridge to persist agent-sent messages into the saved turn (the SSE
+        stream that delivered them live is not itself persisted)."""
+        return list(self._sent_contents)
+
     @property
     def name(self) -> str:
         return "message"

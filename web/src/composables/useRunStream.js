@@ -3,7 +3,7 @@ import { useUserStore } from '@/stores/user'
 export function useRunStream() {
   let controller = null
 
-  async function start(runId, { onDelta, onToolHint, onEnd, onToolCall, onMessageComplete, onSubagentResult, onCitations } = {}) {
+  async function start(runId, { onDelta, onToolHint, onEnd, onToolCall, onMessageComplete, onSubagentResult, onCitations, onAgentMessage } = {}) {
     console.log('[SSE] start v3', runId)
     stop()
     controller = new AbortController()
@@ -36,6 +36,7 @@ export function useRunStream() {
           else if (event.type === 'tool_call') onToolCall?.(event)
           else if (event.type === 'message_complete') { onMessageComplete?.() }
           else if (event.type === 'subagent_result') onSubagentResult?.(event)
+          else if (event.type === 'agent_message') onAgentMessage?.(event)
           else if (event.type === 'citations') onCitations?.(event)
           else if (event.type === 'run_end') onEnd?.(event.status)
         } catch (e) {

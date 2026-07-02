@@ -29,7 +29,11 @@ export const useChatStore = defineStore('chat', () => {
       console.log('[chat] selectConversation loaded', raw.length, 'msgs for', id,
         raw.map(m => ({ role: m.role, contentType: typeof m.content, hasToolCalls: !!(m.content?.tool_calls?.length) }))
       )
-      const mapped = raw.map(m => {
+      const mapped = raw
+        // Defense-in-depth: the API already drops internal orchestration turns
+        // (subagent results / continuation instruction); skip any that slip through.
+        .filter(m => !(m.content && typeof m.content === 'object' && m.content.internal))
+        .map(m => {
         const stored = m.content
         const text = typeof stored === 'string'
           ? stored

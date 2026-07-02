@@ -150,6 +150,9 @@ async def get_messages(
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }
         for m in msgs
+        # Hide internal orchestration turns (subagent results + continuation instruction).
+        # They stay in the session for the LLM; they must not render as user bubbles.
+        if not (isinstance(m.content, dict) and m.content.get("internal"))
     ]
 
 
