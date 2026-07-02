@@ -11,6 +11,7 @@
   "dependencies": {
     "@ant-design/icons-vue": "^7.0.1",
     "ant-design-vue": "^4.2.6",
+    "dompurify": "^3.4.11",
     "marked": "^18.0.5",
     "pinia": "^2.1.7",
     "vue": "^3.4.0",

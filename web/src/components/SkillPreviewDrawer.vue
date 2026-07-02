@@ -60,6 +60,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { message } from 'ant-design-vue'
 import { getMarketSkill, getMarketReadme, installSkill } from '@/apis/skills'
 
@@ -88,7 +89,7 @@ watch(
         getMarketReadme(slug).catch(() => ({ content: '' })),
       ])
       skill.value = meta
-      readmeHtml.value = marked(readme.content || '')
+      readmeHtml.value = DOMPurify.sanitize(marked(readme.content || ''))
     } catch (e) {
       message.error(e.message || '加载 skill 详情失败')
       emit('update:open', false)
