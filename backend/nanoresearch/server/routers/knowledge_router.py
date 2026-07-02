@@ -561,6 +561,9 @@ def _graph_repo(request: Request):
     return GraphRepository(request.app.state.session_factory)
 
 
+_CONCEPT_PREFIX = "concept::"
+_OVERVIEW_KEY = "__overview__"
+
 
 
 async def _extract_and_persist(chunk_rows, settings, session_factory) -> None:
@@ -839,4 +842,77 @@ async def generate_entity_article(kb_id: str, name: str, request: Request, uid: 
     markdown, citations = await generate_article(settings, name, facts, evidence)
     model = getattr(getattr(settings, "llm", None), "model", None)
     row = await repo.upsert_article(kb_uuid, name, markdown, citations, evidence_signature(evidence), model)
+    return {"article": _article_dict(row, stale=False)}
+
+
+# ---------------------------------------------------------------------------
+# Concept article endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/api/knowledge/{kb_id}/graph/concepts")
+async def list_graph_concepts(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    rows = await _graph_repo(request).list_articles_by_prefix(uuid.UUID(kb_id), _CONCEPT_PREFIX)
+    return {"concepts": rows}
+
+
+@router.get("/api/knowledge/{kb_id}/graph/concept/article")
+async def get_concept_article(kb_id: str, topic: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    from nanoresearch.storage.repositories.graph_repo import _normalize
+    key = _CONCEPT_PREFIX + _normalize(topic)
+    row = await _graph_repo(request).get_article(uuid.UUID(kb_id), key)
+    if row is None:
+        return {"article": None}
+    return {"article": _article_dict(row, stale=False)}   # 概念 stale 判定成本高(要重检索),MVP 不在 GET 判
+
+
+@router.post("/api/knowledge/{kb_id}/graph/concept/article")
+async def generate_concept_article_ep(kb_id: str, topic: str, request: Request, uid: str = Depends(get_current_user)):
+    kb = await _get_kb_or_404(kb_id, uid, request)
+    from nanoresearch.storage.repositories.graph_repo import _normalize
+    from nanoresearch.rag.wiki.article_generator import generate_concept_article, evidence_signature
+    settings = await _resolve_rag_settings(uid, request)
+    evidence = await _retrieve_concept_evidence(request, kb, settings, topic)
+    markdown, citations = await generate_concept_article(settings, topic, evidence)
+    model = getattr(getattr(settings, "llm", None), "model", None)
+    key = _CONCEPT_PREFIX + _normalize(topic)
+    row = await _graph_repo(request).upsert_article(uuid.UUID(kb_id), key, markdown, citations, evidence_signature(evidence), model)
+    return {"article": _article_dict(row, stale=False)}
+
+
+# ---------------------------------------------------------------------------
+# Overview article endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/api/knowledge/{kb_id}/graph/overview/article")
+async def get_overview_article(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    row = await _graph_repo(request).get_article(uuid.UUID(kb_id), _OVERVIEW_KEY)
+    if row is None:
+        return {"article": None}
+    from nanoresearch.rag.wiki.article_generator import overview_signature
+    stats = await _graph_repo(request).get_stats(uuid.UUID(kb_id))
+    top = stats.get("top_entities", [])
+    facts = []
+    for e in top[:10]:
+        facts.extend(await _graph_repo(request).get_entity_facts(uuid.UUID(kb_id), e["name"]))
+    stale = overview_signature(top, facts) != row.evidence_hash
+    return {"article": _article_dict(row, stale)}
+
+
+@router.post("/api/knowledge/{kb_id}/graph/overview/article")
+async def generate_overview_article_ep(kb_id: str, request: Request, uid: str = Depends(get_current_user)):
+    await _get_kb_or_404(kb_id, uid, request)
+    from nanoresearch.rag.wiki.article_generator import generate_overview_article, overview_signature
+    repo = _graph_repo(request); kb_uuid = uuid.UUID(kb_id)
+    stats = await repo.get_stats(kb_uuid)
+    top = stats.get("top_entities", [])
+    facts = []
+    for e in top[:10]:
+        facts.extend(await repo.get_entity_facts(kb_uuid, e["name"]))
+    settings = await _resolve_rag_settings(uid, request)
+    markdown, citations = await generate_overview_article(settings, top, facts)
+    model = getattr(getattr(settings, "llm", None), "model", None)
+    row = await repo.upsert_article(kb_uuid, _OVERVIEW_KEY, markdown, citations, overview_signature(top, facts), model)
     return {"article": _article_dict(row, stale=False)}
