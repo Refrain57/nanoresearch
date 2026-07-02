@@ -51,6 +51,14 @@ export const listGraphEntities = (kbId, params = {}) => {
 }
 export const getGraphEntity  = (kbId, name)     => apiGet(`/api/knowledge/${kbId}/graph/entities/${encodeURIComponent(name)}`)
 export const getTripleChunks = (kbId, tripleId) => apiGet(`/api/knowledge/${kbId}/graph/triples/${tripleId}/chunks`)
+export const getEntityArticle      = (kbId, name) => apiGet(`/api/knowledge/${kbId}/graph/entities/${encodeURIComponent(name)}/article`)
+export const generateEntityArticle = (kbId, name) => apiPost(`/api/knowledge/${kbId}/graph/entities/${encodeURIComponent(name)}/article`, {})
+
+export const listConcepts           = (kbId)        => apiGet(`/api/knowledge/${kbId}/graph/concepts`)
+export const getConceptArticle      = (kbId, topic) => apiGet(`/api/knowledge/${kbId}/graph/concept/article?topic=${encodeURIComponent(topic)}`)
+export const generateConceptArticle = (kbId, topic) => apiPost(`/api/knowledge/${kbId}/graph/concept/article?topic=${encodeURIComponent(topic)}`, {})
+export const getOverviewArticle     = (kbId)        => apiGet(`/api/knowledge/${kbId}/graph/overview/article`)
+export const generateOverviewArticle = (kbId)       => apiPost(`/api/knowledge/${kbId}/graph/overview/article`, {})
 
 // Test retrieval
 export const testQuery = (kbId, query, topK = 5, mode = 'hybrid') =>

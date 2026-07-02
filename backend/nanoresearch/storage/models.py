@@ -230,6 +230,20 @@ class KgTripleMention(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class KgEntityArticle(Base):
+    __tablename__ = "kg_entity_articles"
+    __table_args__ = (UniqueConstraint("kb_id", "entity_name", name="uq_kg_entity_article"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kb_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False, index=True)
+    entity_name: Mapped[str] = mapped_column(String, nullable=False)
+    markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    citations: Mapped[list] = mapped_column(JSONB, default=list)
+    evidence_hash: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str | None] = mapped_column(String)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class EvalDataset(Base):
     __tablename__ = "eval_datasets"
 
