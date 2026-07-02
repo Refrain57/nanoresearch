@@ -88,7 +88,7 @@ const _prepending = ref(false)
 function onScroll() {
   const el = listRef.value
   if (!el) return
-  if (el.scrollTop < 80 && props.hasMore && !props.loadingOlder) {
+  if (el.scrollTop < 80 && props.hasMore && !props.loadingOlder && !_prepending.value) {
     _prevScrollHeight.value = el.scrollHeight
     _prevScrollTop.value = el.scrollTop
     _prepending.value = true
@@ -113,14 +113,18 @@ function msgText(msg) {
   return msg.content.text || msg.content.content || ''
 }
 
-watch(() => [props.messages.length, props.streamingText], async () => {
+watch(() => [props.messages.length, props.streamingText, props.loadingOlder], async () => {
   await nextTick()
   const el = listRef.value
   if (!el) return
   if (_prepending.value) {
-    // prepend 了更早消息：保持视口锚定在原先可见的消息
-    el.scrollTop = _prevScrollTop.value + (el.scrollHeight - _prevScrollHeight.value)
-    _prepending.value = false
+    // 加载更早消息中/刚结束。等 loadingOlder 落定再恢复视口位置，
+    // 这样即使这一页返回 0 行（messages 长度不变），也能清掉 _prepending。
+    if (!props.loadingOlder) {
+      // 高度差锚定视口；0 行时 delta=0，不跳动
+      el.scrollTop = _prevScrollTop.value + (el.scrollHeight - _prevScrollHeight.value)
+      _prepending.value = false
+    }
   } else {
     el.scrollTop = el.scrollHeight
   }
