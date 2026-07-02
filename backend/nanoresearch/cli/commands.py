@@ -454,7 +454,6 @@ async def build_loop_config(config: str | None = None, workspace: str | None = N
     the web server constructs inline in `serve()`.
     """
     from nanoresearch.bus.queue import MessageBus
-    from nanoresearch.cron.service import CronService
     from nanoresearch.storage.database import (
         check_schema_migrations,
         get_session_factory,
@@ -470,8 +469,6 @@ async def build_loop_config(config: str | None = None, workspace: str | None = N
 
     bus = MessageBus()
     provider = _make_provider(cfg)
-    cron_store_path = cfg.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
 
     knowledge_search = None
     rag_store = None
@@ -497,7 +494,6 @@ async def build_loop_config(config: str | None = None, workspace: str | None = N
         web_search_config=cfg.tools.web.search,
         web_proxy=cfg.tools.web.proxy or None,
         exec_config=cfg.tools.exec,
-        cron_service=cron,
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
         timezone=cfg.agents.defaults.timezone,
@@ -555,18 +551,6 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
         )
 
 
-def _migrate_cron_store(config: "Config") -> None:
-    """One-time migration: move legacy global cron store into the workspace."""
-    from nanoresearch.config.paths import get_cron_dir
-
-    legacy_path = get_cron_dir() / "jobs.json"
-    new_path = config.workspace_path / "cron" / "jobs.json"
-    if legacy_path.is_file() and not new_path.exists():
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-        shutil.move(str(legacy_path), str(new_path))
-
-
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -583,8 +567,6 @@ def gateway(
     from nanoresearch.agent.loop import AgentLoop
     from nanoresearch.bus.queue import MessageBus
     from nanoresearch.channels.manager import ChannelManager
-    from nanoresearch.cron.service import CronService
-    from nanoresearch.cron.types import CronJob
     from nanoresearch.heartbeat.service import HeartbeatService
     from nanoresearch.session.manager import SessionManager
 
@@ -609,14 +591,6 @@ def gateway(
         _session_factory = get_session_factory()
     session_manager = SessionManager(config.workspace_path, session_factory=_session_factory)
 
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
     # Create knowledge search, rag store, and RAG settings for Agent research
     knowledge_search = None
     rag_store = None
@@ -636,7 +610,6 @@ def gateway(
         except Exception as e:
             console.print(f"[yellow]Warning: Could not initialize knowledge search: {e}[/yellow]")
 
-    # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -647,7 +620,6 @@ def gateway(
         web_search_config=config.tools.web.search,
         web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
-        cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
@@ -658,10 +630,8 @@ def gateway(
         rag_store=rag_store,
         rag_settings=rag_settings,
     )
-    # Cron production redesign (decision B): the gateway no longer runs an in-process cron
-    # scheduler. Production cron runs under `serve` + worker, where CronScheduler is started in
-    # the FastAPI lifespan. The `cron` CronService above is retained only so legacy store paths
-    # resolve; it is never started here. (Full removal: phase-2 Task 10.)
+    # Cron production redesign (decision B): the gateway does not run cron. Production cron runs
+    # under `serve` + worker, where CronScheduler is started in the FastAPI lifespan.
 
     # Create channel manager
     channels = ChannelManager(config, bus)
@@ -731,10 +701,6 @@ def gateway(
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
 
-    cron_status = cron.status()
-    if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
     # Dashboard server
@@ -793,21 +759,12 @@ def agent(
 
     from nanoresearch.agent.loop import AgentLoop
     from nanoresearch.bus.queue import MessageBus
-    from nanoresearch.cron.service import CronService
 
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
     provider = _make_provider(config)
-
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
 
     # Create knowledge search and rag store for research knowledge loop
     knowledge_search = None
@@ -843,7 +800,6 @@ def agent(
         web_search_config=config.tools.web.search,
         web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
-        cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
@@ -1295,7 +1251,6 @@ def serve(
     from nanoresearch.agent.loop import AgentLoop
     from nanoresearch.bus.queue import MessageBus
     from nanoresearch.channels.manager import ChannelManager
-    from nanoresearch.cron.service import CronService
     from nanoresearch.session.manager import SessionManager
     from nanoresearch.storage.database import init_engine, get_session_factory, check_schema_migrations
     from nanoresearch.server.main import create_app
@@ -1332,8 +1287,6 @@ def serve(
 
     bus = MessageBus()
     provider = _make_provider(cfg)
-    cron_store_path = cfg.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
 
     knowledge_search = None
     rag_store = None
@@ -1361,7 +1314,6 @@ def serve(
         web_search_config=cfg.tools.web.search,
         web_proxy=cfg.tools.web.proxy or None,
         exec_config=cfg.tools.exec,
-        cron_service=cron,
         restrict_to_workspace=cfg.tools.restrict_to_workspace,
         session_manager=channel_session_manager,
         mcp_servers=cfg.tools.mcp_servers,
@@ -1384,7 +1336,6 @@ def serve(
         web_search_config=cfg.tools.web.search,
         web_proxy=cfg.tools.web.proxy or None,
         exec_config=cfg.tools.exec,
-        cron_service=cron,
         mcp_servers=cfg.tools.mcp_servers,
         channels_config=cfg.channels,
         timezone=cfg.agents.defaults.timezone,

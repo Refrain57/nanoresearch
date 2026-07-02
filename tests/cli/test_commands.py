@@ -360,7 +360,6 @@ def mock_agent_runtime(tmp_path):
          patch("nanoresearch.cli.commands._make_provider", return_value=object()), \
          patch("nanoresearch.cli.commands._print_agent_response") as mock_print_response, \
          patch("nanoresearch.bus.queue.MessageBus"), \
-         patch("nanoresearch.cron.service.CronService"), \
          patch("nanoresearch.agent.loop.AgentLoop") as mock_agent_loop_cls:
 
         agent_loop = MagicMock()
@@ -435,7 +434,6 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", lambda _store: object())
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
@@ -456,145 +454,10 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
     assert seen["config_path"] == config_file.resolve()
 
 
-def test_agent_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "agent-workspace")
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("nanoresearch.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-
-    class _FakeCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-
-    class _FakeAgentLoop:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        async def process_direct(self, *_args, **_kwargs):
-            return OutboundMessage(channel="cli", chat_id="direct", content="ok")
-
-        async def close_mcp(self) -> None:
-            return None
-
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", _FakeCron)
-    monkeypatch.setattr("nanoresearch.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("nanoresearch.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
-
-    result = runner.invoke(app, ["agent", "-m", "hello", "-c", str(config_file)])
-
-    assert result.exit_code == 0
-    assert seen["cron_store"] == config.workspace_path / "cron" / "jobs.json"
 
 
-def test_agent_workspace_override_does_not_migrate_legacy_cron(
-    monkeypatch, tmp_path: Path
-) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    legacy_dir = tmp_path / "global" / "cron"
-    legacy_dir.mkdir(parents=True)
-    legacy_file = legacy_dir / "jobs.json"
-    legacy_file.write_text('{"jobs": []}')
-
-    override = tmp_path / "override-workspace"
-    config = Config()
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("nanoresearch.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanoresearch.config.paths.get_cron_dir", lambda: legacy_dir)
-
-    class _FakeCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-
-    class _FakeAgentLoop:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        async def process_direct(self, *_args, **_kwargs):
-            return OutboundMessage(channel="cli", chat_id="direct", content="ok")
-
-        async def close_mcp(self) -> None:
-            return None
-
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", _FakeCron)
-    monkeypatch.setattr("nanoresearch.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("nanoresearch.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
-
-    result = runner.invoke(
-        app,
-        ["agent", "-m", "hello", "-c", str(config_file), "-w", str(override)],
-    )
-
-    assert result.exit_code == 0
-    assert seen["cron_store"] == override / "cron" / "jobs.json"
-    assert legacy_file.exists()
-    assert not (override / "cron" / "jobs.json").exists()
 
 
-def test_agent_custom_config_workspace_does_not_migrate_legacy_cron(
-    monkeypatch, tmp_path: Path
-) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    legacy_dir = tmp_path / "global" / "cron"
-    legacy_dir.mkdir(parents=True)
-    legacy_file = legacy_dir / "jobs.json"
-    legacy_file.write_text('{"jobs": []}')
-
-    custom_workspace = tmp_path / "custom-workspace"
-    config = Config()
-    config.agents.defaults.workspace = str(custom_workspace)
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("nanoresearch.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanoresearch.config.paths.get_cron_dir", lambda: legacy_dir)
-
-    class _FakeCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-
-    class _FakeAgentLoop:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        async def process_direct(self, *_args, **_kwargs):
-            return OutboundMessage(channel="cli", chat_id="direct", content="ok")
-
-        async def close_mcp(self) -> None:
-            return None
-
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", _FakeCron)
-    monkeypatch.setattr("nanoresearch.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("nanoresearch.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
-
-    result = runner.invoke(app, ["agent", "-m", "hello", "-c", str(config_file)])
-
-    assert result.exit_code == 0
-    assert seen["cron_store"] == custom_workspace / "cron" / "jobs.json"
-    assert legacy_file.exists()
-    assert not (custom_workspace / "cron" / "jobs.json").exists()
 
 
 def test_agent_overrides_workspace_path(mock_agent_runtime):
@@ -703,156 +566,14 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     assert config.workspace_path == override
 
 
-def test_gateway_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("nanoresearch.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanoresearch.session.manager.SessionManager", lambda _workspace: object())
-
-    class _StopCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-            raise _StopGatewayError("stop")
-
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", _StopCron)
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
-
-    assert isinstance(result.exception, _StopGatewayError)
-    assert seen["cron_store"] == config.workspace_path / "cron" / "jobs.json"
 
 
-def test_gateway_workspace_override_does_not_migrate_legacy_cron(
-    monkeypatch, tmp_path: Path
-) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    legacy_dir = tmp_path / "global" / "cron"
-    legacy_dir.mkdir(parents=True)
-    legacy_file = legacy_dir / "jobs.json"
-    legacy_file.write_text('{"jobs": []}')
-
-    override = tmp_path / "override-workspace"
-    config = Config()
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("nanoresearch.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanoresearch.session.manager.SessionManager", lambda _workspace: object())
-    monkeypatch.setattr("nanoresearch.config.paths.get_cron_dir", lambda: legacy_dir)
-
-    class _StopCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-            raise _StopGatewayError("stop")
-
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", _StopCron)
-
-    result = runner.invoke(
-        app,
-        ["gateway", "--config", str(config_file), "--workspace", str(override)],
-    )
-
-    assert isinstance(result.exception, _StopGatewayError)
-    assert seen["cron_store"] == override / "cron" / "jobs.json"
-    assert legacy_file.exists()
-    assert not (override / "cron" / "jobs.json").exists()
 
 
-def test_gateway_custom_config_workspace_does_not_migrate_legacy_cron(
-    monkeypatch, tmp_path: Path
-) -> None:
-    config_file = tmp_path / "instance" / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text("{}")
-
-    legacy_dir = tmp_path / "global" / "cron"
-    legacy_dir.mkdir(parents=True)
-    legacy_file = legacy_dir / "jobs.json"
-    legacy_file.write_text('{"jobs": []}')
-
-    custom_workspace = tmp_path / "custom-workspace"
-    config = Config()
-    config.agents.defaults.workspace = str(custom_workspace)
-    seen: dict[str, Path] = {}
-
-    monkeypatch.setattr("nanoresearch.config.loader.set_config_path", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoresearch.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanoresearch.cli.commands._make_provider", lambda _config: object())
-    monkeypatch.setattr("nanoresearch.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanoresearch.session.manager.SessionManager", lambda _workspace: object())
-    monkeypatch.setattr("nanoresearch.config.paths.get_cron_dir", lambda: legacy_dir)
-
-    class _StopCron:
-        def __init__(self, store_path: Path) -> None:
-            seen["cron_store"] = store_path
-            raise _StopGatewayError("stop")
-
-    monkeypatch.setattr("nanoresearch.cron.service.CronService", _StopCron)
-
-    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
-
-    assert isinstance(result.exception, _StopGatewayError)
-    assert seen["cron_store"] == custom_workspace / "cron" / "jobs.json"
-    assert legacy_file.exists()
-    assert not (custom_workspace / "cron" / "jobs.json").exists()
 
 
-def test_migrate_cron_store_moves_legacy_file(tmp_path: Path) -> None:
-    """Legacy global jobs.json is moved into the workspace on first run."""
-    from nanoresearch.cli.commands import _migrate_cron_store
-
-    legacy_dir = tmp_path / "global" / "cron"
-    legacy_dir.mkdir(parents=True)
-    legacy_file = legacy_dir / "jobs.json"
-    legacy_file.write_text('{"jobs": []}')
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "workspace")
-    workspace_cron = config.workspace_path / "cron" / "jobs.json"
-
-    with patch("nanoresearch.config.paths.get_cron_dir", return_value=legacy_dir):
-        _migrate_cron_store(config)
-
-    assert workspace_cron.exists()
-    assert workspace_cron.read_text() == '{"jobs": []}'
-    assert not legacy_file.exists()
 
 
-def test_migrate_cron_store_skips_when_workspace_file_exists(tmp_path: Path) -> None:
-    """Migration does not overwrite an existing workspace cron store."""
-    from nanoresearch.cli.commands import _migrate_cron_store
-
-    legacy_dir = tmp_path / "global" / "cron"
-    legacy_dir.mkdir(parents=True)
-    (legacy_dir / "jobs.json").write_text('{"old": true}')
-
-    config = Config()
-    config.agents.defaults.workspace = str(tmp_path / "workspace")
-    workspace_cron = config.workspace_path / "cron" / "jobs.json"
-    workspace_cron.parent.mkdir(parents=True)
-    workspace_cron.write_text('{"new": true}')
-
-    with patch("nanoresearch.config.paths.get_cron_dir", return_value=legacy_dir):
-        _migrate_cron_store(config)
-
-    assert workspace_cron.read_text() == '{"new": true}'
 
 
 def test_gateway_uses_configured_port_when_cli_flag_is_missing(monkeypatch, tmp_path: Path) -> None:

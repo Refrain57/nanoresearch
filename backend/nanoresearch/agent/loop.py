@@ -48,7 +48,6 @@ from nanoresearch.utils.helpers import utcnow_aware
 
 if TYPE_CHECKING:
     from nanoresearch.config.schema import ChannelsConfig, ExecToolConfig, ResearchConfig, WebSearchConfig
-    from nanoresearch.cron.service import CronService
 
 
 # Tools whose results may carry RAG citations. ``retrieve_by_entity`` returns a
@@ -126,7 +125,6 @@ class AgentLoop:
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
-        cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
@@ -152,7 +150,6 @@ class AgentLoop:
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
-        self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.research_config = research_config or ResearchConfig()
         self.knowledge_search = knowledge_search

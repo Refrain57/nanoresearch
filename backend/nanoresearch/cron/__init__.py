@@ -1,6 +1,9 @@
-"""Cron service for scheduled agent tasks."""
+"""Cron: DB-backed scheduled tasks (production redesign).
 
-from nanoresearch.cron.service import CronService
-from nanoresearch.cron.types import CronJob, CronSchedule
+The CronScheduler sentinel scans the cron_jobs table and dispatches due jobs through
+the existing mailbox → dispatcher → worker path.
+"""
 
-__all__ = ["CronService", "CronJob", "CronSchedule"]
+from nanoresearch.cron.scheduler import CronScheduler
+
+__all__ = ["CronScheduler"]

@@ -1071,7 +1071,6 @@ async def _build_eval_agent_loop(uid: str, app_state):
         web_search_config=cfg.get("web_search_config"),
         web_proxy=cfg.get("web_proxy"),
         exec_config=cfg.get("exec_config"),
-        cron_service=cfg.get("cron_service"),
         restrict_to_workspace=True,
         session_manager=session_manager,
         mcp_servers=cfg.get("mcp_servers"),

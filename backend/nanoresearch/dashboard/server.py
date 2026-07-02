@@ -164,41 +164,9 @@ def _ms_to_iso(ms: int | None) -> str | None:
 
 
 def _read_cron_jobs(workspace: Path) -> list[dict]:
-    path = workspace / "cron" / "jobs.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    result = []
-    for job in data.get("jobs", []):
-        state = job.get("state", {})
-        schedule = job.get("schedule", {})
-        payload = job.get("payload", {})
-        runs = state.get("runHistory", [])[-5:]
-        result.append({
-            "id": job.get("id"),
-            "name": job.get("name"),
-            "enabled": job.get("enabled", False),
-            "schedule_kind": schedule.get("kind"),
-            "schedule_expr": schedule.get("expr") or schedule.get("everyMs"),
-            "tz": schedule.get("tz"),
-            "channel": payload.get("channel"),
-            "chat_id": payload.get("to"),
-            "next_run_at": _ms_to_iso(state.get("nextRunAtMs")),
-            "last_run_at": _ms_to_iso(state.get("lastRunAtMs")),
-            "last_status": state.get("lastStatus"),
-            "last_error": state.get("lastError"),
-            "recent_runs": [
-                {
-                    "run_at": _ms_to_iso(r["runAtMs"]),
-                    "status": r["status"],
-                    "duration_ms": r["durationMs"],
-                    "error": r.get("error"),
-                }
-                for r in runs
-            ],
-        })
-    return result
+    # Cron production redesign: jobs live in the cron_jobs DB table, not the legacy JSON store.
+    # This legacy gateway dashboard has no DB session; the cron panel is served by the web UI.
+    return []
 
 
 def _read_recent_activity(workspace: Path) -> list[dict]:
