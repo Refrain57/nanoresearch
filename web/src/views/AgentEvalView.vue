@@ -85,7 +85,7 @@
               </a-table-column>
               <a-table-column title="首字" data-index="ttft_ms" width="80" align="center">
                 <template #default="{ record }">
-                  {{ record.ttft_ms ? record.ttft_ms.toFixed(0) + 'ms' : '—' }}
+                  {{ record.ttft_ms ? (record.ttft_ms / 1000).toFixed(1) + 's' : '—' }}
                 </template>
               </a-table-column>
               <a-table-column title="Badcase" width="90" align="center">
@@ -444,7 +444,7 @@
     <a-modal
       v-model:open="drawerOpen"
       title="运行快照详情"
-      width="700"
+      :width="760"
       :footer="null"
       :destroy-on-close="true"
       @cancel="detail = null; diagTabKey = 'detail'; diagVersions = []; diagData = null"
@@ -463,7 +463,7 @@
                   {{ detail.total_input_tokens }} / {{ detail.total_output_tokens }}
                 </a-descriptions-item>
                 <a-descriptions-item v-if="detail.ttft_ms != null" label="首字时延">
-                  {{ detail.ttft_ms.toFixed(0) + ' ms' }}
+                  {{ (detail.ttft_ms / 1000).toFixed(2) + ' s' }}
                 </a-descriptions-item>
                 <a-descriptions-item label="总耗时">
                   {{ detail.total_duration_ms ? (detail.total_duration_ms / 1000).toFixed(2) + ' s' : '—' }}

@@ -67,7 +67,6 @@ defineProps({
 
 function fmtMs(ms) {
   if (ms == null) return '—'
-  if (ms < 1000) return `${ms.toFixed(0)} ms`
   return `${(ms / 1000).toFixed(2)} s`
 }
 
@@ -90,6 +89,16 @@ function prettyJson(v) {
   align-items: center;
   gap: 8px;
   display: flex;
+}
+/* ant-design-vue wraps the #header slot content in .ant-collapse-header-text,
+   which is the real flex child. Make THAT a flex row filling the width so
+   .tl-dur's `margin-left:auto` actually right-aligns the duration. */
+.timeline :deep(.ant-collapse-header-text) {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 /* Colored left rail differentiating LLM vs tool steps */
 .timeline :deep(.tl-llm) { border-left: 3px solid var(--nr-sage, #5E7355); }
