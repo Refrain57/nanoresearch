@@ -8,6 +8,71 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+# Per-LLM-call input/output capture limits (audit view, not full transcript).
+# Sampling upstream keeps snapshot volume bounded; these cap a single call.
+_MAX_MSG_CHARS = 2000        # per-message content, truncated
+_MAX_INPUT_MESSAGES = 40     # messages array cap (keep system + tail, elide middle)
+_MAX_OUTPUT_CHARS = 4000     # response text / reasoning, truncated
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) > limit:
+        return text[:limit] + "…(truncated)"
+    return text
+
+
+def _stringify_content(content: Any) -> str:
+    """Flatten a message ``content`` (str or multimodal list) into a compact string.
+
+    Multimodal blocks carry huge base64 image payloads and internal ``_meta``;
+    those are replaced with a ``[image]`` placeholder so snapshots stay small and
+    never leak raw base64 / local file paths.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text" or ("text" in block and "image_url" not in block):
+                    parts.append(str(block.get("text", "")))
+                elif btype == "image_url" or "image_url" in block:
+                    parts.append("[image]")
+                else:
+                    parts.append(f"[{btype or 'block'}]")
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
+
+
+def _snapshot_messages(messages: Any) -> list[dict] | None:
+    """Capture the messages the model saw as {role, content(str, truncated)}.
+
+    Caps the array to _MAX_INPUT_MESSAGES by keeping the first (system) message
+    plus the most recent tail, eliding the middle with a marker.
+    """
+    if not messages:
+        return None
+
+    def snap_one(m: Any) -> dict:
+        role = m.get("role", "?") if isinstance(m, dict) else "?"
+        raw = m.get("content") if isinstance(m, dict) else m
+        return {"role": role, "content": _truncate_text(_stringify_content(raw), _MAX_MSG_CHARS)}
+
+    if len(messages) <= _MAX_INPUT_MESSAGES:
+        return [snap_one(m) for m in messages]
+
+    tail_n = _MAX_INPUT_MESSAGES - 2
+    head = [snap_one(messages[0])]
+    tail = [snap_one(m) for m in messages[-tail_n:]]
+    elided = len(messages) - 1 - tail_n
+    marker = {"role": "system", "content": f"…({elided} earlier messages elided)…"}
+    return head + [marker] + tail
+
 
 @dataclass
 class RunSnapshotData:
@@ -41,6 +106,7 @@ class RunSnapshotCollector:
         self._llm_calls: list[dict] = []
         self._retry_count = 0
         self._current_order = 0
+        self._current_llm_start: float | None = None
         # keyed by tool_call_id to support concurrent tools
         self._pending: dict[str, tuple[dict, float]] = {}
 
@@ -49,11 +115,52 @@ class RunSnapshotCollector:
             self._first_token_time = time.monotonic()
             self._first_token_recorded = True
 
-    def on_llm_end(self, usage: dict, model: str) -> None:
+    def on_llm_start(self) -> None:
+        """Mark the start of an LLM call so on_llm_end can measure its duration."""
+        self._current_llm_start = time.monotonic()
+
+    def on_llm_end(
+        self,
+        usage: dict,
+        model: str,
+        messages: Any = None,
+        response: Any = None,
+    ) -> None:
+        # Share the tool-call order counter so LLM and tool events interleave on
+        # one timeline (on_llm_end fires before the tools that call requested).
+        self._current_order += 1
+        duration_ms: float | None = None
+        if self._current_llm_start is not None:
+            duration_ms = round((time.monotonic() - self._current_llm_start) * 1000, 2)
+            self._current_llm_start = None
+
+        output_text = ""
+        output_tool_calls: list[dict] = []
+        output_reasoning: str | None = None
+        if response is not None:
+            try:
+                output_text = _truncate_text(getattr(response, "content", None) or "", _MAX_OUTPUT_CHARS)
+                for tc in (getattr(response, "tool_calls", None) or []):
+                    output_tool_calls.append({
+                        "name": getattr(tc, "name", None),
+                        "arguments": getattr(tc, "arguments", None),
+                    })
+                reasoning = getattr(response, "reasoning_content", None)
+                if reasoning:
+                    output_reasoning = _truncate_text(str(reasoning), _MAX_OUTPUT_CHARS)
+            except Exception:
+                pass
+
         self._llm_calls.append({
+            "order": self._current_order,
             "input_tokens": int(usage.get("prompt_tokens", 0) or 0),
             "output_tokens": int(usage.get("completion_tokens", 0) or 0),
             "model": model,
+            "duration_ms": duration_ms,
+            "input_messages": _snapshot_messages(messages),
+            "output_text": output_text,
+            "output_tool_calls": output_tool_calls,
+            "output_reasoning": output_reasoning,
         })
 
     def on_tool_start(self, tool_call_id: str, name: str, params: Any) -> None:
