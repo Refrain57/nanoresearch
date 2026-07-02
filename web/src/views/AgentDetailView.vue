@@ -202,24 +202,36 @@
       </a-spin>
 
       <!-- 添加 Skill Modal -->
-      <a-modal v-model:open="addSkillOpen" title="添加 Skill" :footer="null" width="560">
-        <div v-if="skillsToAdd.length" class="add-skill-list">
-          <div
-            v-for="s in skillsToAdd"
-            :key="s.name"
-            class="add-skill-row"
-            @click="addSkill(s)"
-          >
-            <div>
-              <div class="add-skill-name">{{ s.name }}</div>
-              <div class="add-skill-desc">{{ s.description }}</div>
+      <a-modal v-model:open="addSkillOpen" title="添加 / 安装 Skill" :footer="null" width="640">
+        <a-tabs>
+          <a-tab-pane key="pool" tab="可用池">
+            <div v-if="skillsToAdd.length" class="add-skill-list">
+              <div v-for="s in skillsToAdd" :key="s.name" class="add-skill-row">
+                <div class="add-skill-main" @click="addSkill(s)">
+                  <div class="add-skill-name">{{ s.name }}</div>
+                  <div class="add-skill-desc">{{ s.description }}</div>
+                </div>
+                <div class="add-skill-actions">
+                  <a-tag size="small" :color="s.source === 'builtin' ? 'blue' : 'green'">
+                    {{ s.source === 'builtin' ? '内置' : '自定义' }}
+                  </a-tag>
+                  <a-popconfirm
+                    v-if="s.source === 'workspace'"
+                    title="从工作区卸载该 skill？使用它的 Agent 将失去该能力。"
+                    @confirm="uninstallPoolSkill(s.name)"
+                  >
+                    <a-button size="small" danger type="link">卸载</a-button>
+                  </a-popconfirm>
+                </div>
+              </div>
             </div>
-            <a-tag size="small" :color="s.source === 'builtin' ? 'blue' : 'green'">
-              {{ s.source === 'builtin' ? '内置' : '自定义' }}
-            </a-tag>
-          </div>
-        </div>
-        <a-empty v-else description="所有可用 Skill 已添加" />
+            <a-empty v-else description="所有可用 Skill 已添加" />
+          </a-tab-pane>
+
+          <a-tab-pane key="market" tab="从市场安装">
+            <skill-market @installed="onMarketInstalled" />
+          </a-tab-pane>
+        </a-tabs>
       </a-modal>
 
       <!-- 编辑 Modal -->
@@ -249,6 +261,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { PlusOutlined } from '@ant-design/icons-vue'
 import AppLayout from '@/layouts/AppLayout.vue'
+import SkillMarket from '@/components/SkillMarket.vue'
+import { uninstallSkill } from '@/apis/skills'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
@@ -361,6 +375,20 @@ async function addSkill(s) {
   } catch (e) {
     message.error(e.message || '添加失败')
   }
+}
+
+async function uninstallPoolSkill(name) {
+  try {
+    await uninstallSkill(name)
+    await agentStore.fetchSkills()
+    message.success(`已从工作区移除 ${name}`)
+  } catch (e) {
+    message.error(e.message || '移除失败')
+  }
+}
+
+async function onMarketInstalled() {
+  await agentStore.fetchSkills()
 }
 
 async function handleUpdate() {
@@ -478,8 +506,10 @@ async function loadPromptPreview() {
 .rate-text { font-size: 12px; color: var(--nr-ink-2); }
 .run-dur { font-size: 12px; color: var(--nr-ink-3); margin-left: 8px; }
 .add-skill-list { display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto; margin-top: 8px; }
-.add-skill-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--nr-border); }
+.add-skill-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--nr-border); }
 .add-skill-row:hover { background: var(--nr-clay-soft); border-color: var(--nr-clay-soft); }
+.add-skill-main { flex: 1; cursor: pointer; }
+.add-skill-actions { display: flex; align-items: center; gap: 8px; }
 .add-skill-name { font-size: 13px; font-weight: 600; color: var(--nr-clay); }
 .add-skill-desc { font-size: 12px; color: var(--nr-ink-2); margin-top: 2px; }
 

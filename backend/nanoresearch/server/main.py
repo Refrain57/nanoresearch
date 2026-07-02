@@ -153,6 +153,7 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     from nanoresearch.server.routers.eval_router import router as eval_router
     from nanoresearch.server.routers.settings_router import router as settings_router
     from nanoresearch.server.routers.workspace_router import router as workspace_router
+    from nanoresearch.server.routers.skill_market_router import router as skill_market_router
 
     app.include_router(chat_router)
     app.include_router(agent_router)
@@ -161,6 +162,7 @@ def create_app(channel_loop, session_factory, loop_config=None, channel_manager=
     app.include_router(eval_router)
     app.include_router(settings_router)
     app.include_router(workspace_router)
+    app.include_router(skill_market_router)
 
     # RAG 图片静态文件服务（必须在前端 "/" 挂载之前）
     from pathlib import Path

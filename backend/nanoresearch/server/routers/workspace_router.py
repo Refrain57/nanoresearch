@@ -11,6 +11,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from nanoresearch.server.middleware.auth import get_current_user
+from nanoresearch.server.routers.workspace_paths import (
+    safe_resolve as _safe_resolve,
+    user_workspace as _user_workspace,
+)
 
 router = APIRouter()
 
@@ -19,24 +23,6 @@ EDITABLE_FILES = {"SOUL.md", "AGENTS.md", "USER.md", "TOOLS.md"}
 
 class FileWriteBody(BaseModel):
     content: str
-
-
-def _user_workspace(request: Request, uid: str) -> Path:
-    cfg = getattr(request.app.state, "loop_config", None) or {}
-    base = cfg.get("base_workspace")
-    if base is None:
-        from nanoresearch.config.paths import get_workspace_path
-        base = get_workspace_path()
-    return Path(base) / "users" / uid
-
-
-def _safe_resolve(workspace: Path, rel_path: str) -> Path:
-    resolved = (workspace / rel_path).resolve()
-    try:
-        resolved.relative_to(workspace.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="非法路径")
-    return resolved
 
 
 def _file_entry(path: Path, workspace: Path) -> dict:
