@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from contextvars import ContextVar
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -41,12 +41,14 @@ class CronTool(Tool):
         self._default_timezone = default_timezone
         self._channel = ""
         self._chat_id = ""
+        self._agent_id: str | None = None
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
-    def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context (used to pick a delivery target)."""
+    def set_context(self, channel: str, chat_id: str, agent_id: str | None = None) -> None:
+        """Set the current session context (delivery target + the agent to bind new jobs to)."""
         self._channel = channel
         self._chat_id = chat_id
+        self._agent_id = agent_id
 
     def set_cron_context(self, active: bool):
         """Mark whether the tool is executing inside a cron job callback."""
@@ -59,7 +61,7 @@ class CronTool(Tool):
     def _validate_timezone(tz: str) -> str | None:
         try:
             ZoneInfo(tz)
-        except (KeyError, Exception):
+        except Exception:
             return f"Error: unknown timezone '{tz}'"
         return None
 
@@ -156,7 +158,7 @@ class CronTool(Tool):
 
         if every_seconds:
             kind, every_s = "every", every_seconds
-            next_run = now + timedelta(seconds=every_seconds)
+            next_run = compute_next_run("every", every_s=every_seconds, after=now)
         elif cron_expr:
             eff_tz = tz or self._default_timezone
             if err := self._validate_timezone(eff_tz):
@@ -178,13 +180,14 @@ class CronTool(Tool):
             return "Error: either every_seconds, cron_expr, or at is required"
 
         deliver = self._channel not in _NON_DELIVERABLE
+        agent_uuid = uuid.UUID(self._agent_id) if self._agent_id else None
 
         conv_id = uuid.uuid4()
         await self._conv.create(
-            key=f"web:{conv_id}", uid=self._uid, conv_id=conv_id,
+            key=f"web:{conv_id}", uid=self._uid, conv_id=conv_id, agent_id=agent_uuid,
             title=f"[cron] {message[:40]}", metadata={"cron": True})
         job = await self._cron.create(
-            uid=self._uid, name=message[:30], agent_id=None, conversation_id=conv_id,
+            uid=self._uid, name=message[:30], agent_id=agent_uuid, conversation_id=conv_id,
             schedule_kind=kind, schedule_at=schedule_at, schedule_every_s=every_s,
             schedule_expr=expr, schedule_tz=eff_tz, message=message,
             deliver=deliver,

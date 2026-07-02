@@ -118,6 +118,41 @@ def test_two_schedulers_fire_once():
     run(_body())
 
 
+def test_two_schedulers_lock_expiry_dedup_via_key_and_cas():
+    """When the cron_lock EXPIRES mid-dispatch and a second sentinel proceeds on the same
+    occurrence, the deterministic key blocks its post (deduped) and the CAS blocks a second
+    advance → still exactly one fire. Exercises layers 2 and 3 (post-review fix I3)."""
+    async def _body():
+        r = await _redis()
+        factory = make_factory()
+        await _seed_user(factory)
+        repo = CronJobRepository(factory)
+        observed = NOW - timedelta(minutes=10)
+        job = await _mk(repo, next_run_at=observed)
+        calls = []
+
+        async def slow(j):
+            calls.append(j.id)
+            await asyncio.sleep(0.5)  # hold past the 100ms lock lease
+            return "r"
+
+        s1 = CronScheduler(r, factory, dispatch_fn=slow, now_fn=lambda: NOW, lock_px_ms=100)
+        s2 = CronScheduler(r, factory, dispatch_fn=slow, now_fn=lambda: NOW, lock_px_ms=100)
+
+        t1 = asyncio.create_task(s1._dispatch_due_job(job))
+        await asyncio.sleep(0.2)                       # s1 holds lock+dispatching; lease now expired
+        o2 = await s2._dispatch_due_job(job)           # acquires freed lock; det SET NX fails
+        o1 = await t1
+
+        assert calls == [job.id]                       # exactly one post (s1); s2 deduped by det key
+        assert o2 == "deduped"
+        got = await repo.get(job.id)
+        assert len(got.run_history) == 1               # CAS admitted a single advance
+        await r.aclose()
+
+    run(_body())
+
+
 def test_crash_between_post_and_advance_no_double():
     """A prior attempt posted (det key set) but crashed before advancing → re-scan must
     not re-dispatch, but must still complete the advance."""
@@ -136,6 +171,35 @@ def test_crash_between_post_and_advance_no_double():
         assert calls == []                 # not re-dispatched (idempotency dedupe)
         got = await repo.get(job.id)
         assert got.next_run_at > NOW       # advance still ran
+        await r.aclose()
+
+    run(_body())
+
+
+def test_dispatch_failure_records_error_and_retries():
+    """A dispatch exception must NOT advance-as-ok; it clears the occurrence key so the
+    next scan retries, and records last_status='error' (post-review fix I1)."""
+    async def _body():
+        r = await _redis()
+        factory = make_factory()
+        await _seed_user(factory)
+        repo = CronJobRepository(factory)
+        observed = NOW - timedelta(minutes=10)
+        job = await _mk(repo, next_run_at=observed)
+        calls = []
+
+        async def failing(j):
+            calls.append(j.id)
+            raise RuntimeError("boom")
+
+        sched = CronScheduler(r, factory, dispatch_fn=failing, now_fn=lambda: NOW)
+        await sched._scan_once()
+        got = await repo.get(job.id)
+        assert got.last_status == "error"        # not falsely 'ok'
+        assert got.next_run_at == observed       # not advanced → stays due
+        # det key cleared → next scan re-dispatches instead of dedup-to-ok
+        await sched._scan_once()
+        assert calls == [job.id, job.id]
         await r.aclose()
 
     run(_body())
@@ -173,6 +237,30 @@ def test_one_shot_fired_then_deleted():
         await sched._scan_once()
         assert calls == [job.id]
         assert await repo.get(job.id) is None  # one-shot deleted after firing
+        await r.aclose()
+
+    run(_body())
+
+
+def test_one_shot_missed_disabled_with_record():
+    """A stale one-shot is not silently deleted — it's disabled with a 'missed' record so the
+    user can see the reminder was dropped (post-review Minor)."""
+    async def _body():
+        r = await _redis()
+        factory = make_factory()
+        await _seed_user(factory)
+        repo = CronJobRepository(factory)
+        observed = NOW - timedelta(hours=5)  # outside 1h grace
+        job = await _mk(repo, schedule_kind="at", schedule_every_s=None,
+                        schedule_at=observed, next_run_at=observed, delete_after_run=True)
+        calls, stub = _recorder()
+        sched = CronScheduler(r, factory, dispatch_fn=stub, now_fn=lambda: NOW)
+        await sched._scan_once()
+        assert calls == []                     # stale → not fired
+        got = await repo.get(job.id)
+        assert got is not None                 # kept (not deleted)
+        assert got.enabled is False
+        assert got.last_status == "missed"
         await r.aclose()
 
     run(_body())

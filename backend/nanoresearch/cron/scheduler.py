@@ -136,17 +136,34 @@ class CronScheduler:
                 won = await self._redis.set(
                     RedisKeys.job(det), "pending", nx=True, ex=self._idem_ttl_s)
                 if won:
-                    for _ in range(max(1, decision.fire_count)):
-                        await self._dispatch_fn(fresh)
-                    outcome = "fired"
+                    try:
+                        run_id = None
+                        for _ in range(max(1, decision.fire_count)):
+                            run_id = await self._dispatch_fn(fresh)
+                        outcome = "fired"
+                        if run_id:  # breadcrumb: replace the placeholder with the run id
+                            await self._redis.set(
+                                RedisKeys.job(det), str(run_id), ex=self._idem_ttl_s)
+                    except Exception as e:
+                        # Not (fully) posted → clear the occurrence key so the next scan retries,
+                        # record the error, and DO NOT advance the schedule (job stays due).
+                        await self._redis.delete(RedisKeys.job(det))
+                        await self._repo.advance(
+                            job.id, observed, observed, last_status="error",
+                            last_error=str(e)[:500], run_at=now,
+                            run_record={"run_at": now.isoformat(), "status": "error"})
+                        return "error"
                 else:
                     outcome = "deduped"  # occurrence already posted (crash-recovery)
 
             status = "ok" if outcome in ("fired", "deduped") else outcome
             run_record = {"run_at": now.isoformat(), "status": status}
             if is_one_shot:
+                # Delete only when the occurrence actually fired; a missed/skipped one-shot is
+                # disabled-with-record so the dropped reminder stays visible.
+                delete = fresh.delete_after_run and outcome in ("fired", "deduped")
                 await self._repo.finish_one_shot(
-                    job.id, observed, delete=fresh.delete_after_run,
+                    job.id, observed, delete=delete,
                     last_status=status, run_at=now, run_record=run_record)
             else:
                 await self._repo.advance(

@@ -30,7 +30,10 @@ async def build_cron_run_payload(factory: Any, job: Any, run_id: str) -> dict:
         run_id=run_id,
         agent_id=(str(job.agent_id) if job.agent_id else None),
     )
-    payload["cron_delivery"] = {
+    # Single key `run_agent_job` accepts (not arbitrary extras — the dispatcher splats **payload).
+    # Marks the run as cron-triggered (enables the self-schedule guard) and carries the phase-2
+    # delivery gate inputs.
+    payload["cron"] = {
         "deliver": job.deliver,
         "channel": job.deliver_channel,
         "to": job.deliver_to,

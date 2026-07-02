@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -15,6 +16,7 @@ from nanoresearch.cron.payload import build_cron_run_payload
 from nanoresearch.storage.models import Conversation, User
 from nanoresearch.storage.repositories.cron_repo import CronJobRepository
 from nanoresearch.storage.repositories.run_repo import RunRepository
+from nanoresearch.worker import run_agent_job
 from tests.conftest import make_factory, pg_conn
 
 UTC = timezone.utc
@@ -88,16 +90,29 @@ def test_payload_wraps_task_message():
     run(_body())
 
 
-def test_payload_carries_cron_delivery():
+def test_payload_carries_cron_metadata():
     async def _body():
         factory = make_factory()
         _conv_id, job = await _seed(factory, deliver=True)
         payload = await build_cron_run_payload(factory, job, run_id="r1")
-        cd = payload["cron_delivery"]
-        assert cd["deliver"] is True
-        assert cd["channel"] == "telegram"
-        assert cd["to"] == "123"
-        assert cd["task_context"] == "Check GitHub stars and report"
+        cron = payload["cron"]
+        assert cron["deliver"] is True
+        assert cron["channel"] == "telegram"
+        assert cron["to"] == "123"
+        assert cron["task_context"] == "Check GitHub stars and report"
+
+    run(_body())
+
+
+def test_cron_payload_keys_accepted_by_run_agent_job():
+    """Every payload key the dispatcher splats must be a run_agent_job param (no TypeError)."""
+    async def _body():
+        factory = make_factory()
+        _conv_id, job = await _seed(factory, deliver=True)
+        payload = await build_cron_run_payload(factory, job, run_id="r1")
+        accepted = set(inspect.signature(run_agent_job).parameters)
+        extra = set(payload) - accepted
+        assert not extra, f"payload keys rejected by run_agent_job: {extra}"
 
     run(_body())
 

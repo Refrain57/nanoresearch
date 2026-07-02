@@ -339,7 +339,7 @@ class AgentLoop:
                     elif name == "spawn":
                         tool.set_context(channel, chat_id, run_id=run_id)
                     else:
-                        tool.set_context(channel, chat_id)
+                        tool.set_context(channel, chat_id, agent_id=agent_id)
 
         # Set session_key for MCP tools (for query rewriting)
         for tool_name in self.tools.tool_names:

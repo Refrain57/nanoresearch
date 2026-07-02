@@ -4,10 +4,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+import uuid
+
 import pytest
 
 from nanoresearch.agent.tools.cron import CronTool
-from nanoresearch.storage.models import User
+from nanoresearch.storage.models import Agent, User
 from nanoresearch.storage.repositories.conversation_repo import ConversationRepository
 from nanoresearch.storage.repositories.cron_repo import CronJobRepository
 from tests.conftest import make_factory, pg_conn
@@ -127,6 +129,27 @@ def test_self_schedule_blocked():
             tool.reset_cron_context(token)
         assert "cannot schedule new jobs from within a cron job" in res
         assert await CronJobRepository(factory).list_by_uid("u") == []
+
+    run(_body())
+
+
+def test_add_binds_current_agent_id():
+    """Post-review fix I4: cron job + its conversation run as the current agent, not the default."""
+    async def _body():
+        factory = make_factory()
+        agent_id = uuid.uuid4()
+        async with factory() as db:
+            db.add(User(uid="u", email="u@t.com", password_hash="x"))
+            await db.flush()
+            db.add(Agent(id=agent_id, name="researcher"))
+            await db.commit()
+        tool = CronTool(CronJobRepository(factory), ConversationRepository(factory), uid="u")
+        tool.set_context("web", "chat", agent_id=str(agent_id))
+        await tool.execute(action="add", message="daily digest", every_seconds=600)
+        job = (await CronJobRepository(factory).list_by_uid("u"))[0]
+        assert str(job.agent_id) == str(agent_id)
+        conv = await ConversationRepository(factory).get_by_id(job.conversation_id)
+        assert str(conv.agent_id) == str(agent_id)
 
     run(_body())
 
