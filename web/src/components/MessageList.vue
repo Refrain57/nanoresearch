@@ -34,6 +34,19 @@
         </a-collapse>
       </div>
 
+      <!-- 消息附件（agent 通过 message 工具发送的文件） -->
+      <div v-if="msg.role === 'assistant' && msg.media?.length" class="attachments">
+        <template v-for="(a, i) in msg.media" :key="i">
+          <img v-if="isImage(a)" :src="imgUrls[a.path] || ''" class="att-img" @click="openAtt(a)" />
+          <div v-else class="att-card" :class="{ clickable: canPreview(a) }" @click="canPreview(a) ? openAtt(a) : downloadAtt(a)">
+            <file-outlined class="att-icon" />
+            <span class="att-name">{{ a.name }}</span>
+            <span class="att-size">{{ fmtSize(a.size) }}</span>
+            <download-outlined class="att-dl" @click.stop="downloadAtt(a)" />
+          </div>
+        </template>
+      </div>
+
       </template>
     </div>
 
@@ -49,14 +62,18 @@
     <div v-if="toolHint" class="tool-hint">
       <loading-outlined spin /> {{ toolHint }}
     </div>
+
+    <FilePreviewModal v-model:open="previewOpen" :file="previewFile" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
-import { LoadingOutlined } from '@ant-design/icons-vue'
+import { LoadingOutlined, FileOutlined, DownloadOutlined } from '@ant-design/icons-vue'
 import { marked } from 'marked'
 import CitationText from './CitationText.vue'
+import FilePreviewModal from './FilePreviewModal.vue'
+import { fetchWorkspaceFileBlob } from '@/apis/workspace'
 
 marked.setOptions({ breaks: true, gfm: true })
 
@@ -112,6 +129,44 @@ function msgText(msg) {
   if (typeof msg.content === 'string') return msg.content
   return msg.content.text || msg.content.content || ''
 }
+
+// ── 消息附件（agent 用 message 工具发送的文件） ──
+const previewOpen = ref(false)
+const previewFile = ref(null)
+const imgUrls = ref({})
+const IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']
+const PREVIEW_EXTS = [...IMG_EXTS, 'pdf', 'md']
+function attExt(name) { const i = (name || '').lastIndexOf('.'); return i >= 0 ? name.slice(i + 1).toLowerCase() : '' }
+function isImage(a) { return IMG_EXTS.includes(attExt(a.name)) }
+function canPreview(a) { return PREVIEW_EXTS.includes(attExt(a.name)) }
+function fmtSize(b) { if (b < 1024) return b + 'B'; if (b < 1048576) return (b / 1024).toFixed(1) + 'K'; return (b / 1048576).toFixed(1) + 'M' }
+function openAtt(a) { previewFile.value = { path: a.path, name: a.name }; previewOpen.value = true }
+async function downloadAtt(a) {
+  try {
+    const b = await fetchWorkspaceFileBlob(a.path)
+    const u = URL.createObjectURL(b)
+    const el = document.createElement('a')
+    el.href = u; el.download = a.name
+    document.body.appendChild(el); el.click(); el.remove()
+    URL.revokeObjectURL(u)
+  } catch (e) { /* ignore download error */ }
+}
+
+// 内联图片附件：按需拉取带鉴权的 blob，缓存 object URL
+watch(() => props.messages, (msgs) => {
+  for (const m of msgs || []) {
+    if (m.role === 'assistant' && m.media?.length) {
+      for (const a of m.media) {
+        if (isImage(a) && !(a.path in imgUrls.value)) {
+          imgUrls.value = { ...imgUrls.value, [a.path]: '' }
+          fetchWorkspaceFileBlob(a.path)
+            .then(b => { imgUrls.value = { ...imgUrls.value, [a.path]: URL.createObjectURL(b) } })
+            .catch(() => {})
+        }
+      }
+    }
+  }
+}, { deep: true, immediate: true })
 
 watch(() => [props.messages.length, props.streamingText, props.loadingOlder], async () => {
   await nextTick()
@@ -192,6 +247,18 @@ watch(() => [props.messages.length, props.streamingText, props.loadingOlder], as
 .md-body :deep(table) { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 0.9em; }
 .md-body :deep(th),:deep(td) { border: 1px solid var(--nr-border); padding: 5px 10px; }
 .md-body :deep(th) { background: var(--nr-rail); font-weight: 600; }
+
+/* 消息附件 */
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 0 40px; max-width: 68%; }
+.att-img { max-width: 220px; max-height: 160px; border-radius: 8px; cursor: pointer; border: 1px solid var(--nr-border); }
+.att-card { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--nr-border); border-radius: 8px; background: var(--nr-card); max-width: 280px; }
+.att-card.clickable { cursor: pointer; }
+.att-card:hover { background: var(--nr-clay-soft); }
+.att-icon { color: var(--nr-ink-3); flex-shrink: 0; }
+.att-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.att-size { font-size: 11px; color: var(--nr-ink-3); flex-shrink: 0; }
+.att-dl { font-size: 12px; opacity: 0.6; cursor: pointer; flex-shrink: 0; }
+.att-dl:hover { opacity: 1; }
 .md-body :deep(a) { color: var(--nr-clay); text-decoration: none; }
 .md-body :deep(a:hover) { text-decoration: underline; }
 .md-body :deep(hr) { border: none; border-top: 1px solid var(--nr-border); margin: 10px 0; }
