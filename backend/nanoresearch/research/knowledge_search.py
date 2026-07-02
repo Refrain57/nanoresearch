@@ -42,10 +42,12 @@ class KnowledgeSearch:
         user_memory_store: ChromaStore | None = None,
         settings: "Settings | None" = None,
         mem_events_store: ChromaStore | None = None,
+        mem_conv_summaries_store: ChromaStore | None = None,
     ):
         self.dense_encoder = dense_encoder
         self.user_memory_store = user_memory_store
         self.mem_events_store = mem_events_store
+        self.mem_conv_summaries_store = mem_conv_summaries_store
         self._settings = settings
         self._reranker: "BaseReranker | None | bool" = None  # None=uninit, False=unavailable
 
@@ -61,6 +63,10 @@ class KnowledgeSearch:
             settings=settings,
             collection_name=f"mem_events{collection_suffix}",
         )
+        mem_conv_summaries_store = ChromaStore(
+            settings=settings,
+            collection_name=f"mem_conv_summaries{collection_suffix}",
+        )
         dense_encoder = EmbeddingFactory.create(settings)
 
         return cls(
@@ -68,6 +74,7 @@ class KnowledgeSearch:
             user_memory_store=user_memory_store,
             settings=settings,
             mem_events_store=mem_events_store,
+            mem_conv_summaries_store=mem_conv_summaries_store,
         )
 
     def _get_reranker(self) -> "BaseReranker | None":
@@ -259,6 +266,53 @@ class KnowledgeSearch:
         return self._hybrid_search(
             self.mem_events_store, query, top_k=top_k, apply_decay=apply_decay, uid=uid,
         )
+
+    # ============== Conversation summaries (P3) — conv-scoped, append-only ==============
+
+    def write_conv_summary_sync(self, text: str, uid: str | None, conversation_id: str,
+                                turn_start: int, turn_end: int, topic: str = "") -> str:
+        """Append one conversation-segment summary; returns its record id. Append-only, no TTL."""
+        if not text or not self.mem_conv_summaries_store:
+            return ""
+        vec = self.dense_encoder.embed([text])[0]
+        record_id = f"cs_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        self.mem_conv_summaries_store.insert_batch([{
+            "id": record_id,
+            "vector": vec,
+            "metadata": {
+                "type": "conv_summary",
+                "uid": uid or "",
+                "conversation_id": conversation_id or "",
+                "turn_start": turn_start,
+                "turn_end": turn_end,
+                "topic": topic,
+                "created_at": datetime.now().isoformat(),
+                "text": text,
+            },
+        }])
+        return record_id
+
+    def search_conv_summaries_sync(self, query: str, uid: str | None = None,
+                                   conversation_id: str | None = None, top_k: int = 5,
+                                   exclude_ids: list[str] | None = None,
+                                   apply_decay: bool = True) -> list[dict[str, Any]]:
+        """Semantic recall over mem_conv_summaries, filtered to one conversation (plan §4.2)."""
+        extra = {"conversation_id": conversation_id} if conversation_id else None
+        return self._hybrid_search(
+            self.mem_conv_summaries_store, query, top_k=top_k, apply_decay=apply_decay,
+            uid=uid, extra_filters=extra, exclude_ids=set(exclude_ids) if exclude_ids else None,
+        )
+
+    def list_conv_summaries_sync(self, uid: str | None, conversation_id: str) -> list[dict[str, Any]]:
+        """All summaries for one conversation (cheap listing for the recent window)."""
+        if not self.mem_conv_summaries_store:
+            return []
+        rows = self.mem_conv_summaries_store.query(vector=self._embed(""), top_k=1000)
+        return [
+            r for r in rows
+            if r.get("metadata", {}).get("uid") == uid
+            and r.get("metadata", {}).get("conversation_id") == conversation_id
+        ]
 
     async def write_user_memory(
         self,
