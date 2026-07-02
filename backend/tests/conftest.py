@@ -33,11 +33,19 @@ def pg_conn():
 
 
 def create_tables() -> None:
-    """Drop and recreate all tables using SQLAlchemy metadata + psycopg2."""
-    from sqlalchemy import create_engine
+    """Recreate all tables from a clean schema using SQLAlchemy metadata.
+
+    Uses ``DROP SCHEMA public CASCADE`` rather than ``Base.metadata.drop_all``:
+    once the schema is fully populated, ``drop_all`` cannot honour cross-table
+    FK dependency ordering and raises ``DependentObjectsStillExist``, which made
+    re-running the suite fail. A schema cascade drop always yields a clean slate.
+    """
+    from sqlalchemy import create_engine, text
     sync_url = TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
     engine = create_engine(sync_url, echo=False)
-    Base.metadata.drop_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
     Base.metadata.create_all(engine)
     engine.dispose()
 

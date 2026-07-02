@@ -9,7 +9,9 @@ Run in a dedicated conda environment:
     python scripts/mineru_server.py
 
 Endpoint:
-    POST /api/v1/extract   multipart PDF → {"markdown": "...", "images": {...}}
+    POST /api/v1/extract   multipart PDF →
+        {"markdown": "...", "images": {...}, "middle_json": "..."}
+    middle_json is MinerU's per-block layout (bbox+page) used for chunk grounding.
 """
 
 import base64
@@ -67,7 +69,14 @@ def _run_magic_pdf_v1(pdf_bytes: bytes, img_dir: Path):
     except Exception:
         pass
 
-    return markdown, image_types
+    # middle.json carries per-block bbox+page for chunk grounding (F2)
+    middle_json = ""
+    try:
+        middle_json = pipe_result.get_middle_json()
+    except Exception as exc:
+        logger.warning(f"MinerU: get_middle_json failed: {exc}")
+
+    return markdown, image_types, middle_json
 
 
 def _run_magic_pdf_v06(pdf_bytes: bytes, img_dir: Path):
@@ -84,7 +93,15 @@ def _run_magic_pdf_v06(pdf_bytes: bytes, img_dir: Path):
     pipe.pipe_classify()
     pipe.pipe_analyze()
     pipe.pipe_parse()
-    return pipe.get_markdown(str(img_dir)), {}
+    middle_json = ""
+    try:
+        import json as _json
+        mid = getattr(pipe, "pdf_mid_data", None)
+        if mid:
+            middle_json = mid if isinstance(mid, str) else _json.dumps(mid)
+    except Exception as exc:
+        logger.warning(f"MinerU (v0.6.x): middle json unavailable: {exc}")
+    return pipe.get_markdown(str(img_dir)), {}, middle_json
 
 
 def _run_magic_pdf(pdf_bytes: bytes, doc_hash: str):
@@ -93,16 +110,16 @@ def _run_magic_pdf(pdf_bytes: bytes, doc_hash: str):
 
     # Try v1.x first
     try:
-        markdown, image_types = _run_magic_pdf_v1(pdf_bytes, img_dir)
-        return markdown, image_types, img_dir
+        markdown, image_types, middle_json = _run_magic_pdf_v1(pdf_bytes, img_dir)
+        return markdown, image_types, img_dir, middle_json
     except (ImportError, ModuleNotFoundError):
         pass
     except SystemExit:
         pass
 
     # Fallback to v0.6.x
-    markdown, image_types = _run_magic_pdf_v06(pdf_bytes, img_dir)
-    return markdown, image_types, img_dir
+    markdown, image_types, middle_json = _run_magic_pdf_v06(pdf_bytes, img_dir)
+    return markdown, image_types, img_dir, middle_json
 
 
 def _collect_images(img_dir: Path, image_types: dict) -> dict:
@@ -145,7 +162,7 @@ async def extract(file: UploadFile = File(...)):
     doc_hash = hashlib.sha256(pdf_bytes).hexdigest()
 
     try:
-        markdown, image_types, img_dir = _run_magic_pdf(pdf_bytes, doc_hash)
+        markdown, image_types, img_dir, middle_json = _run_magic_pdf(pdf_bytes, doc_hash)
         images = _collect_images(img_dir, image_types)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -155,7 +172,7 @@ async def extract(file: UploadFile = File(...)):
 
     markdown = _sanitize_surrogates(markdown, doc_hash)
 
-    return JSONResponse({"markdown": markdown, "images": images})
+    return JSONResponse({"markdown": markdown, "images": images, "middle_json": middle_json})
 
 
 @app.get("/health")
