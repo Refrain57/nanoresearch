@@ -72,6 +72,8 @@ async def check_schema_migrations() -> None:
         ("kg_entity_mentions", "id"),
         ("kg_triples", "id"),
         ("kg_triple_mentions", "id"),
+        # KG entity article cache (migrate_add_kg_entity_articles.py)
+        ("kg_entity_articles", "id"),
         # Agent evaluation tables
         ("agent_run_snapshots", "id"),
         ("agent_test_cases", "id"),
