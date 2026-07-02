@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from nanoresearch.agent.memory import MemoryStore
+from nanoresearch.agent.memory_facts import select_recent_window
 from nanoresearch.agent.skills import SkillsLoader
 from nanoresearch.utils.helpers import build_assistant_message, detect_image_mime
 
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 # Token budget constants
 DEFAULT_TOTAL_BUDGET = 3000  # Total budget for memory + knowledge
 MEMORY_BUDGET_RATIO = 0.6   # Memory gets 60% (user context is highest priority)
+CONV_SUMMARY_BUDGET_RATIO = 0.5  # fraction of the knowledge budget for conversation summaries
+CONV_SUMMARY_RECENT_RATIO = 0.6  # near-window ceiling within the conv-summary budget (C3)
 KNOWLEDGE_BUDGET_RATIO = 0.4  # Knowledge gets 40% (remaining budget)
 CHARS_PER_TOKEN = 4  # Approximate ratio for estimation
 
@@ -123,6 +126,7 @@ class ContextBuilder:
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
         kb_bindings: list[dict] | None = None,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> str:
         """Build the system prompt (single string, no cache blocks)."""
@@ -134,6 +138,7 @@ class ContextBuilder:
             total_token_budget=total_token_budget,
             agent_id=agent_id,
             memory_budget_ratio=memory_budget_ratio,
+            conversation_id=conversation_id,
             _trace_out=_trace_out,
         )
         if _trace_out is not None:
@@ -157,6 +162,7 @@ class ContextBuilder:
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
         kb_bindings: list[dict] | None = None,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Return system prompt as 3 blocks with cache_control markers.
@@ -189,6 +195,7 @@ class ContextBuilder:
             total_token_budget=total_token_budget,
             agent_id=agent_id,
             memory_budget_ratio=memory_budget_ratio,
+            conversation_id=conversation_id,
             _trace_out=_trace_out,
         )
         if dynamic:
@@ -319,11 +326,12 @@ Skills with available="false" need dependencies installed first - you can try in
         total_token_budget: int = DEFAULT_TOTAL_BUDGET,
         agent_id: str | None = None,
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> str:
         """Build the dynamic suffix (may change per request, non-cacheable).
 
-        Order: memory → history → always-on skills
+        Order: memory → conversation_summary → history → always-on skills
         """
         memory_budget = int(total_token_budget * memory_budget_ratio)
         knowledge_budget = int(total_token_budget * (1.0 - memory_budget_ratio))
@@ -342,10 +350,48 @@ Skills with available="false" need dependencies installed first - you can try in
                 _injected_memory_chars = len(memory)  # int — chars of content after truncation (no full text stored)
                 parts.append(f"<memory>\n{memory}\n</memory>")
 
-        # 2. 对话历史 (按需召回，按 uid 隔离)
+        # Split the knowledge budget: conversation summaries (this conv) + cross-conv history.
+        conv_budget = (int(knowledge_budget * CONV_SUMMARY_BUDGET_RATIO)
+                       if (conversation_id and self.knowledge_search) else 0)
+        history_budget = knowledge_budget - conv_budget
+
+        # 2. 会话摘要 (滑动窗口: 近端确定性接回 + 远端本对话语义召回, C3)
+        if conv_budget and topic:
+            try:
+                recent_cap = int(conv_budget * CONV_SUMMARY_RECENT_RATIO)
+                all_sums = self.knowledge_search.list_conv_summaries_sync(self._uid, conversation_id)
+                _est = lambda s: max(1, len(s.get("metadata", {}).get("text", "")) // 4)
+                near, _far_rest = select_recent_window(
+                    all_sums, cap_tokens=recent_cap, est_fn=_est, min_segments=1)
+                near_ids = [s.get("id") for s in near if s.get("id")]
+                far = self.knowledge_search.search_conv_summaries_sync(
+                    topic, uid=self._uid, conversation_id=conversation_id,
+                    exclude_ids=near_ids, top_k=5,
+                )
+                _seen = set(near_ids)
+                cs_lines: list[str] = []
+                for s in near:  # deterministic, turn-ascending
+                    t = s.get("metadata", {}).get("text", "")
+                    if t:
+                        cs_lines.append(f"- {t}")
+                for s in far:
+                    if s.get("id") in _seen:
+                        continue
+                    t = s.get("metadata", {}).get("text", "")
+                    if t:
+                        cs_lines.append(f"- {t}")
+                if cs_lines:
+                    cs_block = self._truncate_to_budget(
+                        "## 本对话早期摘要\n" + "\n".join(cs_lines), conv_budget)
+                    if cs_block:
+                        parts.append(f"<conversation_summary>\n{cs_block}\n</conversation_summary>")
+            except Exception as e:
+                logger.warning("conv_summary injection failed (non-fatal): {}", e)
+
+        # 3. 对话历史 (按需召回，按 uid 隔离)
         if topic:
             history_context = self.build_history_context(
-                topic, token_budget=knowledge_budget, uid=self._uid,
+                topic, token_budget=history_budget, uid=self._uid,
                 _ids_out=_fragment_ids,
             )
             if history_context:
@@ -532,16 +578,20 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
         agents_registry: list[dict] | None = None,
         kb_bindings: list[dict] | None = None,
+        conversation_id: str | None = None,
         _trace_out: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         user_content = self._build_user_content(current_message, media)
 
+        # Key conversation summaries by the same id the write path uses (session.key chat_id).
+        _conv_id = conversation_id or chat_id
         if use_cache_blocks:
             system_content: str | list[dict[str, Any]] = self.build_system_prompt_blocks(
                 skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
                 agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
                 agents_registry=agents_registry, kb_bindings=kb_bindings,
+                conversation_id=_conv_id,
                 _trace_out=_trace_out,
             )
         else:
@@ -549,6 +599,7 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
                 skill_names, topic=topic, tool_names=tool_names, total_token_budget=total_token_budget,
                 agent_id=agent_id, custom_persona=custom_persona, memory_budget_ratio=memory_budget_ratio,
                 agents_registry=agents_registry, kb_bindings=kb_bindings,
+                conversation_id=_conv_id,
                 _trace_out=_trace_out,
             )
 
