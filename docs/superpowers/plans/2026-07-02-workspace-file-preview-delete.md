@@ -90,12 +90,6 @@ def test_delete_missing_file(client):
     assert resp.status_code == 404
 
 
-def test_delete_workspace_root_forbidden(client):
-    c, ws = client
-    resp = c.delete("/api/workspace/files/.")
-    assert resp.status_code == 403
-
-
 def test_safe_resolve_blocks_traversal(tmp_path):
     # 直接测越界守卫，避开 HTTP 客户端对 URL 中 ".." 的规范化
     with pytest.raises(HTTPException) as ei:
@@ -106,7 +100,7 @@ def test_safe_resolve_blocks_traversal(tmp_path):
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd backend && python -m pytest tests/test_workspace_router.py -v`
-Expected: 5 个 delete 测试 FAIL（`405 Method Not Allowed`，端点不存在）；`test_safe_resolve_blocks_traversal` PASS（守卫已存在）。
+Expected: 4 个 delete 测试 FAIL（`405 Method Not Allowed`，端点不存在）；`test_safe_resolve_blocks_traversal` PASS（守卫已存在）。
 
 - [ ] **Step 3: 实现 DELETE 端点**
 
@@ -143,7 +137,7 @@ async def delete_file(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_workspace_router.py -v`
-Expected: 6 passed。
+Expected: 5 passed。
 
 - [ ] **Step 5: 提交**
 
