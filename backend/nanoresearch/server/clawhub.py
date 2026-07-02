@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import httpx
@@ -53,6 +54,8 @@ async def search(q: str, limit: int = 20) -> list[dict]:
             "version": it.get("version"),
             "owner": it.get("ownerHandle") or (it.get("owner") or {}).get("handle"),
             "score": it.get("score"),
+            "downloads": it.get("downloads") or 0,
+            "updated_at": it.get("updatedAt"),
         })
     return out
 
@@ -97,6 +100,11 @@ async def get_readme(slug: str) -> str:
 
 async def _run_cli(*args: str) -> None:
     argv = ["npx", "--yes", "clawhub@latest", *args]
+    # On Windows `npx` is a .cmd shim; create_subprocess_exec uses CreateProcess,
+    # which does no PATHEXT resolution and can't launch a .cmd directly, so route
+    # through cmd.exe. (slug is already validated, no shell-injection surface.)
+    if sys.platform == "win32":
+        argv = ["cmd", "/c", *argv]
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

@@ -144,6 +144,18 @@ def test_market_skill_rejects_invalid_slug(app, auth_headers, monkeypatch):
     assert resp.status_code == 400
 
 
+def test_slug_re_accepts_bare_and_scoped():
+    """Real clawhub slugs are single-segment ('toby-pptx'); scoped '@owner/name' also valid.
+
+    Regression: the original regex required a '/', so every bare slug 400'd.
+    """
+    from nanoresearch.server.routers.skill_market_router import SLUG_RE
+    for good in ["pdf", "toby-pptx", "slidepro", "paper-anonymizer-pdf", "@bob/s"]:
+        assert SLUG_RE.match(good), f"should accept {good!r}"
+    for bad in ["--evil", "../x", "a/../b", "", "a/b/c"]:
+        assert not SLUG_RE.match(bad), f"should reject {bad!r}"
+
+
 def test_delete_removes_workspace_skill(app, auth_headers, tmp_path):
     d = tmp_path / "users" / "testadmin" / "skills" / "foo"
     d.mkdir(parents=True)
