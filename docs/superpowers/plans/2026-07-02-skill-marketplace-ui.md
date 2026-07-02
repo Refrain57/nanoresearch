@@ -154,23 +154,10 @@ Create `backend/tests/test_skills_api.py`:
 """Integration tests for GET /api/skills per-user pool scan."""
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from fastapi.testclient import TestClient
 
-from nanoresearch.auth.password import hash_password
-from tests.conftest import make_factory, truncate_all
-
-
-def run(coro):
-    loop = asyncio.SelectorEventLoop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+from tests.conftest import make_factory
 
 
 class FakeAgentLoop:
@@ -179,13 +166,11 @@ class FakeAgentLoop:
         await on_stream("ok")
 
 
-@pytest.fixture(autouse=True)
-def clean_tables():
-    truncate_all()
-
-
 @pytest.fixture
 def app(monkeypatch, tmp_path):
+    # Auth is pure-JWT (no DB lookup) and these endpoints touch neither DB nor
+    # Redis, so we skip DB seeding / truncate and the manual run() event loop —
+    # that pattern triggers pre-existing "bound to a different event loop" flakes.
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
     from nanoresearch.server.main import create_app
     app = create_app(channel_loop=FakeAgentLoop(), session_factory=make_factory())
@@ -194,15 +179,7 @@ def app(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def seeded_user():
-    async def _():
-        from nanoresearch.storage.repositories.user_repo import UserRepository
-        return await UserRepository(make_factory()).create("testadmin", hash_password("secret123"))
-    return run(_())
-
-
-@pytest.fixture
-def auth_headers(seeded_user, monkeypatch):
+def auth_headers(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
     from nanoresearch.auth.jwt import create_token
     return {"Authorization": f"Bearer {create_token('testadmin')}"}
@@ -587,25 +564,13 @@ Create `backend/tests/test_skill_market_api.py`:
 """Integration tests for the skill market router (ClawHub mocked)."""
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from nanoresearch.auth.password import hash_password
 from nanoresearch.server import clawhub
-from tests.conftest import make_factory, truncate_all
-
-
-def run(coro):
-    loop = asyncio.SelectorEventLoop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+from tests.conftest import make_factory
 
 
 class FakeAgentLoop:
@@ -614,13 +579,11 @@ class FakeAgentLoop:
         await on_stream("ok")
 
 
-@pytest.fixture(autouse=True)
-def clean_tables():
-    truncate_all()
-
-
 @pytest.fixture
 def app(monkeypatch, tmp_path):
+    # Auth is pure-JWT (no DB lookup) and these endpoints touch neither DB nor
+    # Redis, so we skip DB seeding / truncate and the manual run() event loop —
+    # that pattern triggers pre-existing "bound to a different event loop" flakes.
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
     from nanoresearch.server.main import create_app
     app = create_app(channel_loop=FakeAgentLoop(), session_factory=make_factory())
@@ -629,15 +592,7 @@ def app(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def seeded_user():
-    async def _():
-        from nanoresearch.storage.repositories.user_repo import UserRepository
-        return await UserRepository(make_factory()).create("testadmin", hash_password("secret123"))
-    return run(_())
-
-
-@pytest.fixture
-def auth_headers(seeded_user, monkeypatch):
+def auth_headers(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "testsecret" * 6)
     from nanoresearch.auth.jwt import create_token
     return {"Authorization": f"Bearer {create_token('testadmin')}"}
