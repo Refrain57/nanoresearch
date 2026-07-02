@@ -1,5 +1,6 @@
 <template>
-  <div class="message-list" ref="listRef">
+  <div class="message-list" ref="listRef" @scroll="onScroll">
+    <div v-if="loadingOlder" class="loading-older">加载更早消息…</div>
     <div v-for="msg in messages" :key="msg.id" :class="['message-wrap', msg.role]">
       <!-- skip raw tool result messages — they're shown inside the tool-calls panel -->
       <template v-if="msg.role !== 'tool'">
@@ -72,9 +73,28 @@ const props = defineProps({
   toolHint: { type: String, default: '' },
   agentName: { type: String, default: 'Agent' },
   userName: { type: String, default: 'U' },
+  hasMore: { type: Boolean, default: false },
+  loadingOlder: { type: Boolean, default: false },
 })
 
+const emit = defineEmits(['load-older'])
+
 const listRef = ref(null)
+
+const _prevScrollHeight = ref(0)
+const _prevScrollTop = ref(0)
+const _prepending = ref(false)
+
+function onScroll() {
+  const el = listRef.value
+  if (!el) return
+  if (el.scrollTop < 80 && props.hasMore && !props.loadingOlder) {
+    _prevScrollHeight.value = el.scrollHeight
+    _prevScrollTop.value = el.scrollTop
+    _prepending.value = true
+    emit('load-older')
+  }
+}
 
 const agentInitial = computed(() => (props.agentName || 'A')[0].toUpperCase())
 const userInitial  = computed(() => (props.userName  || 'U')[0].toUpperCase())
@@ -95,7 +115,15 @@ function msgText(msg) {
 
 watch(() => [props.messages.length, props.streamingText], async () => {
   await nextTick()
-  if (listRef.value) listRef.value.scrollTop = listRef.value.scrollHeight
+  const el = listRef.value
+  if (!el) return
+  if (_prepending.value) {
+    // prepend 了更早消息：保持视口锚定在原先可见的消息
+    el.scrollTop = _prevScrollTop.value + (el.scrollHeight - _prevScrollHeight.value)
+    _prepending.value = false
+  } else {
+    el.scrollTop = el.scrollHeight
+  }
 })
 </script>
 
@@ -164,4 +192,5 @@ watch(() => [props.messages.length, props.streamingText], async () => {
 .md-body :deep(a:hover) { text-decoration: underline; }
 .md-body :deep(hr) { border: none; border-top: 1px solid var(--nr-border); margin: 10px 0; }
 .message.assistant .md-body :deep(code) { background: rgba(0,0,0,0.06); }
+.loading-older { text-align: center; color: var(--nr-ink-3); font-size: 12px; padding: 4px 0; }
 </style>
