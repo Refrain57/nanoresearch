@@ -136,3 +136,26 @@ def seeded_tool_registry():
     reg = ToolRegistry()
     reg.register(_WeatherTool())
     return reg
+
+
+@pytest.fixture
+def eval_repo():
+    """AgentEvalRepository against the real test DB (nanoresearch_test).
+
+    Idempotently seeds the test user (agent_run_snapshots.uid is a NOT-NULL FK to users.uid).
+    """
+    from tests.conftest import make_factory, pg_conn
+    from nanoresearch.storage.repositories.agent_eval_repo import AgentEvalRepository
+
+    # agent_run_snapshots.uid is a NOT-NULL FK to users.uid — seed the test user (idempotent)
+    conn = pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (uid, password_hash, role, created_at, updated_at) "
+                "VALUES ('u1', 'x', 'admin', now(), now()) "
+                "ON CONFLICT (uid) DO NOTHING"
+            )
+    finally:
+        conn.close()
+    return AgentEvalRepository(make_factory())

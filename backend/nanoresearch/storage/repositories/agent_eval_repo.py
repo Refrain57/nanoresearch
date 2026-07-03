@@ -62,6 +62,10 @@ class AgentEvalRepository:
         system_prompt_version: str | None = None,
         eval_run_id: uuid.UUID | None = None,
         tool_recordings: str | None = None,
+        origin: str = "live",
+        parent_snapshot_id: uuid.UUID | None = None,
+        root_snapshot_id: uuid.UUID | None = None,
+        replay_config: dict | None = None,
     ) -> uuid.UUID:
         snap = AgentRunSnapshot(
             run_id=data.run_id,
@@ -85,6 +89,10 @@ class AgentEvalRepository:
             final_response=data.final_response,
             tool_recordings=json.loads(tool_recordings) if tool_recordings else None,
             context_trace=data.context_trace,
+            origin=origin,
+            parent_snapshot_id=parent_snapshot_id,
+            root_snapshot_id=root_snapshot_id,
+            replay_config=replay_config,
         )
         async with self._factory() as session:
             session.add(snap)
@@ -95,6 +103,22 @@ class AgentEvalRepository:
         async with self._factory() as session:
             snap = await session.get(AgentRunSnapshot, snapshot_id)
             return _migrate_snapshot_scores(snap) if snap else None
+
+    async def list_replays_for_root(self, root_snapshot_id: uuid.UUID) -> list[AgentRunSnapshot]:
+        """All replay snapshots hanging off a root live snapshot, oldest first.
+
+        Mirrors Langfuse's "same dataset item across runs" query (dataset_run_items
+        by datasetItemId); here the pointer is inlined on the row via root_snapshot_id.
+        """
+        async with self._factory() as session:
+            rows = (
+                await session.execute(
+                    select(AgentRunSnapshot)
+                    .where(AgentRunSnapshot.root_snapshot_id == root_snapshot_id)
+                    .order_by(AgentRunSnapshot.timestamp)
+                )
+            ).scalars().all()
+            return list(rows)
 
     async def list_snapshots(
         self,
