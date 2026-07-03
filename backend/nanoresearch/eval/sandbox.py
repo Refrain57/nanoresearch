@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 _MAX_RESULT_CHARS = 10000
 _MAX_ENTRIES = 200
+_REPLAY_MISS_PLACEHOLDER = "[replay:no-recording]"
 
 
 def _normalize_params(params: Any) -> Any:
@@ -70,7 +71,7 @@ class SandboxedToolRegistry:
     def __init__(
         self,
         registry: "ToolRegistry",
-        mode: Literal["passthrough", "record", "replay", "side_effect_only"],
+        mode: Literal["passthrough", "record", "replay", "side_effect_only", "replay_lenient"],
         recorded: dict[str, Any] | None = None,
         description_overrides: dict[str, str] | None = None,
     ) -> None:
@@ -82,6 +83,7 @@ class SandboxedToolRegistry:
         self._audit_log: list[dict[str, Any]] = []
         self._total_executions = 0
         self._fuzzy_hits = 0
+        self._misses: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # ToolRegistry interface — forward non-execution calls directly
@@ -118,6 +120,9 @@ class SandboxedToolRegistry:
             # through to fuzzy matching (the normalization is the fuzzy match's job).
             key = json.dumps({"tool": name, "params": params}, separators=(",", ":"))
             return await self._execute_side_effect_only(name, params, key)
+
+        if self._mode == "replay_lenient":
+            return await self._execute_replay_lenient(name, params)
 
         key = f"{name}:{json.dumps(_normalize_params(params), ensure_ascii=False)}"
 
@@ -204,6 +209,34 @@ class SandboxedToolRegistry:
         )
         return await self._registry.execute(name, params)
 
+    async def _execute_replay_lenient(self, name: str, params: dict) -> Any:
+        """Replay that never crashes and never calls live tools.
+
+        exact hit → recorded; fuzzy hit → recorded; miss → placeholder + record.
+        The divergence itself is localized downstream by eval.compare over the
+        resulting tool_call_chain; the sandbox only keeps the run alive.
+        """
+        key = f"{name}:{json.dumps(_normalize_params(params), ensure_ascii=False)}"
+        if key in self._recorded:
+            return self._recorded[key]
+
+        fuzzy_key = _normalize_params_for_fuzzy(name, params)
+        for rec_key, rec_value in self._recorded.items():
+            # recorded keys are "<name>:<json>"; rebuild a fuzzy key to compare
+            r_name, _, r_json = rec_key.partition(":")
+            if r_name != name:
+                continue
+            try:
+                r_params = json.loads(r_json)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if _normalize_params_for_fuzzy(r_name, r_params) == fuzzy_key:
+                self._fuzzy_hits += 1
+                return rec_value
+
+        self._misses.append({"name": name, "params": params})
+        return _REPLAY_MISS_PLACEHOLDER
+
     # ------------------------------------------------------------------
     # Recording access
     # ------------------------------------------------------------------
@@ -217,6 +250,11 @@ class SandboxedToolRegistry:
     def audit_log(self) -> list[dict[str, Any]]:
         """Intercepted side-effect calls in side_effect_only mode (read-only copy)."""
         return list(self._audit_log)
+
+    @property
+    def misses(self) -> list[dict[str, Any]]:
+        """Tool calls with no recording in replay_lenient mode (read-only copy)."""
+        return list(self._misses)
 
     @property
     def fuzzy_match_ratio(self) -> float:
@@ -238,15 +276,20 @@ class SandboxedToolRegistry:
         cls,
         registry: "ToolRegistry",
         recordings_json: str,
+        *,
+        lenient: bool = False,
     ) -> "SandboxedToolRegistry":
-        """Reconstruct a replay-mode sandbox from a stored JSON string."""
+        """Reconstruct a replay-mode sandbox from a stored JSON string.
+
+        lenient=True → replay_lenient mode: misses degrade to a placeholder
+        instead of raising SandboxReplayError.
+        """
         try:
             recorded = json.loads(recordings_json)
         except json.JSONDecodeError as e:
-            raise SandboxReplayError(
-                f"Invalid recording JSON: {e}"
-            ) from e
-        return cls(registry=registry, mode="replay", recorded=recorded)
+            raise SandboxReplayError(f"Invalid recording JSON: {e}") from e
+        mode = "replay_lenient" if lenient else "replay"
+        return cls(registry=registry, mode=mode, recorded=recorded)
 
     # ------------------------------------------------------------------
     # Internal helpers
