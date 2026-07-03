@@ -9,7 +9,7 @@ trajectory/utils.py:137-171.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Callable
 
 
 # --- tool-args matchers -------------------------------------------------------
@@ -60,3 +60,64 @@ def get_args_matcher(
         return base(_strip(a), _strip(b))
 
     return matcher
+
+
+# --- LCS alignment ---------------------------------------------------------------
+
+
+def _extract_names(chain: list[dict]) -> list[str]:
+    return [str(c.get("name", "")) for c in chain]
+
+
+def _lcs_ops(a: list[str], b: list[str]) -> list[tuple[int | None, int | None]]:
+    """LCS backbone over tool NAMES → ordered list of alignment ops.
+
+    Each op is (i, j): (i,j)=aligned pair, (i,None)=baseline-only, (None,j)=candidate-only.
+    LCS aligns on name so an inserted/removed call does not cascade-misalign the tail.
+    """
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            dp[i][j] = dp[i + 1][j + 1] + 1 if a[i] == b[j] else max(dp[i + 1][j], dp[i][j + 1])
+    ops: list[tuple[int | None, int | None]] = []
+    i = j = 0
+    while i < n and j < m:
+        if a[i] == b[j]:
+            ops.append((i, j)); i += 1; j += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            ops.append((i, None)); i += 1
+        else:
+            ops.append((None, j)); j += 1
+    while i < n:
+        ops.append((i, None)); i += 1
+    while j < m:
+        ops.append((None, j)); j += 1
+    return ops
+
+
+def align_steps(
+    baseline_chain: list[dict],
+    candidate_chain: list[dict],
+    matcher: Callable[[dict, dict], bool],
+) -> tuple[list[dict], int | None]:
+    """One LCS pass → per-step status list + index of first non-match (or None)."""
+    a_names, b_names = _extract_names(baseline_chain), _extract_names(candidate_chain)
+    steps: list[dict] = []
+    first_divergence: int | None = None
+    for i, j in _lcs_ops(a_names, b_names):
+        if i is not None and j is not None:
+            b_entry, c_entry = baseline_chain[i], candidate_chain[j]
+            same = matcher(b_entry.get("params") or {}, c_entry.get("params") or {})
+            status = "match" if same else "param_diff"
+            step = {"status": status, "name": a_names[i], "baseline": b_entry, "candidate": c_entry}
+        elif i is not None:
+            status = "removed"
+            step = {"status": status, "name": a_names[i], "baseline": baseline_chain[i], "candidate": None}
+        else:
+            status = "added"
+            step = {"status": status, "name": b_names[j], "baseline": None, "candidate": candidate_chain[j]}
+        if status != "match" and first_divergence is None:
+            first_divergence = len(steps)
+        steps.append(step)
+    return steps, first_divergence
