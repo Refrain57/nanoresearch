@@ -646,6 +646,7 @@ async def replay_snapshot(
     from nanoresearch.agent.runner import AgentRunner, AgentRunSpec
     from nanoresearch.eval.sandbox import SandboxedToolRegistry
     from nanoresearch.eval.snapshot import RunSnapshotCollector
+    from nanoresearch.eval.compare import compare_runs
 
     state = request.app.state
     channel_loop = getattr(state, "channel_loop", None)
@@ -655,6 +656,7 @@ async def replay_snapshot(
     sandboxed = SandboxedToolRegistry.from_recordings_json(
         channel_loop.tools,
         _json.dumps(snap.tool_recordings),
+        lenient=True,
     )
     collector = RunSnapshotCollector()
     initial_messages: list[dict] = [{"role": "user", "content": snap.user_input}]
@@ -681,13 +683,25 @@ async def replay_snapshot(
         final_response=result.final_content,
         status=status,
     )
+    baseline = {"tool_call_chain": snap.tool_call_chain, "final_response": snap.final_response}
+    candidate = {"tool_call_chain": replay_data.tool_call_chain, "final_response": replay_data.final_response}
+    comparison = compare_runs(baseline, candidate)
+
+    replay_snapshot_id = await repo.save_snapshot(
+        replay_data,
+        uid=uid,
+        origin="replay",
+        parent_snapshot_id=snapshot_id,
+        root_snapshot_id=(snap.root_snapshot_id or snapshot_id),
+        replay_config={"sandbox": "lenient", "misses": sandboxed.misses},
+    )
+
     return {
         "original_snapshot_id": str(snapshot_id),
+        "replay_snapshot_id": str(replay_snapshot_id),
         "replay_run_id": replay_data.run_id,
         "final_response": replay_data.final_response,
         "tool_call_chain": replay_data.tool_call_chain,
-        # llm_calls + timing let the frontend render the replay on the same
-        # interleaved timeline as the original snapshot.
         "llm_calls": replay_data.llm_calls,
         "total_input_tokens": replay_data.total_input_tokens,
         "total_output_tokens": replay_data.total_output_tokens,
@@ -696,6 +710,7 @@ async def replay_snapshot(
         "tool_call_count": replay_data.tool_call_count,
         "llm_call_count": replay_data.llm_call_count,
         "run_status": replay_data.run_status,
+        "compare": comparison,
     }
 
 
