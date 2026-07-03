@@ -4,7 +4,7 @@ One LCS alignment produces a canonical diff; the four verdicts
 (strict/unordered/subset/superset) are functions over that same data.
 
 Tool-args matchers are adapted from agentevals (MIT, commit 4b68015)
-trajectory/utils.py:137-212.
+trajectory/utils.py:137-171.
 """
 
 from __future__ import annotations
@@ -33,15 +33,6 @@ def _ignore(a: dict, b: dict) -> bool:
     return True
 
 
-def _get_nested(d: dict, path: str) -> Any:
-    cur: Any = d
-    for part in path.split("."):
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(part)
-    return cur
-
-
 def get_args_matcher(
     mode: str = "exact",
     ignore_fields: list[str] | None = None,
@@ -49,7 +40,7 @@ def get_args_matcher(
     """Return a two-arg predicate comparing tool-call param dicts.
 
     mode: exact | ignore | subset | superset.
-    ignore_fields: when given, compare all keys EXCEPT these (dot-path), under
+    ignore_fields: when given, compare all keys EXCEPT these (top-level), under
     the chosen mode's equality — implemented by stripping the fields first.
     """
     base = {"exact": _exact, "subset": _subset, "superset": _superset, "ignore": _ignore}.get(mode)

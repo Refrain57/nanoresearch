@@ -18,6 +18,7 @@ def test_subset_superset():
     assert not get_args_matcher("subset")({"q": "a", "k": 1}, {"q": "a"})
     # superset: baseline args are a superset of candidate args
     assert get_args_matcher("superset")({"q": "a", "k": 1}, {"q": "a"})
+    assert not get_args_matcher("superset")({"q": "a"}, {"q": "a", "k": 1})
 
 
 def test_ignore_fields():
