@@ -9,6 +9,7 @@ trajectory/utils.py:137-171.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Callable
 
 
@@ -121,3 +122,62 @@ def align_steps(
             first_divergence = len(steps)
         steps.append(step)
     return steps, first_divergence
+
+
+# --- verdicts ---------------------------------------------------------------
+
+
+def _multiset_contains(a: list[dict], b: list[dict], matcher: Callable[[dict, dict], bool]) -> bool:
+    """True if every call in b has an unused name+args match in a (greedy).
+
+    Adapted from agentevals (MIT, commit 4b68015) _is_trajectory_superset.
+    """
+    used: set[int] = set()
+    for bc in b:
+        found = False
+        for idx, ac in enumerate(a):
+            if idx in used or ac.get("name") != bc.get("name"):
+                continue
+            if matcher(ac.get("params") or {}, bc.get("params") or {}):
+                used.add(idx); found = True; break
+        if not found:
+            return False
+    return True
+
+
+def compare_runs(
+    baseline: dict,
+    candidate: dict,
+    *,
+    args_match_mode: str = "exact",
+    ignore_fields: list[str] | None = None,
+) -> dict:
+    """Symmetric compare of two runs. One alignment; four verdicts read the same data."""
+    matcher = get_args_matcher(args_match_mode, ignore_fields)
+    b_chain = list(baseline.get("tool_call_chain") or [])
+    c_chain = list(candidate.get("tool_call_chain") or [])
+
+    steps, first_divergence = align_steps(b_chain, c_chain, matcher)
+
+    # verdicts — computed together off the same two chains / the same steps
+    strict = all(s["status"] == "match" for s in steps)
+    superset = _multiset_contains(c_chain, b_chain, matcher)   # candidate ⊇ baseline
+    subset = _multiset_contains(b_chain, c_chain, matcher)     # candidate ⊆ baseline
+    unordered = superset and subset
+
+    # post-divergence degrade: ignore order, compare remaining tool-name multisets
+    if first_divergence is None:
+        degraded = True
+    else:
+        tail = steps[first_divergence:]
+        b_names = Counter(s["name"] for s in tail if s["baseline"] is not None)
+        c_names = Counter(s["name"] for s in tail if s["candidate"] is not None)
+        degraded = b_names == c_names
+
+    return {
+        "steps": steps,
+        "first_divergence": first_divergence,
+        "verdicts": {"strict": strict, "unordered": unordered, "subset": subset, "superset": superset},
+        "degraded_tool_set_match": degraded,
+        "final_response_equal": (baseline.get("final_response") == candidate.get("final_response")),
+    }
