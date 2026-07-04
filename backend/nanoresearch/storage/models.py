@@ -377,6 +377,15 @@ class AgentRunSnapshot(Base):
     classification_layer: Mapped[str | None] = mapped_column(String, nullable=True)
     classification_target_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     classification_target_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Replay lineage (route B counterfactual replay) — a replay is another snapshot row
+    origin: Mapped[str] = mapped_column(String, default="live", nullable=False)  # live | replay
+    parent_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    root_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_run_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    replay_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class AgentTestCase(Base):

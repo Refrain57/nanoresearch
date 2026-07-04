@@ -109,6 +109,9 @@ async def check_schema_migrations() -> None:
         # Cron production redesign (migrate_cron_jobs.py)
         ("cron_jobs", "id"),
         ("cron_jobs", "next_run_at"),
+        # Replay lineage (migrate_replay_lineage.py)
+        ("agent_run_snapshots", "origin"),
+        ("agent_run_snapshots", "root_snapshot_id"),
     ]
     missing = []
     async with _engine.connect() as conn:
